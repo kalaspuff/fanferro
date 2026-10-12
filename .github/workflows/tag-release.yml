@@ -1,0 +1,33 @@
+name: Tag release
+
+# After a release PR ("chore(release): vX.Y.Z", see prepare-release.yml) is merged into main:
+# tag the merged commit and start the release workflow for the tag.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  tag:
+    # Squash merges use the PR title; merge commits contain it in the message body.
+    if: "contains(github.event.head_commit.message, 'chore(release): v')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Create the tag and dispatch the release workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['package']['version'])")
+          tag="v$version"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
+            echo "::error::tag $tag already exists - bump the version in a new release PR"; exit 1
+          fi
+          git tag "$tag" "$GITHUB_SHA"
+          git push origin "$tag"
+          # Tags pushed with the workflow token do not trigger workflows; a dispatch does.
+          gh workflow run release.yml --ref "$tag" -f tag="$tag"
+          echo "Tagged $tag and started the release workflow." >> "$GITHUB_STEP_SUMMARY"

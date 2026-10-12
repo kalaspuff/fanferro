@@ -1,0 +1,54 @@
+[package]
+name = "fanferro-core"
+description = "Rust core of fanferro: SNS/SQS messaging with envelopes, claim checks, provisioning and a robust consumer engine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+aws-config.workspace = true
+aws-sdk-sqs.workspace = true
+aws-sdk-sns.workspace = true
+aws-sdk-s3.workspace = true
+aws-sdk-sts.workspace = true
+aws-smithy-types.workspace = true
+aws-smithy-runtime-api.workspace = true
+aws-credential-types.workspace = true
+aws-types.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+bytes.workspace = true
+futures.workspace = true
+hex.workspace = true
+md-5.workspace = true
+parking_lot.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+uuid.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "allow"

@@ -1,0 +1,29 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.pyrefly_cache/
+.coverage
+coverage.xml
+htmlcov/
+dist/
+build/
+wheelhouse/
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Local emulator state
+.ministack/

@@ -1,0 +1,344 @@
+//! `ConsumerEngine` and `Delivery` bindings.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use fanferro_core::consumer::{ConsumerEngine, Delivery};
+use pyo3::IntoPyObjectExt;
+use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList};
+
+use crate::client::pointer_to_py;
+use crate::convert::{attributes_to_py, seconds, time_to_py};
+use crate::errors::{ShutdownError, to_py_err, to_py_err_with};
+use crate::runtime::{future_into_py, handle};
+use crate::types::wire_to_py;
+
+/// Receives messages from one queue.
+#[pyclass(name = "ConsumerEngine", module = "fanferro._core", frozen)]
+pub struct PyConsumerEngine {
+    engine: ConsumerEngine,
+    pid: u32,
+}
+
+impl PyConsumerEngine {
+    pub fn new(engine: ConsumerEngine, pid: u32) -> Self {
+        Self { engine, pid }
+    }
+
+    fn engine(&self) -> PyResult<ConsumerEngine> {
+        if std::process::id() != self.pid {
+            return Err(ShutdownError::new_err(
+                "this consumer was created before fork(); create a new one in the child process",
+            ));
+        }
+        Ok(self.engine.clone())
+    }
+}
+
+fn deliveries_to_py(py: Python<'_>, deliveries: Vec<Delivery>) -> PyResult<Py<PyAny>> {
+    let list = PyList::empty(py);
+    for delivery in deliveries {
+        list.append(Py::new(py, PyDelivery { inner: Arc::new(delivery) })?)?;
+    }
+    list.into_py_any(py)
+}
+
+#[pymethods]
+impl PyConsumerEngine {
+    /// Starts receiving.
+    fn start(&self) -> PyResult<()> {
+        let engine = self.engine()?;
+        let _guard = handle().enter();
+        engine.start().map_err(to_py_err)
+    }
+
+    /// Waits up to `timeout` seconds for deliveries; resolves to a list of `Delivery`.
+    #[pyo3(signature = (max, timeout=1.0))]
+    fn next_batch<'py>(&self, py: Python<'py>, max: usize, timeout: f64) -> PyResult<Bound<'py, PyAny>> {
+        let engine = self.engine()?;
+        let timeout = seconds(Some(timeout), "timeout")?.unwrap_or(Duration::from_secs(1));
+        future_into_py(py, async move {
+            let deliveries = engine.next_batch(max, timeout).await;
+            Python::attach(|py| deliveries_to_py(py, deliveries))
+        })
+    }
+
+    /// Returns buffered deliveries without waiting.
+    fn drain_buffered<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let engine = self.engine()?;
+        deliveries_to_py(py, engine.drain_buffered()).map(|list| list.into_bound(py))
+    }
+
+    /// Pauses receiving.
+    fn pause(&self) {
+        self.engine.pause();
+    }
+
+    /// Resumes receiving.
+    fn resume(&self) {
+        self.engine.resume();
+    }
+
+    /// Whether receiving is paused.
+    #[getter]
+    fn paused(&self) -> bool {
+        self.engine.is_paused()
+    }
+
+    /// `"created"`, `"running"`, `"stopping"` or `"stopped"`.
+    #[getter]
+    fn state(&self) -> &'static str {
+        self.engine.state().as_str()
+    }
+
+    /// The queue URL.
+    #[getter]
+    fn queue_url(&self) -> String {
+        self.engine.queue_url().to_string()
+    }
+
+    /// Stops receiving (awaitable). `abort=True` also aborts a long poll in flight.
+    #[pyo3(signature = (abort=false))]
+    fn stop_receiving<'py>(&self, py: Python<'py>, abort: bool) -> PyResult<Bound<'py, PyAny>> {
+        let engine = self.engine()?;
+        future_into_py(py, async move {
+            engine.stop_receiving(abort).await;
+            Ok(())
+        })
+    }
+
+    /// Closes the engine (awaitable); releases unsettled messages when requested.
+    fn close<'py>(&self, py: Python<'py>, release_unsettled: bool) -> PyResult<Bound<'py, PyAny>> {
+        let engine = self.engine()?;
+        future_into_py(py, async move {
+            engine.close(release_unsettled).await;
+            Ok(())
+        })
+    }
+
+    /// Statistics snapshot.
+    fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let stats = self.engine.stats();
+        let dict = PyDict::new(py);
+        dict.set_item("state", stats.state.as_str())?;
+        dict.set_item("paused", stats.paused)?;
+        dict.set_item("leases", stats.leases)?;
+        dict.set_item("available_permits", stats.available_permits)?;
+        dict.set_item("metrics", stats.metrics)?;
+        Ok(dict)
+    }
+}
+
+/// A received message and its lease.
+#[pyclass(name = "Delivery", module = "fanferro._core", frozen)]
+pub struct PyDelivery {
+    inner: Arc<Delivery>,
+}
+
+#[pymethods]
+impl PyDelivery {
+    /// SQS message id.
+    #[getter]
+    fn sqs_message_id(&self) -> &str {
+        &self.inner.message().message_id
+    }
+
+    /// Receipt handle of this receive.
+    #[getter]
+    fn receipt_handle(&self) -> &str {
+        &self.inner.message().receipt_handle
+    }
+
+    /// The SQS body exactly as received.
+    #[getter]
+    fn raw_body(&self) -> &str {
+        &self.inner.message().body
+    }
+
+    /// The SQS message attributes exactly as received.
+    #[getter]
+    fn raw_attributes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        attributes_to_py(py, &self.inner.message().attributes)
+    }
+
+    /// `ApproximateReceiveCount`.
+    #[getter]
+    fn receive_count(&self) -> u32 {
+        self.inner.message().system.approximate_receive_count
+    }
+
+    /// When the message was sent.
+    #[getter]
+    fn sent_at<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        self.inner.message().system.sent_timestamp.map(|t| time_to_py(py, t)).transpose()
+    }
+
+    /// When the message was first received.
+    #[getter]
+    fn first_received_at<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        self.inner.message().system.approximate_first_receive_timestamp.map(|t| time_to_py(py, t)).transpose()
+    }
+
+    /// When this delivery was received by the consumer.
+    #[getter]
+    fn received_at<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        time_to_py(py, self.inner.received_at)
+    }
+
+    /// FIFO message group id.
+    #[getter]
+    fn group_id(&self) -> Option<&str> {
+        self.inner.message().system.message_group_id.as_deref()
+    }
+
+    /// FIFO deduplication id.
+    #[getter]
+    fn deduplication_id(&self) -> Option<&str> {
+        self.inner.message().system.message_deduplication_id.as_deref()
+    }
+
+    /// FIFO sequence number.
+    #[getter]
+    fn sequence_number(&self) -> Option<&str> {
+        self.inner.message().system.sequence_number.as_deref()
+    }
+
+    /// Sender principal.
+    #[getter]
+    fn sender_id(&self) -> Option<&str> {
+        self.inner.message().system.sender_id.as_deref()
+    }
+
+    /// X-Ray trace header (`AWSTraceHeader`).
+    #[getter]
+    fn aws_trace_header(&self) -> Option<&str> {
+        self.inner.message().system.aws_trace_header.as_deref()
+    }
+
+    /// Source queue ARN when SQS moved the message to a dead-letter queue.
+    #[getter]
+    fn dead_letter_source_arn(&self) -> Option<&str> {
+        self.inner.message().system.dead_letter_queue_source_arn.as_deref()
+    }
+
+    /// SNS metadata when the message arrived as an SNS notification.
+    #[getter]
+    fn sns<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let Some(info) = &self.inner.sns else { return Ok(None) };
+        let dict = PyDict::new(py);
+        dict.set_item("message_id", &info.message_id)?;
+        dict.set_item("topic_arn", &info.topic_arn)?;
+        dict.set_item("subject", info.subject.clone())?;
+        dict.set_item("timestamp", info.timestamp.map(|t| time_to_py(py, t)).transpose()?)?;
+        dict.set_item("sequence_number", info.sequence_number.clone())?;
+        Ok(Some(dict))
+    }
+
+    /// The decoded wire message (`None` if decoding failed).
+    #[getter]
+    fn wire(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        match &self.inner.decoded {
+            Ok(decoded) => wire_to_py(py, decoded.wire.clone()).map(Some),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// The decoding error, if decoding failed.
+    #[getter]
+    fn decode_error(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        match &self.inner.decoded {
+            Ok(_) => None,
+            Err(error) => Some(to_py_err_with(py, error).into_value(py).into_any()),
+        }
+    }
+
+    /// The claim-check pointer when the payload was offloaded.
+    #[getter]
+    fn pointer<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        match &self.inner.decoded {
+            Ok(decoded) => decoded.pointer.as_ref().map(|pointer| pointer_to_py(py, pointer)).transpose(),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Lease state: buffered, active, settling, lost, expired or settled.
+    #[getter]
+    fn lease_status(&self) -> &'static str {
+        self.inner.lease.status().as_str()
+    }
+
+    /// Whether settlement has happened (or started).
+    #[getter]
+    fn settled(&self) -> bool {
+        self.inner.lease.is_settled()
+    }
+
+    /// Seconds until the message becomes visible to other consumers.
+    #[getter]
+    fn remaining_visibility(&self) -> f64 {
+        self.inner.lease.remaining_visibility().as_secs_f64()
+    }
+
+    /// Marks the message as being processed.
+    fn mark_active(&self) {
+        self.inner.lease.mark_active();
+    }
+
+    /// Deletes the message (awaitable).
+    fn ack<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        future_into_py(py, async move { inner.lease.ack().await.map_err(to_py_err) })
+    }
+
+    /// Makes the message visible again after `delay` seconds (awaitable).
+    fn nack<'py>(&self, py: Python<'py>, delay: f64) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let delay = seconds(Some(delay), "delay")?.unwrap_or_default();
+        future_into_py(py, async move { inner.lease.nack(delay).await.map_err(to_py_err) })
+    }
+
+    /// Makes the message visible again immediately (awaitable).
+    fn release<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        future_into_py(py, async move { inner.lease.release().await.map_err(to_py_err) })
+    }
+
+    /// Sets the visibility timeout to `timeout` seconds from now (awaitable).
+    fn extend<'py>(&self, py: Python<'py>, timeout: f64) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let timeout = seconds(Some(timeout), "timeout")?.unwrap_or_default();
+        future_into_py(py, async move { inner.lease.extend(timeout).await.map_err(to_py_err) })
+    }
+
+    /// Forwards the message to the dead-letter queue, then deletes it (awaitable).
+    #[pyo3(signature = (reason, details=None))]
+    fn dead_letter<'py>(
+        &self,
+        py: Python<'py>,
+        reason: String,
+        details: Option<BTreeMap<String, String>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let details = details.unwrap_or_default();
+        future_into_py(py, async move { inner.lease.dead_letter(&reason, &details).await.map_err(to_py_err) })
+    }
+
+    /// Re-enqueues a copy with `fanferro.attempt=attempt`, then deletes the original (awaitable).
+    #[pyo3(signature = (attempt, delay=None))]
+    fn requeue<'py>(&self, py: Python<'py>, attempt: u32, delay: Option<f64>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let delay = seconds(delay, "delay")?;
+        future_into_py(py, async move { inner.lease.requeue(delay, attempt).await.map_err(to_py_err) })
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Delivery(sqs_message_id={:?}, receive_count={}, lease_status={:?})",
+            self.inner.message().message_id,
+            self.inner.message().system.approximate_receive_count,
+            self.inner.lease.status().as_str()
+        )
+    }
+}

@@ -1,0 +1,242 @@
+from __future__ import annotations
+
+import datetime
+import json
+from decimal import Decimal
+
+import pytest
+
+import fanferro
+from fanferro.messages import attribute_python_value, to_attribute_value
+from fanferro.testing import RecordingSettler, build_message
+
+
+def test_attribute_conversions() -> None:
+    assert to_attribute_value("x") == fanferro.AttributeValue.string("x")
+    assert to_attribute_value(True) == fanferro.AttributeValue.string("true")
+    assert to_attribute_value(3) == fanferro.AttributeValue.number("3")
+    assert to_attribute_value(Decimal("1.5")) == fanferro.AttributeValue.number("1.5")
+    assert to_attribute_value(b"\x01") == fanferro.AttributeValue.binary(b"\x01")
+    with pytest.raises(TypeError):
+        to_attribute_value(object())  # type: ignore[arg-type]
+    assert attribute_python_value(fanferro.AttributeValue.number("7")) == 7
+    assert attribute_python_value(fanferro.AttributeValue.number("7.25")) == Decimal("7.25")
+    assert attribute_python_value(fanferro.AttributeValue("Number.float", "0.5")) == 0.5
+
+
+async def test_message_api_and_settlement() -> None:
+    settler = RecordingSettler()
+    message = build_message({"a": 1}, attributes={"tenant": "acme"}, headers={"x": 1}, settler=settler)
+    assert message.body == {"a": 1}
+    assert message.json() == {"a": 1}
+    assert message.attribute("tenant") == "acme"
+    assert message.attribute("missing", "default") == "default"
+    assert message.headers == {"x": 1}
+    assert message.receive_count == 1
+    assert message.attempt == 1
+    assert message.sqs_message_id is None
+    assert not message.settled
+    await message.retry(delay=5)
+    assert message.outcome == "retried"
+    assert settler.calls == [("retry", {"delay": 5, "error": None})]
+    with pytest.raises(RuntimeError, match="already settled"):
+        await message.ack()
+    with pytest.raises(RuntimeError):
+        await message.extend(10)
+
+
+def test_internal_attributes_are_hidden() -> None:
+    message = fanferro.Message(
+        payload=fanferro.Payload(b"x"),
+        attributes={"fanferro.type": "t", "tenant": "acme", "ExtendedPayloadSize": "3", "fanferro.attempt": "2"},
+    )
+    assert set(message.attributes) == {"tenant"}
+    assert "fanferro.type" in message.raw_attributes
+    assert message.attempt == 3
+
+
+def test_body_before_routing() -> None:
+    message = fanferro.Message(payload=fanferro.Payload(b"{}"))
+    with pytest.raises(RuntimeError, match="decoded after routing"):
+        _ = message.body
+    bad = fanferro.Message(payload=fanferro.Payload(b"{"))
+    with pytest.raises(fanferro.DecodeError):
+        bad.json()
+
+
+def test_dead_letter_info() -> None:
+    info = {"reason": "boom", "receive_count": 3}
+    message = fanferro.Message(payload=fanferro.Payload(b"x"), attributes={"fanferro.dead-letter": json.dumps(info)})
+    assert message.dead_letter_info == info
+    assert (
+        fanferro.Message(payload=fanferro.Payload(b"x"), attributes={"fanferro.dead-letter": "nope"}).dead_letter_info
+        is None
+    )
+
+
+def test_prepared_message_roundtrip() -> None:
+    wire = fanferro.WireMessage(b"\x00\x01binary", {"a": "x", "b": b"\x02", "n": 5})
+    prepared = fanferro.PreparedMessage(
+        destination={"kind": "queue", "url": "u", "fifo": True},
+        destination_name="q.fifo",
+        wire=wire,
+        message_id="id-1",
+        message_type="t",
+        group_id="g",
+        deduplication_id="d",
+        delay=None,
+        sns_subject=None,
+        trace_header="Root=1-a-b",
+    )
+    restored = fanferro.PreparedMessage.from_json(prepared.to_json())
+    assert restored == prepared
+    text = fanferro.PreparedMessage(
+        destination={}, destination_name="x", wire=fanferro.WireMessage("hello"), message_id="1"
+    )
+    assert text.to_dict()["body"] == {"text": "hello"}
+    with pytest.raises(ValueError, match="version"):
+        fanferro.PreparedMessage.from_dict({"version": 2})
+
+
+def test_batch_result() -> None:
+    ok = fanferro.PublishResult("1", "t1", "q")
+    failure = fanferro.BatchFailure(1, fanferro.OutgoingMessage(body={}), fanferro.ThrottledError("slow down"))
+    result = fanferro.BatchPublishResult((ok, failure))
+    assert result.successful == [ok]
+    assert result.failed == [failure]
+    assert not result.ok
+    assert len(result) == 2
+    with pytest.raises(fanferro.BatchPublishError) as raised:
+        result.raise_for_failures()
+    assert raised.value.result is result
+    fanferro.BatchPublishResult((ok,)).raise_for_failures()
+
+
+def test_queue_and_topic_attributes() -> None:
+    attributes = fanferro.QueueAttributes(
+        visibility_timeout=datetime.timedelta(minutes=2),
+        message_retention=86400,
+        delay=0,
+        receive_wait_time=20,
+        max_message_size=1048576,
+        encryption=fanferro.Kms("alias/aws/sqs", data_key_reuse=300),
+        content_based_deduplication=True,
+        deduplication_scope="messageGroup",
+        fifo_throughput_limit="perMessageGroupId",
+        policy={"Version": "2012-10-17"},
+        redrive_allow_policy={"redrivePermission": "allowAll"},
+        extra={"Custom": "1"},
+    ).to_aws()
+    assert attributes["VisibilityTimeout"] == "120"
+    assert attributes["KmsMasterKeyId"] == "alias/aws/sqs"
+    assert attributes["KmsDataKeyReusePeriodSeconds"] == "300"
+    assert attributes["ContentBasedDeduplication"] == "true"
+    assert json.loads(attributes["Policy"]) == {"Version": "2012-10-17"}
+    assert attributes["Custom"] == "1"
+    assert fanferro.QueueAttributes(encryption=fanferro.SqsManagedEncryption(enabled=False)).to_aws() == {
+        "SqsManagedSseEnabled": "false"
+    }
+    topic = fanferro.TopicAttributes(
+        display_name="Orders",
+        encryption=fanferro.Kms("alias/aws/sns"),
+        tracing="Active",
+        signature_version=2,
+        max_message_size=1048576,
+        content_based_deduplication=False,
+        fifo_throughput_scope="MessageGroup",
+        delivery_policy={"x": 1},
+        archive_policy={"MessageRetentionPeriod": "30"},
+    ).to_aws()
+    assert topic["TracingConfig"] == "Active"
+    assert topic["SignatureVersion"] == "2"
+    assert topic["ContentBasedDeduplication"] == "false"
+    with pytest.raises(ValueError, match="non-negative"):
+        fanferro.QueueAttributes(visibility_timeout=-1).to_aws()
+
+
+def test_provisioning_presets_and_reports() -> None:
+    assert fanferro.Provisioning.existing() == fanferro.Provisioning()
+    assert fanferro.Provisioning.create_missing().create
+    ensure = fanferro.Provisioning.ensure(on_drift="raise")
+    assert ensure.create
+    assert ensure.update
+    assert ensure.on_drift == "raise"
+    assume = fanferro.Provisioning.assume()
+    assert not assume.lookup
+    assert assume.to_core() == {"lookup": False, "verify": False, "create": False, "update": False}
+    report = fanferro.ProvisioningReport.from_core(
+        {
+            "kind": "queue",
+            "name": "q",
+            "status": "found",
+            "resource": {"name": "q", "url": "u", "arn": "a", "fifo": False, "attributes": {"VisibilityTimeout": "30"}},
+            "drift": [{"attribute": "DelaySeconds", "expected": "5", "actual": "0", "mutable": True}],
+            "actions": [],
+            "error": None,
+            "dead_letter": None,
+        }
+    )
+    assert isinstance(report.resource, fanferro.QueueInfo)
+    assert report.resource.visibility_timeout == 30
+    assert not report.ok
+    with pytest.raises(ValueError, match="max_receive_count"):
+        fanferro.DeadLetterQueue("x", max_receive_count=0)
+
+
+def test_policies() -> None:
+    backoff = fanferro.Backoff(initial=1, maximum=10, multiplier=2, jitter=False)
+    assert [backoff.delay(n) for n in (1, 2, 3, 4, 5)] == [1, 2, 4, 8, 10]
+    jittered = fanferro.Backoff.exponential(initial=4, maximum=4)
+    assert all(2 <= jittered.delay(1) <= 4 for _ in range(50))
+    assert fanferro.Backoff.constant(3).delay(9) == 3
+    assert fanferro.Backoff.immediate().delay(3) == 0
+    with pytest.raises(ValueError, match="multiplier"):
+        fanferro.Backoff(multiplier=0.5)
+
+    policy = fanferro.RetryPolicy(max_attempts=3, dead_letter_on=(KeyError,))
+    assert policy.decide(ValueError()) == "retry"
+    assert policy.decide(KeyError()) == "dead_letter"
+    assert policy.exhausted(3)
+    assert not policy.exhausted(2)
+    assert not fanferro.RetryPolicy(max_attempts=None).exhausted(1000)
+    strict = fanferro.RetryPolicy(retry_on=(TimeoutError,), dead_letter_unknown=True)
+    assert strict.decide(TimeoutError()) == "retry"
+    assert strict.decide(ValueError()) == "dead_letter"
+    classified = fanferro.RetryPolicy(classify=lambda error: "discard" if isinstance(error, LookupError) else None)
+    assert classified.decide(IndexError()) == "discard"
+    assert classified.decide(ValueError()) == "retry"
+    with pytest.raises(ValueError, match="max_attempts"):
+        fanferro.RetryPolicy(max_attempts=0)
+    with pytest.raises(ValueError, match="per_second"):
+        fanferro.RateLimit(0)
+    with pytest.raises(ValueError, match="drain_timeout"):
+        fanferro.ShutdownPolicy(drain_timeout=-1)
+    assert fanferro.Heartbeat(interval=5, extend_by=30, max_duration=3600).to_core() == {
+        "enabled": True,
+        "interval": 5.0,
+        "extend_by": 30.0,
+        "max_lease": 3600.0,
+    }
+
+
+def test_large_payload_settings() -> None:
+    settings = fanferro.LargePayloads("bucket", reference="both", encryption=fanferro.Kms("key"), presign_ttl=60)
+    core = settings.to_core()
+    assert core["encryption"] == {"mode": "kms", "key_id": "key", "bucket_key": True}
+    assert core["presign_ttl"] == 60
+    assert fanferro.LargePayloads("b", encryption="s3").to_core()["encryption"] == {"mode": "s3"}
+    with pytest.raises(ValueError, match="aws_extended"):
+        fanferro.LargePayloads("b", format="aws_extended", reference="url")
+    with pytest.raises(ValueError, match="bucket"):
+        fanferro.LargePayloads("")
+    assert fanferro.PayloadFetch(allowed_url_hosts=["*.example.com"]).to_core()["allowed_url_hosts"] == [
+        "*.example.com"
+    ]
+
+
+def test_aws_config_objects() -> None:
+    assert "s3cr3t" not in repr(fanferro.Credentials("AKIA", "s3cr3t"))
+    assert fanferro.AwsRetry(max_attempts=3, mode="adaptive").to_core()["mode"] == "adaptive"
+    with pytest.raises(ValueError, match="max_attempts"):
+        fanferro.AwsRetry(max_attempts=0).to_core()
+    assert fanferro.Timeouts(read=30).to_core()["read"] == 30.0

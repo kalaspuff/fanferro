@@ -1,0 +1,432 @@
+//! Leases: exclusive, heartbeat-protected ownership of a received message.
+//!
+//! A lease exists from the moment a message is received until it is settled (acked,
+//! retried, released, requeued or dead-lettered). While it exists the heartbeat keeps the
+//! message invisible to other consumers and the lease holds one in-flight permit, which is
+//! what bounds how many messages a consumer holds at once. Dropping an unsettled lease
+//! releases the message (makes it visible again immediately) as a safety net.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use parking_lot::Mutex;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
+use tokio::sync::{OwnedSemaphorePermit, oneshot};
+use tokio::time::Instant;
+
+use super::EngineInner;
+use super::config::MAX_VISIBILITY;
+use super::settle::{SettleCommand, SettleKind};
+use crate::backend::{ReceivedMessage, SendRequest};
+use crate::error::{AwsErrorKind, Error, Result};
+use crate::events::{Event, EventKind};
+use crate::types::attributes::MAX_ATTRIBUTES;
+use crate::types::{AttributeValue, reserved};
+
+/// Lifecycle state of a lease.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LeaseStatus {
+    /// Received and waiting for a handler.
+    Buffered,
+    /// Being processed.
+    Active,
+    /// A settlement is in progress.
+    Settling,
+    /// The receipt handle is no longer valid (the message may be redelivered).
+    Lost,
+    /// The maximum lease duration was reached; heartbeats stopped.
+    Expired,
+    /// Settled (no longer tracked).
+    Settled,
+}
+
+impl LeaseStatus {
+    /// Lowercase name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Buffered => "buffered",
+            Self::Active => "active",
+            Self::Settling => "settling",
+            Self::Lost => "lost",
+            Self::Expired => "expired",
+            Self::Settled => "settled",
+        }
+    }
+}
+
+/// Bookkeeping for one lease (owned by the engine's lease table).
+#[derive(Debug)]
+pub(crate) struct LeaseEntry {
+    pub receipt_handle: String,
+    pub message_id: String,
+    pub received_at: Instant,
+    pub visible_until: Instant,
+    pub next_heartbeat: Instant,
+    pub max_until: Instant,
+    pub status: LeaseStatus,
+    pub extending: bool,
+}
+
+/// How a message was settled (used for events and metrics).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Outcome {
+    Acked,
+    Retried,
+    Released,
+    Requeued,
+    DeadLettered,
+}
+
+/// A handle to a leased message.
+pub struct Lease {
+    pub(crate) id: u64,
+    pub(crate) inner: Arc<EngineInner>,
+    pub(crate) message: Arc<ReceivedMessage>,
+    permit: Mutex<Option<OwnedSemaphorePermit>>,
+    settled: AtomicBool,
+}
+
+impl std::fmt::Debug for Lease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Lease").field("id", &self.id).field("message_id", &self.message.message_id).finish()
+    }
+}
+
+const MAX_DETAIL_LEN: usize = 1024;
+
+fn truncate(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
+impl Lease {
+    pub(crate) fn new(
+        id: u64,
+        inner: Arc<EngineInner>,
+        message: Arc<ReceivedMessage>,
+        permit: OwnedSemaphorePermit,
+    ) -> Self {
+        Self { id, inner, message, permit: Mutex::new(Some(permit)), settled: AtomicBool::new(false) }
+    }
+
+    /// The raw received message.
+    pub fn message(&self) -> &ReceivedMessage {
+        &self.message
+    }
+
+    /// Whether the lease has been settled (or settlement has started).
+    pub fn is_settled(&self) -> bool {
+        self.settled.load(Ordering::SeqCst)
+    }
+
+    /// Current status.
+    pub fn status(&self) -> LeaseStatus {
+        self.inner.leases.lock().get(&self.id).map_or(LeaseStatus::Settled, |entry| entry.status)
+    }
+
+    /// Seconds until the message becomes visible again (0 when settled or unknown).
+    pub fn remaining_visibility(&self) -> Duration {
+        self.inner
+            .leases
+            .lock()
+            .get(&self.id)
+            .map_or(Duration::ZERO, |entry| entry.visible_until.saturating_duration_since(Instant::now()))
+    }
+
+    /// Marks the message as being processed (stops counting it as buffered).
+    pub fn mark_active(&self) {
+        if let Some(entry) = self.inner.leases.lock().get_mut(&self.id)
+            && entry.status == LeaseStatus::Buffered
+        {
+            entry.status = LeaseStatus::Active;
+        }
+    }
+
+    fn begin(&self) -> Result<()> {
+        if self.settled.swap(true, Ordering::SeqCst) {
+            return Err(Error::Lease(format!("message {} was already settled", self.message.message_id)));
+        }
+        if let Some(entry) = self.inner.leases.lock().get_mut(&self.id) {
+            entry.status = LeaseStatus::Settling;
+        }
+        Ok(())
+    }
+
+    fn finish(&self, outcome: Outcome, result: &Result<()>) {
+        if self.inner.leases.lock().remove(&self.id).is_some() {
+            self.inner.metrics.in_flight.add(-1);
+        }
+        self.permit.lock().take();
+        let metrics = &self.inner.metrics;
+        let message_id = self.message.message_id.clone();
+        let queue = self.inner.settings.queue_url.clone();
+        match (outcome, result) {
+            (Outcome::Acked, Ok(())) => {
+                metrics.messages_acked.inc();
+                self.inner.client.events().emit(EventKind::MessageAcked, || {
+                    Event::new(EventKind::MessageAcked, "message acked")
+                        .field("queue", queue)
+                        .field("sqs_message_id", message_id)
+                });
+            }
+            (Outcome::Acked, Err(error)) => {
+                metrics.ack_failures.inc();
+                self.inner.client.events().emit(EventKind::MessageAckFailed, || {
+                    Event::new(EventKind::MessageAckFailed, "failed to delete message; it may be redelivered")
+                        .field("queue", queue)
+                        .field("sqs_message_id", message_id)
+                        .error(error)
+                });
+            }
+            (Outcome::Retried, Ok(())) => metrics.messages_retried.inc(),
+            (Outcome::Released, Ok(())) => metrics.messages_released.inc(),
+            (Outcome::Requeued, Ok(())) => metrics.messages_requeued.inc(),
+            (Outcome::DeadLettered, Ok(())) => metrics.messages_dead_lettered.inc(),
+            (Outcome::DeadLettered, Err(_)) => metrics.dead_letter_failures.inc(),
+            _ => {}
+        }
+    }
+
+    async fn settle(&self, kind: SettleKind) -> Result<()> {
+        let sender = self.inner.settle_sender().ok_or_else(|| Error::Shutdown("the consumer is closed".into()))?;
+        let (reply, receiver) = oneshot::channel();
+        sender
+            .send(SettleCommand { receipt_handle: self.message.receipt_handle.clone(), kind, reply: Some(reply) })
+            .map_err(|_| Error::Shutdown("the consumer is closed".into()))?;
+        receiver.await.map_err(|_| Error::Shutdown("the consumer closed before settling".into()))?
+    }
+
+    fn cap_visibility(&self, timeout: Duration) -> Duration {
+        let received_at = self.inner.leases.lock().get(&self.id).map(|entry| entry.received_at);
+        let elapsed = received_at.map_or(Duration::ZERO, |at| at.elapsed());
+        timeout.min(MAX_VISIBILITY.saturating_sub(elapsed + Duration::from_secs(5)))
+    }
+
+    /// Deletes the message (successful processing).
+    pub async fn ack(&self) -> Result<()> {
+        self.begin()?;
+        let result = self.settle(SettleKind::Delete).await;
+        self.finish(Outcome::Acked, &result);
+        result
+    }
+
+    /// Makes the message visible again after `delay` (retry with backoff).
+    pub async fn nack(&self, delay: Duration) -> Result<()> {
+        self.begin()?;
+        let delay = self.cap_visibility(self.inner.visibility_floor(delay));
+        let result = self.settle(SettleKind::Visibility(delay)).await;
+        self.finish(Outcome::Retried, &result);
+        if result.is_ok() {
+            let message_id = self.message.message_id.clone();
+            let queue = self.inner.settings.queue_url.clone();
+            let receive_count = self.message.system.approximate_receive_count;
+            self.inner.client.events().emit(EventKind::MessageRetryScheduled, || {
+                Event::new(
+                    EventKind::MessageRetryScheduled,
+                    format!("message will be retried in {:.1}s", delay.as_secs_f64()),
+                )
+                .field("queue", queue)
+                .field("sqs_message_id", message_id)
+                .field("delay_seconds", delay.as_secs_f64())
+                .field("receive_count", receive_count)
+            });
+        }
+        result
+    }
+
+    /// Makes the message visible again immediately (no processing happened).
+    pub async fn release(&self) -> Result<()> {
+        self.begin()?;
+        let result = self.settle(SettleKind::Visibility(self.inner.visibility_floor(Duration::ZERO))).await;
+        self.finish(Outcome::Released, &result);
+        if result.is_ok() {
+            let message_id = self.message.message_id.clone();
+            let queue = self.inner.settings.queue_url.clone();
+            self.inner.client.events().emit(EventKind::MessageReleased, || {
+                Event::new(EventKind::MessageReleased, "message released")
+                    .field("queue", queue)
+                    .field("sqs_message_id", message_id)
+            });
+        }
+        result
+    }
+
+    /// Sets the visibility timeout to `timeout` from now without settling.
+    pub async fn extend(&self, timeout: Duration) -> Result<()> {
+        if self.is_settled() {
+            return Err(Error::Lease(format!("message {} was already settled", self.message.message_id)));
+        }
+        let timeout = self.cap_visibility(timeout);
+        let started = Instant::now();
+        let result = self.settle(SettleKind::Visibility(timeout)).await;
+        if result.is_ok()
+            && let Some(entry) = self.inner.leases.lock().get_mut(&self.id)
+        {
+            entry.visible_until = started + timeout;
+            entry.next_heartbeat = started + self.inner.settings.heartbeat_interval.min(timeout / 2);
+        }
+        result
+    }
+
+    /// Forwards the message to the dead-letter queue, then deletes it.
+    ///
+    /// The original body and attributes are preserved (so the message can be redriven),
+    /// and a `fanferro.dead-letter` attribute records why it was dead-lettered.
+    pub async fn dead_letter(&self, reason: &str, details: &BTreeMap<String, String>) -> Result<()> {
+        let Some(dlq_url) = self.inner.settings.dead_letter_queue_url.clone() else {
+            return Err(Error::config(format!(
+                "cannot dead-letter message {}: no dead-letter queue is configured for {}",
+                self.message.message_id, self.inner.settings.queue_url
+            )));
+        };
+        self.begin()?;
+        let result = self.forward_to_dead_letter_queue(&dlq_url, reason, details).await;
+        let result = match result {
+            Ok(()) => self.settle(SettleKind::Delete).await,
+            Err(error) => Err(error),
+        };
+        self.finish(Outcome::DeadLettered, &result);
+        let message_id = self.message.message_id.clone();
+        let queue = self.inner.settings.queue_url.clone();
+        match &result {
+            Ok(()) => self.inner.client.events().emit(EventKind::MessageDeadLettered, || {
+                Event::new(EventKind::MessageDeadLettered, format!("message dead-lettered: {reason}"))
+                    .field("queue", queue)
+                    .field("dead_letter_queue", dlq_url)
+                    .field("sqs_message_id", message_id)
+                    .field("reason", reason)
+            }),
+            Err(error) => self.inner.client.events().emit(EventKind::MessageDeadLetterFailed, || {
+                Event::new(EventKind::MessageDeadLetterFailed, "failed to forward message to the dead-letter queue")
+                    .field("queue", queue)
+                    .field("dead_letter_queue", dlq_url)
+                    .field("sqs_message_id", message_id)
+                    .field("reason", reason)
+                    .error(error)
+            }),
+        }
+        result
+    }
+
+    async fn forward_to_dead_letter_queue(
+        &self,
+        dlq_url: &str,
+        reason: &str,
+        details: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        let message = &self.message;
+        let mut info = serde_json::Map::new();
+        info.insert("reason".into(), truncate(reason, MAX_DETAIL_LEN).into());
+        info.insert(
+            "source".into(),
+            self.inner.settings.queue_arn.clone().unwrap_or_else(|| self.inner.settings.queue_url.clone()).into(),
+        );
+        info.insert("sqs_message_id".into(), message.message_id.clone().into());
+        info.insert("receive_count".into(), message.system.approximate_receive_count.into());
+        info.insert("time".into(), OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_default().into());
+        for (key, value) in details {
+            info.insert(key.clone(), truncate(value, MAX_DETAIL_LEN).into());
+        }
+        let mut attributes = message.attributes.clone();
+        if attributes.len() < MAX_ATTRIBUTES || attributes.contains_key(reserved::DEAD_LETTER) {
+            attributes.insert(
+                reserved::DEAD_LETTER.into(),
+                AttributeValue::string(serde_json::Value::Object(info).to_string()),
+            );
+        }
+        let fifo = self.inner.settings.dead_letter_fifo;
+        let request = SendRequest {
+            body: message.body.clone(),
+            attributes,
+            delay: None,
+            group_id: if fifo {
+                Some(message.system.message_group_id.clone().unwrap_or_else(|| "fanferro-dead-letter".into()))
+            } else {
+                None
+            },
+            deduplication_id: fifo.then(|| message.message_id.clone()),
+            trace_header: message.system.aws_trace_header.clone(),
+        };
+        self.inner.client.backend().sqs.send_message(dlq_url, request).await.map(|_| ())
+    }
+
+    /// Sends a copy of the message back to the queue with an incremented attempt counter
+    /// (and optional delay on standard queues), then deletes the original.
+    pub async fn requeue(&self, delay: Option<Duration>, attempt: u32) -> Result<()> {
+        self.begin()?;
+        let message = &self.message;
+        let mut attributes = message.attributes.clone();
+        let result = if attributes.len() >= MAX_ATTRIBUTES && !attributes.contains_key(reserved::ATTEMPT) {
+            Err(Error::validation(
+                "cannot requeue: the message already has 10 attributes (no room for fanferro.attempt)",
+            ))
+        } else {
+            attributes.insert(reserved::ATTEMPT.into(), AttributeValue::number(attempt.to_string()));
+            let fifo = self.inner.settings.fifo;
+            let request = SendRequest {
+                body: message.body.clone(),
+                attributes,
+                delay: if fifo { None } else { delay.map(|d| d.min(crate::publish::MAX_DELAY)) },
+                group_id: message.system.message_group_id.clone(),
+                deduplication_id: fifo.then(|| format!("{}-r{attempt}", message.message_id)),
+                trace_header: message.system.aws_trace_header.clone(),
+            };
+            match self.inner.client.backend().sqs.send_message(&self.inner.settings.queue_url, request).await {
+                Ok(_) => self.settle(SettleKind::Delete).await,
+                Err(error) => Err(error),
+            }
+        };
+        self.finish(Outcome::Requeued, &result);
+        if result.is_ok() {
+            let message_id = message.message_id.clone();
+            let queue = self.inner.settings.queue_url.clone();
+            self.inner.client.events().emit(EventKind::MessageRequeued, || {
+                Event::new(EventKind::MessageRequeued, "message requeued")
+                    .field("queue", queue)
+                    .field("sqs_message_id", message_id)
+                    .field("attempt", attempt)
+                    .field("delay_seconds", delay.unwrap_or_default().as_secs_f64())
+            });
+        }
+        result
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        let was_settled = self.settled.swap(true, Ordering::SeqCst);
+        // `finish` and `close` remove settled entries; anything still tracked is ours to clean up.
+        let tracked = self.inner.leases.lock().remove(&self.id).is_some();
+        if !tracked {
+            return;
+        }
+        self.inner.metrics.in_flight.add(-1);
+        if was_settled {
+            // A settlement was interrupted (its future was dropped); nothing left to do.
+            return;
+        }
+        // Dropped without settlement: stop heartbeating and make the message visible again.
+        if let Some(sender) = self.inner.settle_sender() {
+            let _ = sender.send(SettleCommand {
+                receipt_handle: self.message.receipt_handle.clone(),
+                kind: SettleKind::Visibility(self.inner.visibility_floor(Duration::ZERO)),
+                reply: None,
+            });
+            self.inner.metrics.messages_released.inc();
+        }
+    }
+}
+
+/// Whether an error means the receipt handle can no longer be used.
+pub(crate) fn is_lost(error: &Error) -> bool {
+    error.aws().is_some_and(|aws| aws.kind == AwsErrorKind::ReceiptHandleInvalid)
+}

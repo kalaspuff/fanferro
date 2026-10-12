@@ -1,0 +1,31 @@
+# fanferro
+
+> fanferro is an asyncio Python library (Rust core) for Amazon SNS + SQS: publishing with
+> CloudEvents envelopes and pluggable codecs, consumers with routing, retries, dead-letter queues,
+> visibility heartbeats and graceful shutdown, FIFO ordering, large payloads via S3 claim checks,
+> declarative provisioning, transactional outbox, idempotency, OpenTelemetry, and an in-memory
+> broker for tests.
+
+Usage guide for AI agents (also `fanferro guide`): python/fanferro/AGENT_GUIDE.md
+
+## Docs
+
+- [Getting started](docs/guides/getting-started.md)
+- [Publishing](docs/guides/publishing.md)
+- [Consuming](docs/guides/consuming.md)
+- [Failure handling](docs/guides/failure-handling.md)
+- [Provisioning](docs/guides/provisioning.md)
+- [Message formats](docs/guides/message-formats.md)
+- [Large payloads](docs/guides/large-payloads.md)
+- [Observability](docs/guides/observability.md)
+- [Patterns: outbox, inbox, fan-out, versioning](docs/guides/patterns.md)
+- [Testing](docs/guides/testing.md)
+- [Deployment](docs/guides/deployment.md)
+- [Configuration reference](docs/reference/configuration.md)
+- [Events](docs/reference/events.md) · [Attributes](docs/reference/attributes.md) · [Errors](docs/reference/errors.md)
+
+## Development
+
+- [AGENTS.md](AGENTS.md): how to change fanferro (commands, rules, checklists)
+- [Architecture](docs/architecture.md) and [decision records](docs/adr/README.md)
+- [Examples](examples/README.md)

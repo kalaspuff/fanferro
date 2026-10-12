@@ -1,0 +1,42 @@
+name: Prepare release
+
+# Opens a release PR: version bump (Cargo.toml, Cargo.lock) and CHANGELOG.md section generated from
+# conventional commits. Merging it tags the release (tag-release.yml) and runs release.yml.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "New version (e.g. 0.2.0) or bump: patch | minor | major (0.x: major bumps the minor)"
+        required: true
+        default: minor
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v10.3.0
+      - id: release
+        run: uv run --no-project scripts/release.py "${{ inputs.version }}" --github-output "$GITHUB_OUTPUT"
+      - uses: peter-evans/create-pull-request@v8
+        with:
+          # PRs opened with the workflow token do not trigger CI. Add a RELEASE_TOKEN secret
+          # (fine-grained PAT or GitHub App token: contents + pull requests write) to get checks.
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+          branch: release/v${{ steps.release.outputs.version }}
+          commit-message: "chore(release): v${{ steps.release.outputs.version }}"
+          title: "chore(release): v${{ steps.release.outputs.version }}"
+          body: |
+            Release v${{ steps.release.outputs.version }}.
+
+            Review and polish the new `CHANGELOG.md` section (it becomes the GitHub release notes),
+            then squash-merge. Merging tags the release and starts the release workflow (wheels,
+            GitHub release, PyPI).
+          labels: release

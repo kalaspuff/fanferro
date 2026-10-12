@@ -1,0 +1,274 @@
+name: Release
+
+# Builds, tests and publishes a tagged version. Runs when a `v1.2.3` tag is pushed and when
+# tag-release.yml dispatches it after a release PR is merged (tags pushed with the workflow token do
+# not trigger workflows; dispatches do). This must stay a top-level workflow: PyPI trusted
+# publishing does not support reusable workflows.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to (re)build and release (e.g. v0.2.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  AWS_LC_SYS_PREBUILT_NASM: "1"
+  # Build tools, pinned to the versions the dev container uses (update together).
+  MATURIN_VERSION: "1.15.0"
+  ZIG_VERSION: "0.17.0"
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  verify:
+    name: Verify version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - id: version
+        run: |
+          version=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['package']['version'])")
+          if [ "v$version" != "$TAG" ]; then echo "::error::tag $TAG does not match Cargo.toml version $version"; exit 1; fi
+          python3 scripts/release_notes.py "$version" > /dev/null
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  linux:
+    name: Wheel ${{ matrix.target }}
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, compatibility: manylinux2014 }
+          - { target: aarch64-unknown-linux-gnu, compatibility: manylinux2014 }
+          - { target: x86_64-unknown-linux-musl, compatibility: musllinux_1_2 }
+          - { target: aarch64-unknown-linux-musl, compatibility: musllinux_1_2 }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: astral-sh/setup-uv@v10.3.0
+      - run: uvx --from "maturin==$MATURIN_VERSION" --with "ziglang==$ZIG_VERSION" maturin build --locked --profile dist --zig --target ${{ matrix.target }} --compatibility ${{ matrix.compatibility }} --out dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-${{ matrix.target }}
+          path: dist/*.whl
+
+  macos:
+    name: Wheel ${{ matrix.target }}
+    needs: verify
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: astral-sh/setup-uv@v10.3.0
+      - run: uvx --from "maturin==$MATURIN_VERSION" maturin build --locked --profile dist --target ${{ matrix.target }} --out dist
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-${{ matrix.target }}
+          path: dist/*.whl
+
+  windows:
+    name: Wheel x86_64-pc-windows-msvc
+    needs: verify
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v10.3.0
+      - run: uvx --from "maturin==$MATURIN_VERSION" maturin build --locked --profile dist --out dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-x86_64-pc-windows-msvc
+          path: dist/*.whl
+
+  # Windows on Arm is best effort: when this job fails the release goes ahead without that wheel
+  # (users on that platform build from the sdist). It builds and smoke-tests natively.
+  windows-arm:
+    name: Wheel aarch64-pc-windows-msvc (best effort)
+    needs: verify
+    runs-on: windows-11-arm
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v10.3.0
+      - run: uvx --from "maturin==$MATURIN_VERSION" maturin build --locked --profile dist --out dist
+      - name: Smoke test
+        shell: bash
+        run: |
+          for python in 3.12 3.15; do
+            uv venv --python "$python" "smoke-$python"
+            uv pip install --python "smoke-$python" dist/*.whl
+            "smoke-$python/Scripts/python.exe" -I scripts/smoke_test.py
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-aarch64-pc-windows-msvc
+          path: dist/*.whl
+
+  sdist:
+    name: Source distribution
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v10.3.0
+      - run: uvx --from "maturin==$MATURIN_VERSION" maturin sdist --out dist
+      - name: Build and smoke-test a wheel from the sdist
+        run: |
+          uv venv --python 3.12 smoke
+          uv pip install --python smoke dist/*.tar.gz
+          smoke/bin/python -I scripts/smoke_test.py
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  smoke-test:
+    name: Smoke test ${{ matrix.platform.wheel }} (Python ${{ matrix.python }})
+    needs: [linux, macos, windows]
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.15"]
+        platform:
+          - { runner: ubuntu-latest, wheel: x86_64-unknown-linux-gnu }
+          - { runner: ubuntu-24.04-arm, wheel: aarch64-unknown-linux-gnu }
+          - { runner: macos-latest, wheel: aarch64-apple-darwin }
+          - { runner: macos-15-intel, wheel: x86_64-apple-darwin }
+          - { runner: windows-latest, wheel: x86_64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+          sparse-checkout: scripts
+      - uses: actions/download-artifact@v8
+        with:
+          name: wheel-${{ matrix.platform.wheel }}
+          path: dist
+      - uses: astral-sh/setup-uv@v10.3.0
+      - name: Install the wheel and run the smoke test
+        shell: bash
+        run: |
+          uv venv --python ${{ matrix.python }} smoke
+          uv pip install --python smoke dist/*.whl
+          if [ -x smoke/bin/python ]; then py=smoke/bin/python; else py=smoke/Scripts/python.exe; fi
+          $py -I scripts/smoke_test.py
+
+  # musllinux wheels are tested in Alpine with `docker run` (JavaScript actions cannot run inside
+  # Alpine job containers on Arm runners).
+  smoke-test-musl:
+    name: Smoke test ${{ matrix.platform.wheel }} (Alpine, Python ${{ matrix.python }})
+    needs: linux
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.14"]
+        platform:
+          - { runner: ubuntu-latest, wheel: x86_64-unknown-linux-musl }
+          - { runner: ubuntu-24.04-arm, wheel: aarch64-unknown-linux-musl }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+          sparse-checkout: scripts
+      - uses: actions/download-artifact@v8
+        with:
+          name: wheel-${{ matrix.platform.wheel }}
+          path: dist
+      - run: >-
+          docker run --rm -v "$PWD:/work:ro" -w /work python:${{ matrix.python }}-alpine
+          sh -c 'pip install --quiet --root-user-action=ignore dist/*.whl && python -I scripts/smoke_test.py'
+
+  github-release:
+    name: GitHub release
+    needs: [verify, linux, macos, windows, windows-arm, sdist, smoke-test, smoke-test-musl]
+    # windows-arm may fail (best effort); everything else must have succeeded.
+    if: >-
+      ${{ !cancelled() && needs.verify.result == 'success' && needs.linux.result == 'success'
+      && needs.macos.result == 'success' && needs.windows.result == 'success' && needs.sdist.result == 'success'
+      && needs.smoke-test.result == 'success' && needs.smoke-test-musl.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/*
+      - name: Release notes from CHANGELOG.md
+        run: python3 scripts/release_notes.py "${{ needs.verify.outputs.version }}" > RELEASE_NOTES.md
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ env.TAG }}
+          name: fanferro ${{ needs.verify.outputs.version }}
+          body_path: RELEASE_NOTES.md
+          prerelease: ${{ startsWith(needs.verify.outputs.version, '0.') }}
+          files: dist/*
+
+  pypi:
+    name: Publish to PyPI
+    needs: github-release
+    # Set the repository variable PUBLISH_TO_PYPI=true after configuring trusted publishing
+    # (workflow release.yml, environment pypi; see .claude/skills/fanferro-release).
+    if: ${{ !cancelled() && needs.github-release.result == 'success' && vars.PUBLISH_TO_PYPI == 'true' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/fanferro/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

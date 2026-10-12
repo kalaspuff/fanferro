@@ -1,0 +1,45 @@
+---
+name: fanferro
+description: Build SNS/SQS messaging with the fanferro Python library (Rust core) - publishing, consumers, routing, retries and dead-letter queues, FIFO ordering, large payloads, transactional outbox, idempotent consumers, OpenTelemetry, testing with the in-memory broker or MiniStack. Use when code imports fanferro or the task involves SQS queues or SNS topics in a Python service that uses fanferro.
+---
+
+# Using fanferro
+
+Before writing code, read the full usage guide that ships with the installed version:
+
+```bash
+uv run fanferro guide        # or: python -m fanferro guide
+```
+
+It is authoritative for the installed version (this skill only summarizes it). Also useful:
+`fanferro events` (event kinds), `fanferro attributes` (reserved message attributes).
+
+## Non-negotiables
+
+1. One `fanferro.Client` per process, created after `fork()`, used as `async with client:`.
+2. Declare topics/queues/subscriptions on the client with an explicit `Provisioning` policy.
+3. Explicit, versioned message type names: `@fanferro.message_type("domain.event_name.v1")`.
+4. Every queue gets `dead_letter=fanferro.DeadLetterQueue(...)`; `max_receive_count` > `RetryPolicy.max_attempts`.
+5. Handlers are `async def`, idempotent (at-least-once delivery; key on `message.id`), and non-blocking.
+6. Return to ack; raise to retry; `fanferro.Reject` = dead-letter now; `fanferro.Discard` = drop.
+7. Business events from DB writes go through the transactional outbox (`topic.prepare()` + `fanferro.outbox.OutboxRelay`).
+8. ≤ 10 message attributes (fanferro uses 2, +1-2 for tracing); `fanferro.*` names are reserved.
+9. Tests: `fanferro.testing.memory_client()` + `consumer.run_until_idle()`; handler unit tests with
+   `fanferro.testing.build_message(obj)`; end-to-end against MiniStack (`endpoint_url=http://localhost:4566`).
+
+## Skeleton
+
+```python
+client = fanferro.Client(source="urn:service:<name>")
+topic = client.topic("<domain>-events")
+queue = client.queue("<service>-<purpose>", dead_letter=fanferro.DeadLetterQueue("<service>-<purpose>-dlq"))
+client.subscription(topic, queue, filter_policy={"fanferro.type": ["<domain>.<event>.v1"]})
+consumer = client.consumer(queue, concurrency=20, retry=fanferro.RetryPolicy(max_attempts=5))
+
+@consumer.route(MyEvent)
+async def handle(event: MyEvent) -> None: ...
+
+async def main() -> None:
+    async with client:
+        await client.run()
+```

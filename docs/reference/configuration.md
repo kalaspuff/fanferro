@@ -1,0 +1,153 @@
+# Configuration reference
+
+Every option of the public configuration surface. `scripts/check_consistency.py` verifies that
+each parameter and field listed here exists in the code and that every one in the code is listed.
+
+## `Client(...)`
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `region` | provider chain | AWS region |
+| `endpoint_url` | `None` | Custom endpoint (MiniStack: `http://localhost:4566`) |
+| `profile` | `None` | Named AWS profile |
+| `credentials` | provider chain | `Credentials(access_key_id, secret_access_key, session_token)` |
+| `account_id` | STS lookup | Account id used to derive topic ARNs and assumed queue URLs |
+| `source` | `"fanferro"` | CloudEvents `source` of published messages (e.g. `urn:service:orders`) |
+| `envelope` | `CloudEvents()` | Envelope for publishing |
+| `accept_envelopes` | CloudEvents, CloudEventsProtobuf, Raw | Envelopes consumers try, in order |
+| `codecs` | `CodecRegistry()` | Codec registry or list of codecs |
+| `naming` | class name | Fallback `(cls) -> str` for message type names |
+| `large_payloads` | `None` | `LargePayloads(...)` claim-check offloading |
+| `payload_fetch` | `PayloadFetch()` | How consumers download offloaded payloads |
+| `telemetry` | `Telemetry()` | OpenTelemetry settings |
+| `logging` | `LoggingConfig()` | Event logging |
+| `provisioning` | `Provisioning.existing()` | Default provisioning policy |
+| `aws_retry` | `AwsRetry()` | SDK retries per AWS call |
+| `timeouts` | `Timeouts()` | AWS call timeouts |
+| `publish_retry_attempts` | `4` | Attempts for failed batch entries and checksum mismatches |
+| `verify_md5` | `True` | Verify SQS MD5 digests (standard queues) |
+| `publish_middleware` | `()` | Publish middleware |
+| `consume_middleware` | `()` | Consume middleware applied to every consumer |
+| `broker` | `None` | `MemoryBroker` to use instead of AWS |
+| `event_buffer` | `10000` | Buffered core events before dropping |
+| `app_name` | `"fanferro"` | Application name in the AWS user agent |
+| `auto_provision` | `True` | Provision declared resources when entering `async with client` |
+
+## `client.topic(...)`
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `name` | - | Topic name (`.fifo` suffix for FIFO) |
+| `arn` | derived | Topic ARN |
+| `attributes` | `None` | `TopicAttributes(...)` or raw AWS attributes |
+| `tags` | `None` | Tags |
+| `provisioning` | client default | Provisioning policy |
+| `envelope` | client default | Envelope for this topic |
+| `large_payloads` | client default | Claim-check settings (`None` disables) |
+| `group_id` | `None` | Default FIFO group id or `(OutgoingMessage) -> str` |
+| `codec` | automatic | Codec or codec name |
+
+## `client.queue(...)`
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `name` | - | Queue name (`.fifo` suffix for FIFO) |
+| `url` | looked up | Queue URL |
+| `owner_account_id` | own account | Owner of a cross-account queue |
+| `attributes` | `None` | `QueueAttributes(...)` or raw AWS attributes |
+| `tags` | `None` | Tags |
+| `dead_letter` | `None` | `DeadLetterQueue(name, max_receive_count, attributes, tags, provisioning)` |
+| `provisioning` | client default | Provisioning policy |
+| `envelope` | client default | Envelope for messages sent to this queue |
+| `large_payloads` | client default | Claim-check settings (`None` disables) |
+| `group_id` | `None` | Default FIFO group id or `(OutgoingMessage) -> str` |
+| `codec` | automatic | Codec or codec name |
+
+## `client.subscription(topic, queue, ...)`
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `raw_message_delivery` | `True` | Deliver the original message and attributes |
+| `filter_policy` | `None` | SNS filter policy |
+| `filter_policy_scope` | `"MessageAttributes"` | Or `"MessageBody"` |
+| `dead_letter_queue` | `None` | Queue (or name) receiving undeliverable messages |
+| `manage_queue_policy` | `True` | Allow the topic to send to the queue (and its DLQ) |
+| `provisioning` | client default | Provisioning policy |
+
+## `client.consumer(queue, handler_or_router, ...)`
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `name` | queue name | Name used in events and metrics |
+| `concurrency` | `10` | Handlers running at the same time |
+| `prefetch` | `0` | Extra messages leased ahead |
+| `batch_size` | `10` | Messages per receive call (1-10) |
+| `wait_time` | `20` | Long polling wait in seconds (0-20) |
+| `pollers` | `1` | Concurrent receive loops |
+| `rate_limit` | `None` | `RateLimit(per_second, burst)` or messages per second |
+| `visibility_timeout` | queue attribute | Visibility timeout applied on receive |
+| `heartbeat` | `True` | `Heartbeat(...)`, `True` (defaults) or `False` |
+| `retry` | `RetryPolicy()` | Retry policy |
+| `dead_letter` | `DeadLetterPolicy()` | Dead-letter policy |
+| `shutdown` | `ShutdownPolicy()` | Shutdown policy |
+| `handler_timeout` | `None` | Cancel handlers after N seconds |
+| `ordering` | `"auto"` | `"fifo"` (per-group sequencing), `"none"`, or auto (FIFO queues) |
+| `envelopes` | client default | Envelopes to try |
+| `middleware` | `()` | Consume middleware for this consumer |
+| `auto_ack` | `True` | Ack when the handler returns |
+| `sns_unwrap` | `True` | Unwrap SNS notification JSON |
+| `auto_confirm_subscriptions` | `False` | Confirm SNS subscription confirmation messages |
+| `delete_offloaded_payloads` | `False` | Delete S3 payload objects after acking |
+
+## Policies
+
+`RetryPolicy`: `max_attempts` (5), `backoff` (`Backoff()`), `strategy` (`"visibility"`),
+`retry_on` (`(Exception,)`), `dead_letter_on` (`()`), `classify` (`None`), `dead_letter_unknown` (`False`).
+
+`Backoff`: `initial` (1.0), `maximum` (300.0), `multiplier` (2.0), `jitter` (`True`);
+constructors `exponential()`, `constant()`, `immediate()`.
+
+`DeadLetterPolicy`: `queue` (`None`), `on_exhausted` / `on_decode_error` / `on_unroutable`
+(`"dead_letter"`; or `"retry"`, `"discard"`, `"leave"`), `on_missing_queue` (`"leave"`),
+`include_error` (`True`).
+
+`ShutdownPolicy`: `drain_timeout` (30.0; `None` = wait forever), `cancel_timeout` (10.0),
+`progress_interval` (5.0), `release_unfinished` (`True`), `release_prefetched` (`True`),
+`abort_receives` (`False`).
+
+`Heartbeat`: `interval`, `extend_by`, `max_duration` (defaults derived from the visibility timeout;
+at most 12 hours).
+
+`RateLimit`: `per_second`, `burst`.
+
+`Provisioning`: `lookup` (`True`), `verify` (`True`), `create` (`False`), `update` (`False`),
+`on_missing` (`"raise"`), `on_drift` (`"log"`), `on_error` (`"raise"`); presets `existing()`,
+`create_missing()`, `ensure()`, `assume()`.
+
+`LargePayloads`: `bucket`, `prefix` (`"fanferro/"`), `threshold` (262144), `always` (`False`),
+`reference` (`"s3"`), `presign_ttl` (1 hour), `format` (`"fanferro"`), `encryption` (`None`),
+`bucket_key` (`True`), `storage_class` (`None`), `create_bucket` (`False`).
+
+`PayloadFetch`: `max_bytes` (64 MiB), `prefer` (`"s3"`), `allowed_url_hosts` (AWS + endpoint),
+`allow_http` (`False`), `verify_checksum` (`True`).
+
+`Telemetry`: `tracing` (`True`), `metrics` (`True`), `propagation` (`Propagation()`),
+`consumer_span_parent` (`"child"`), `tracer_provider`, `meter_provider`.
+
+`Propagation`: `inject` (message attributes, AWS trace header), `extract` (message attributes,
+envelope, AWS trace header), `attribute_keys` (`traceparent`, `tracestate`), `propagator`.
+
+`LoggingConfig`: `enabled` (`True`), `logger` (`"fanferro"`), `levels` (`{}`), `disabled` (`()`),
+`include_fields` (`True`), `include_tracebacks` (`True`), `formatter` (`None`).
+
+`AwsRetry`: `max_attempts` (5), `mode` (`"standard"`), `initial_backoff` (0.2), `max_backoff` (20.0).
+
+`Timeouts`: `connect` (3.1), `read`, `operation`, `attempt` (SDK defaults).
+
+## Environment variables
+
+| Variable | Effect |
+| --- | --- |
+| `AWS_REGION`, `AWS_PROFILE`, `AWS_*` credentials | Standard AWS configuration |
+| `FANFERRO_WORKER_THREADS` | Tokio worker threads of the native runtime (default 2-4) |
+| `FANFERRO_TEST_ENDPOINT_URL` | Test suite: use this emulator instead of starting MiniStack |

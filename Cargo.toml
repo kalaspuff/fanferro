@@ -1,0 +1,62 @@
+[workspace]
+resolver = "3"
+members = ["crates/fanferro-core", "crates/fanferro-py"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT"
+repository = "https://github.com/kalaspuff/fanferro"
+homepage = "https://github.com/kalaspuff/fanferro"
+authors = ["Carl Oscar Aaro <hello@carloscar.com>"]
+
+[workspace.dependencies]
+fanferro-core = { path = "crates/fanferro-core", version = "0.1.0" }
+aws-config = { version = "1.12", default-features = false, features = ["default-https-client", "rt-tokio", "credentials-process", "sso", "behavior-version-latest"] }
+aws-sdk-sqs = { version = "1.114", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
+aws-sdk-sns = { version = "1.116", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
+aws-sdk-s3 = { version = "1.152", default-features = false, features = ["default-https-client", "rt-tokio", "http-1x", "behavior-version-latest"] }
+aws-sdk-sts = { version = "1.119", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
+aws-smithy-types = "1.8"
+aws-smithy-runtime-api = { version = "1.19", features = ["client"] }
+aws-credential-types = "1.3"
+aws-types = "1.6"
+async-trait = "0.1"
+base64 = "0.23"
+bytes = "1.12"
+futures = "0.3"
+hex = "0.4"
+md-5 = "0.11"
+parking_lot = "0.12"
+prost = "0.14"
+prost-types = "0.14"
+pyo3 = { version = "0.29", features = ["abi3-py312"] }
+pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
+pythonize = "0.29"
+rand = "0.10"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+sha2 = "0.11"
+thiserror = "2"
+time = { version = "0.3", features = ["formatting", "parsing", "macros", "serde"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "time", "sync", "macros"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1"
+uuid = { version = "1.28", features = ["v4", "v7"] }
+
+# Local/editable builds: optimized but quick to compile.
+[profile.release]
+lto = false
+codegen-units = 16
+strip = "symbols"
+
+# Published wheels (`maturin build --profile dist`): maximum optimization.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
+[profile.dev.package."*"]
+opt-level = 1
