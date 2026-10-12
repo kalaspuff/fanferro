@@ -17,6 +17,12 @@ on:
 permissions:
   contents: read
 
+# Bash everywhere: on Windows runners the default shell is PowerShell, where `$MATURIN_VERSION`
+# is an (empty) PowerShell variable instead of the environment variable.
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
@@ -127,7 +133,6 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.0
       - run: uvx --from "maturin==$MATURIN_VERSION" maturin build --locked --profile dist --out dist
       - name: Smoke test
-        shell: bash
         run: |
           for python in 3.12 3.15; do
             uv venv --python "$python" "smoke-$python"
@@ -185,7 +190,6 @@ jobs:
           path: dist
       - uses: astral-sh/setup-uv@v10.3.0
       - name: Install the wheel and run the smoke test
-        shell: bash
         run: |
           uv venv --python ${{ matrix.python }} smoke
           uv pip install --python smoke dist/*.whl

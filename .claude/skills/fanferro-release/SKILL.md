@@ -41,8 +41,11 @@ To rebuild or retry a release for an existing tag: Actions → Release → Run w
   reviewers), then set the repository variable `PUBLISH_TO_PYPI=true`.
 - Optional: a `RELEASE_TOKEN` secret (fine-grained PAT or GitHub App token with contents and pull
   request write access) so release PRs trigger CI; without it the PR has no checks.
-- Squash merges should be enabled (PR titles become commit messages and changelog entries;
-  `pr-title.yml` enforces conventional titles).
+- Allow only squash merges, with the PR title as the commit title (Settings → General → Pull
+  Requests: disable merge commits and rebase merging; default squash message "Pull request title").
+  PR titles become commit messages and changelog entries; `pr-title.yml` enforces conventional
+  titles. A merge commit still tags the release, but its message ("Merge pull request #…") lands
+  on `main`.
 
 ## Locally
 
@@ -68,6 +71,7 @@ Commit as `chore(release): v0.2.0` through a PR; pushing a tag `v0.2.0` by hand 
 | "tag vX does not match Cargo.toml version" | The tag points at a commit without the bump; delete the tag, release from the merged bump commit |
 | "CHANGELOG.md has no '## [X]' section" | Add the section on main through a PR, re-tag (or re-run with the new tag) |
 | "tag vX already exists" in Tag release | The version was released already; prepare a new version |
+| A release job failed and nothing was published | `release.yml` runs from the tag, so a workflow fix needs a new tag: fix on `main`, delete the tag (`git push origin :refs/tags/vX`), re-tag the fixed commit and run Release for it |
 | Windows arm64 job failed | Best effort: the release continued without that wheel; fix in a patch release |
 | PyPI job skipped | `PUBLISH_TO_PYPI` is not `true`, or the GitHub release job failed |
 | PyPI "invalid-publisher" | The trusted publisher must name workflow `release.yml` and environment `pypi` |

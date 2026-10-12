@@ -26,7 +26,10 @@ jobs:
           if git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
             echo "::error::tag $tag already exists - bump the version in a new release PR"; exit 1
           fi
-          git tag "$tag" "$GITHUB_SHA"
+          # Annotated tag: GitHub shows its message for the tag instead of the merge commit's.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "fanferro $version" "$GITHUB_SHA"
           git push origin "$tag"
           # Tags pushed with the workflow token do not trigger workflows; a dispatch does.
           gh workflow run release.yml --ref "$tag" -f tag="$tag"
