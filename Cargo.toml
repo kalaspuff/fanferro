@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/fanferro-core", "crates/fanferro-py"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.94"
 license = "MIT"
@@ -12,7 +12,7 @@ homepage = "https://github.com/kalaspuff/fanferro"
 authors = ["Carl Oscar Aaro <hello@carloscar.com>"]
 
 [workspace.dependencies]
-fanferro-core = { path = "crates/fanferro-core", version = "0.1.0" }
+fanferro-core = { path = "crates/fanferro-core", version = "0.2.0" }
 aws-config = { version = "1.12", default-features = false, features = ["default-https-client", "rt-tokio", "credentials-process", "sso", "behavior-version-latest"] }
 aws-sdk-sqs = { version = "1.114", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
 aws-sdk-sns = { version = "1.116", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }

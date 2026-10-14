@@ -834,7 +834,7 @@ dependencies = [
 
 [[package]]
 name = "fanferro-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -870,7 +870,7 @@ dependencies = [
 
 [[package]]
 name = "fanferro-py"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "fanferro-core",
