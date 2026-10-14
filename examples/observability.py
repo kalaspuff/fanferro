@@ -25,6 +25,7 @@ async def main() -> list[str]:
     trace.set_tracer_provider(provider)
 
     client = make_client(
+        envelope=fanferro.envelopes.CloudEvents(),  # trace context can travel inside the CloudEvent
         logging=fanferro.LoggingConfig(
             levels={"message.processed": logging.INFO, "lease.*": None},  # promote / silence kinds
             disabled=["receive.*"],  # never log polling chatter

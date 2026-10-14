@@ -55,6 +55,29 @@ async def test_fanferro_producer_boto3_consumer(ministack_endpoint: str, aws: di
     queue = client.queue(name("to-boto3"))
     async with client:
         info = await queue.resolve()
+        sent = await queue.send(OrderCreated(order_id=1), attributes={"tenant": "acme"})
+        await queue.send(b"\x00\xffbinary", type="blob")
+    response = aws["sqs"].receive_message(
+        QueueUrl=info.url, MaxNumberOfMessages=10, MessageAttributeNames=["All"], WaitTimeSeconds=1
+    )
+    by_type = {m["MessageAttributes"]["fanferro.type"]["StringValue"]: m for m in response["Messages"]}
+    order = by_type["test.order_created.v1"]
+    assert json.loads(order["Body"]) == {"order_id": 1, "total": 0.0}, "the body is the plain JSON document"
+    attributes = order["MessageAttributes"]
+    assert attributes["fanferro.id"]["StringValue"] == sent.message_id
+    assert attributes["tenant"]["StringValue"] == "acme"
+    assert "content-type" not in attributes, "JSON is implied"
+    blob = by_type["blob"]
+    assert base64.b64decode(blob["Body"]) == b"\x00\xffbinary"
+    assert blob["MessageAttributes"]["fanferro.encoding"]["StringValue"] == "base64"
+    assert blob["MessageAttributes"]["content-type"]["StringValue"] == "application/octet-stream"
+
+
+async def test_cloudevents_producer_boto3_consumer(ministack_endpoint: str, aws: dict[str, Any], name: Any) -> None:
+    client = emulator_client(ministack_endpoint, envelope=fanferro.envelopes.CloudEvents())
+    queue = client.queue(name("ce-to-boto3"))
+    async with client:
+        info = await queue.resolve()
         await queue.send(OrderCreated(order_id=1), attributes={"tenant": "acme"})
         await queue.send(b"\x00\xffbinary", type="blob")
     response = aws["sqs"].receive_message(
@@ -103,7 +126,7 @@ async def test_aws_extended_client_pointers(ministack_endpoint: str, aws: dict[s
     assert pointer[0] == "software.amazon.payloadoffloading.PayloadS3Pointer"
     assert "ExtendedPayloadSize" in response["Messages"][0]["MessageAttributes"]
     stored = aws["s3"].get_object(Bucket=pointer[1]["s3BucketName"], Key=pointer[1]["s3Key"])["Body"].read()
-    assert json.loads(stored)["data"] == big, "the stored object is the full CloudEvent"
+    assert json.loads(stored) == big, "the stored object is the message body"
 
 
 async def test_presigned_url_pointers_are_allow_listed(ministack_endpoint: str, aws: dict[str, Any], name: Any) -> None:

@@ -8,6 +8,51 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 
 ## [Unreleased]
 
+### Lean, fast defaults (breaking)
+
+Without any tuning, clients and consumers now perform like a hand-tuned 0.1 configuration
+([ADR 0008](docs/adr/0008-lean-defaults.md)):
+
+- Messages are published with the **raw envelope**: the body is the encoded payload (e.g. the
+  JSON document); `fanferro.id` and `fanferro.type` (typed messages) travel as message attributes,
+  `content-type` only for payloads that are not JSON. CloudEvents is opt-in:
+  `Client(envelope=fanferro.envelopes.CloudEvents())`. Consumers still read CloudEvents (JSON and
+  protobuf), so messages from 0.1 producers keep working.
+- **MD5 verification** of sent and received messages is opt-in: `Client(verify_md5=True)`.
+- **`consumer.stop()` returns at once**: `ShutdownPolicy.abort_receives` defaults to `True` (running
+  handlers still drain). SQS may still hand the aborted long poll up to `batch_size` messages per
+  poller; they are redelivered after their visibility timeout.
+- **Full receives**: a poller waits until `min_receive_batch` handler slots are free (default:
+  `batch_size`; FIFO queues: 1), for at most `receive_batch_wait` (0.1 s) after the first one, and
+  `prefetch` defaults to one receive batch per poller (`min(batch_size, concurrency) × pollers`).
+- **Slots are freed when settlement starts**: a handler that returns hands its slot to the next
+  message while the delete is in flight; settlements in progress are bounded separately.
+- **Batched acks**: deletes and visibility changes wait up to `settle_linger` (5 ms) to fill a
+  batch of ten, and are sent at once when every running handler awaits an explicit settlement.
+- `consumer.stop()` and `client.close()` no longer wait up to half a second for the dispatcher or
+  the event pump, and events emitted just before `close()` are no longer lost.
+
+Migrating from 0.1:
+
+- Upgrade consumers before producers. 0.1 consumers read 0.2 messages (typed routes, message ids
+  and filter policies on `fanferro.type` work), but they do not imply JSON for raw messages:
+  untyped routes see JSON scalars as `bytes`, and CloudEvents metadata (`message.source`,
+  `subject`, headers) is absent.
+- Services that parse fanferro messages as CloudEvents themselves keep producing them with
+  `Client(envelope=fanferro.envelopes.CloudEvents())`.
+- The 0.1 behaviour is one configuration away:
+
+  ```python
+  client = fanferro.Client(envelope=fanferro.envelopes.CloudEvents(), verify_md5=True)
+  consumer = client.consumer(
+      queue,
+      min_receive_batch=1,
+      prefetch=0,
+      settle_linger=0,
+      shutdown=fanferro.ShutdownPolicy(abort_receives=False),
+  )
+  ```
+
 ## [0.1.0] - 2026-10-12
 
 First release.

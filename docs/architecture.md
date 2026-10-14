@@ -51,14 +51,14 @@ Rust    transport: non-text body → base64 + fanferro.encoding
                    size > threshold → S3 + pointer + fanferro.claim-check   (or AWS extended format)
                    size > limit without offloading → MessageTooLargeError (fail fast)
         FIFO: group id required, dedup id defaults to the message id
-        SendMessage/Publish (+ batches, partial-failure retries, MD5 verification)
+        SendMessage/Publish (+ batches, partial-failure retries, optional MD5 verification)
 ```
 
 Consuming (`consumer.run()`):
 
 ```text
 Rust    pollers: acquire in-flight permits (+ rate limiter) ─▶ ReceiveMessage (long poll)
-        lease each message (heartbeats start now) ─▶ MD5 check ─▶ SNS notification unwrap
+        lease each message (heartbeats start now) ─▶ MD5 check (opt-in) ─▶ SNS notification unwrap
         ─▶ transport decode (claim-check fetch, base64) ─▶ Delivery into a bounded channel
 Python  dispatcher: next_batch() ─▶ per-message task (FIFO: sequenced per group)
         envelope unwrap (configured order) ─▶ Message ─▶ attempts check (max_attempts)
@@ -95,9 +95,10 @@ These are relied upon across layers; tests cover each of them.
 7. **No hidden I/O on import.** Importing fanferro does nothing; the client connects lazily or
    on `async with`. Optional libraries (pydantic, protobuf, msgspec, OpenTelemetry) are never
    imported by fanferro unless the application uses them.
-8. **Graceful shutdown leaks nothing.** Stopping waits for the last long poll (or aborts it and
-   delays releases past it, see [ADR 0007](adr/0007-shutdown-and-orphaned-long-polls.md)), drains
-   handlers within the policy, releases or abandons what is left, flushes settlements.
+8. **Graceful shutdown leaks nothing.** Stopping aborts the long poll in flight and keeps
+   messages it releases invisible until SQS ended that poll (or waits for the poll, see
+   [ADR 0007](adr/0007-shutdown-and-orphaned-long-polls.md) and [ADR 0008](adr/0008-lean-defaults.md)),
+   drains handlers within the policy, releases or abandons what is left, flushes settlements.
 9. **Events are cheap when unused.** Rust only builds events of kinds that logging or a hook
    wants (atomic flag check); the buffer is bounded and overflow is reported (`events.dropped`).
 10. **Fork safety.** The Tokio runtime is per process; clients created before `fork()` refuse to

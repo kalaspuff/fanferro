@@ -21,14 +21,18 @@ ATTRIBUTES = ROOT / "docs" / "reference" / "attributes.md"
 ATTRIBUTE_DESCRIPTIONS = {
     "content-type": (
         "Media type of the wire body: `application/cloudevents+json`, `application/cloudevents+protobuf`, "
-        "or the payload type for the raw envelope. Used to detect the envelope.",
+        "or the payload type for the raw envelope (not written for JSON, which is implied). Used to detect "
+        "the envelope.",
         "envelopes (configurable)",
     ),
     "fanferro.type": (
         "Message type name, promoted so SNS filter policies and routers can use it without parsing the body.",
         "envelopes (configurable)",
     ),
-    "fanferro.id": ("Message id for the raw envelope (other envelopes carry it in the body).", "raw envelope"),
+    "fanferro.id": (
+        "Message id for the raw envelope (other envelopes carry it in the body); stable across retries.",
+        "raw envelope",
+    ),
     "fanferro.encoding": ("`base64` when the transport base64-encoded a binary body.", "transport"),
     "fanferro.claim-check": ("Marks a claim-check pointer body (`v1`); the payload is stored externally.", "transport"),
     "fanferro.attempt": ("Attempt counter carried across re-enqueues (`RetryPolicy(strategy='requeue')`).", "consumer"),
@@ -83,10 +87,12 @@ def render_attributes() -> str:
         lines.append(f"| `{name}` | {writer} | {description} |")
     lines += [
         "",
-        "Typical budget: a CloudEvents message uses 2 attributes (`content-type`, `fanferro.type`), plus",
-        "1-2 for trace context with message-attribute propagation, leaving 6-7 for application attributes.",
-        "Disable what you do not need (`CloudEvents(content_type_attribute=False, type_attribute=None)`,",
-        "`Propagation(inject=(Carrier.ENVELOPE,))`).",
+        "Typical budget: a raw message (the default envelope) uses 1-2 attributes (`fanferro.id`, plus",
+        "`fanferro.type` for typed messages and `content-type` for non-JSON payloads); a CloudEvents message",
+        "uses 2 (`content-type`, `fanferro.type`). Trace context with message-attribute propagation adds 1-2,",
+        "leaving 6-7 for application attributes. Disable what you do not need",
+        "(`Raw(type_attribute=None)`, `CloudEvents(content_type_attribute=False, type_attribute=None)`,",
+        "`Propagation(inject=(Carrier.AWS_TRACE_HEADER,))`).",
     ]
     return "\n".join(lines) + "\n"
 

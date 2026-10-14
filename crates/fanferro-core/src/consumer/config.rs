@@ -27,9 +27,6 @@ fn d1() -> usize {
 fn d30() -> f64 {
     30.0
 }
-fn dtrue() -> bool {
-    true
-}
 fn d_receive_batch_wait() -> f64 {
     0.1
 }
@@ -149,8 +146,8 @@ pub struct ConsumerConfig {
     /// Confirm SNS subscription confirmation requests that arrive on the queue.
     #[serde(default)]
     pub auto_confirm_subscriptions: bool,
-    /// Verify MD5 digests of received messages.
-    #[serde(default = "dtrue")]
+    /// Verify MD5 digests of received messages (opt-in).
+    #[serde(default)]
     pub verify_md5: bool,
     /// Backoff after failed receive calls.
     #[serde(default = "default_receive_backoff")]
@@ -337,7 +334,7 @@ impl ConsumerConfig {
             dead_letter_fifo: None,
             sns_unwrap: SnsUnwrap::Auto,
             auto_confirm_subscriptions: false,
-            verify_md5: true,
+            verify_md5: false,
             receive_backoff: default_receive_backoff(),
         }
     }

@@ -52,7 +52,9 @@ async def test_trace_propagation(otel: Any, carrier: Carrier, name: Any) -> None
         meter_provider=meter_provider,
         propagation=Propagation(inject=(carrier,), extract=(carrier,)),
     )
-    client = testing.memory_client(telemetry=telemetry)
+    # The envelope carrier is the CloudEvents distributed tracing extension.
+    envelope = fanferro.envelopes.CloudEvents() if carrier is Carrier.ENVELOPE else None
+    client = testing.memory_client(telemetry=telemetry, envelope=envelope)
     queue = client.queue(name("traced"))
     handler_spans: list[Any] = []
     consumer = client.consumer(queue, wait_time=1)

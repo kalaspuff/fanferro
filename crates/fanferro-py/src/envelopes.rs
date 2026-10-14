@@ -1,7 +1,7 @@
 //! Built-in envelopes exposed to Python. They implement the same protocol as custom
 //! Python envelopes: `name`, `wrap(payload) -> WireMessage`, `unwrap(wire) -> Payload | None`.
 
-use fanferro_core::envelope::{CloudEventsJson, CloudEventsProtobuf, Envelope, RawEnvelope};
+use fanferro_core::envelope::{CloudEventsJson, CloudEventsProtobuf, Envelope, IMPLICIT_CONTENT_TYPE, RawEnvelope};
 use pyo3::prelude::*;
 
 use crate::errors::to_py_err;
@@ -15,7 +15,7 @@ fn unwrap(envelope: &dyn Envelope, wire: &Bound<'_, PyWireMessage>) -> PyResult<
     envelope.unwrap(&wire.get().inner).map(|payload| payload.map(|inner| PyPayload { inner })).map_err(to_py_err)
 }
 
-/// CloudEvents 1.0 structured JSON envelope (the default).
+/// CloudEvents 1.0 structured JSON envelope.
 #[pyclass(name = "CloudEventsEnvelope", module = "fanferro._core", frozen)]
 pub struct PyCloudEvents {
     inner: CloudEventsJson,
@@ -121,7 +121,7 @@ impl PyCloudEventsProtobuf {
     }
 }
 
-/// Raw envelope: the payload is the body; metadata travels in attributes.
+/// Raw envelope (the default): the payload is the body; metadata travels in attributes.
 #[pyclass(name = "RawEnvelope", module = "fanferro._core", frozen)]
 pub struct PyRaw {
     inner: RawEnvelope,
@@ -130,13 +130,20 @@ pub struct PyRaw {
 #[pymethods]
 impl PyRaw {
     #[new]
-    #[pyo3(signature = (*, content_type_attribute=Some("content-type".to_string()), type_attribute=Some("fanferro.type".to_string()), id_attribute=Some("fanferro.id".to_string())))]
+    #[pyo3(signature = (
+        *,
+        content_type_attribute=Some("content-type".to_string()),
+        type_attribute=Some("fanferro.type".to_string()),
+        id_attribute=Some("fanferro.id".to_string()),
+        implicit_content_type=Some(IMPLICIT_CONTENT_TYPE.to_string()),
+    ))]
     fn new(
         content_type_attribute: Option<String>,
         type_attribute: Option<String>,
         id_attribute: Option<String>,
+        implicit_content_type: Option<String>,
     ) -> Self {
-        Self { inner: RawEnvelope { content_type_attribute, type_attribute, id_attribute } }
+        Self { inner: RawEnvelope { content_type_attribute, type_attribute, id_attribute, implicit_content_type } }
     }
 
     /// `"raw"`.
@@ -163,6 +170,12 @@ impl PyRaw {
         self.inner.id_attribute.as_deref()
     }
 
+    /// Content type sent without the content-type attribute (`None`: always written).
+    #[getter]
+    fn implicit_content_type(&self) -> Option<&str> {
+        self.inner.implicit_content_type.as_deref()
+    }
+
     /// Wraps a payload.
     fn wrap(&self, payload: &Bound<'_, PyPayload>) -> PyResult<PyWireMessage> {
         wrap(&self.inner, payload)
@@ -175,8 +188,11 @@ impl PyRaw {
 
     fn __repr__(&self) -> String {
         format!(
-            "RawEnvelope(content_type_attribute={:?}, type_attribute={:?}, id_attribute={:?})",
-            self.inner.content_type_attribute, self.inner.type_attribute, self.inner.id_attribute
+            "RawEnvelope(content_type_attribute={:?}, type_attribute={:?}, id_attribute={:?}, implicit_content_type={:?})",
+            self.inner.content_type_attribute,
+            self.inner.type_attribute,
+            self.inner.id_attribute,
+            self.inner.implicit_content_type
         )
     }
 }

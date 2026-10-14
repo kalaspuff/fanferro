@@ -2,12 +2,12 @@
 
 Built-in envelopes are implemented in Rust:
 
-* :class:`CloudEvents` - CloudEvents 1.0 structured JSON (default for publishing). JSON payloads
-  are embedded verbatim, text as a string, binary as ``data_base64``. Headers become CloudEvents
-  extension attributes.
+* :class:`Raw` - no envelope (default for publishing): the payload is the body; the message id
+  and type travel in message attributes (``fanferro.id``, ``fanferro.type``), the content type
+  too unless it is JSON. Any SQS/SNS client can read and write these messages.
+* :class:`CloudEvents` - CloudEvents 1.0 structured JSON. JSON payloads are embedded verbatim,
+  text as a string, binary as ``data_base64``. Headers become CloudEvents extension attributes.
 * :class:`CloudEventsProtobuf` - CloudEvents 1.0 protobuf format (compact binary).
-* :class:`Raw` - no envelope: the payload is the body; metadata travels in message attributes.
-  Use it to exchange messages with systems that do not speak CloudEvents.
 
 Consumers try their envelopes in order (default: CloudEvents, CloudEventsProtobuf, Raw), so a
 queue can receive a mix of formats. Custom envelopes implement the :class:`Envelope` protocol::
@@ -51,7 +51,7 @@ CloudEventsProtobuf = CloudEventsProtobufEnvelope
 """CloudEvents 1.0 protobuf envelope (``application/cloudevents+protobuf``)."""
 
 Raw = RawEnvelope
-"""No envelope: payload bytes as the body, metadata in attributes."""
+"""No envelope (the default): payload bytes as the body, metadata in attributes."""
 
 
 @runtime_checkable

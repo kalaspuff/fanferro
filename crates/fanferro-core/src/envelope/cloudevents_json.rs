@@ -184,8 +184,10 @@ impl Envelope for CloudEventsJson {
             Some(ct) if media_type_essence(ct) == CLOUDEVENTS_JSON_CONTENT_TYPE => parse_event(&wire.body).map(Some),
             Some(_) => Ok(None),
             None => {
+                // Without the attribute, only a JSON object with a `specversion` key can be a
+                // CloudEvent: other bodies (raw JSON, the default envelope) are not parsed here.
                 let trimmed = wire.body.trim_ascii_start();
-                if !trimmed.starts_with(b"{") {
+                if !trimmed.starts_with(b"{") || memchr::memmem::find(trimmed, b"\"specversion\"").is_none() {
                     return Ok(None);
                 }
                 let Ok(map) = serde_json::from_slice::<BTreeMap<String, &RawValue>>(&wire.body) else {
@@ -382,12 +384,17 @@ mod tests {
         let decoded = envelope.unwrap(&wire).unwrap().unwrap();
         assert_eq!(&decoded.data[..], br#"{"x":1}"#);
         assert_eq!(decoded.content_type.as_deref(), Some("application/json"));
+        // Any key order and whitespace (other CloudEvents producers).
+        let body = br#" { "data" : {"x":1}, "type":"t", "id":"1", "source":"s", "specversion" : "1.0" }"#;
+        let wire = WireMessage { body: Bytes::from_static(body), attributes: MessageAttributes::new() };
+        assert_eq!(envelope.unwrap(&wire).unwrap().unwrap().message_type.as_deref(), Some("t"));
     }
 
     #[test]
     fn foreign_messages_are_not_claimed() {
         let envelope = CloudEventsJson::default();
-        for body in [&b"plain text"[..], br#"{"order":1}"#, b"[1,2]", b"{bad json"] {
+        for body in [&b"plain text"[..], br#"{"order":1}"#, b"[1,2]", b"{bad json", br#"{"doc":{"specversion":"1.0"}}"#]
+        {
             let wire = WireMessage { body: Bytes::copy_from_slice(body), attributes: MessageAttributes::new() };
             assert!(envelope.unwrap(&wire).unwrap().is_none());
         }

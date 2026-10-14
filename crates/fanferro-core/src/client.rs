@@ -12,10 +12,6 @@ use crate::metrics::ClientMetrics;
 use crate::retry::RetrySettings;
 use crate::transport::{FetchSettings, OffloadSettings, Transport};
 
-fn default_true() -> bool {
-    true
-}
-
 fn default_event_capacity() -> usize {
     10_000
 }
@@ -33,8 +29,9 @@ pub struct ClientConfig {
     /// Retries for failed batch entries and checksum mismatches.
     #[serde(default)]
     pub publish_retry: RetrySettings,
-    /// Verify the MD5 digests returned by SQS for sent and received messages.
-    #[serde(default = "default_true")]
+    /// Verify the MD5 digests returned by SQS for sent and received messages (opt-in: TLS
+    /// already protects messages in transit).
+    #[serde(default)]
     pub verify_md5: bool,
     /// Maximum number of buffered events before new ones are dropped.
     #[serde(default = "default_event_capacity")]
@@ -47,7 +44,7 @@ impl Default for ClientConfig {
             offload: None,
             fetch: FetchSettings::default(),
             publish_retry: RetrySettings::default(),
-            verify_md5: true,
+            verify_md5: false,
             event_capacity: default_event_capacity(),
         }
     }

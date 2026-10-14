@@ -15,7 +15,7 @@ from tests.helpers import OrderCancelled, OrderCreated, consume_until, drain_que
 
 
 async def test_queue_roundtrip_with_metadata(client_factory: ClientFactory, name: Any) -> None:
-    client = client_factory(source="urn:service:test")
+    client = client_factory(source="urn:service:test", envelope=fanferro.envelopes.CloudEvents())
     queue = client.queue(name("roundtrip"))
     received: list[fanferro.Message[OrderCreated]] = []
     consumer = client.consumer(queue, wait_time=1)
@@ -47,6 +47,48 @@ async def test_queue_roundtrip_with_metadata(client_factory: ClientFactory, name
     assert isinstance(message.time, datetime.datetime)
     assert message.outcome == "acked"
     assert (await queue.approximate_count())["visible"] == 0
+
+
+async def test_default_raw_envelope(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory()
+    queue = client.queue(name("lean"))
+    typed: list[fanferro.Message[OrderCreated]] = []
+    untyped: list[fanferro.Message[Any]] = []
+    consumer = client.consumer(queue, wait_time=1)
+
+    @consumer.route(OrderCreated)
+    async def handle(message: fanferro.Message[OrderCreated]) -> None:
+        typed.append(message)
+
+    @consumer.default
+    async def other(message: fanferro.Message) -> None:
+        untyped.append(message)
+
+    async with client:
+        result = await queue.send(OrderCreated(order_id=1, total=9.5), attributes={"tenant": "acme"}, headers={"v": 2})
+        for body in ({"plain": True}, [1, 2], 42, None, "text", b"\x00\x01"):
+            await queue.send(body)
+        await consume_until(consumer, lambda: len(typed) == 1 and len(untyped) == 6)
+    message = typed[0]
+    assert message.envelope == "raw"
+    assert message.body == OrderCreated(order_id=1, total=9.5)
+    assert message.id == result.message_id
+    assert message.type == "test.order_created.v1"
+    assert message.content_type == "application/json"
+    assert message.attribute("tenant") == "acme"
+    assert message.attribute("v") == 2, "without an envelope, headers travel as attributes"
+    assert {"fanferro.id", "fanferro.type", "tenant", "v"} <= set(message.raw_attributes)
+    assert "content-type" not in message.raw_attributes, "JSON is implied"
+    bodies = {repr(m.body): m.content_type for m in untyped}
+    assert bodies == {
+        "{'plain': True}": "application/json",
+        "[1, 2]": "application/json",
+        "42": "application/json",
+        "None": "application/json",
+        "'text'": "text/plain; charset=utf-8",
+        "b'\\x00\\x01'": "application/octet-stream",
+    }
+    assert all(m.envelope == "raw" and m.id for m in untyped)
 
 
 async def test_topic_fanout_raw_and_wrapped(client_factory: ClientFactory, name: Any) -> None:

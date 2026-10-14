@@ -13,7 +13,7 @@ from fanferro._core import CoreClient, MemoryBroker
 from fanferro._utils import LoopLocal, maybe_await
 from fanferro.codecs import Codec, CodecRegistry
 from fanferro.config import AwsRetry, Credentials, Timeouts
-from fanferro.envelopes import CloudEvents, Envelope, as_tuple
+from fanferro.envelopes import Envelope, Raw, as_tuple
 from fanferro.errors import ConfigurationError, ProvisioningError, ResourceUnavailableError
 from fanferro.events import Event, EventDispatcher, EventHook, EventKind, KindSelector, LoggingConfig
 from fanferro.message_types import MessageTypes
@@ -73,8 +73,11 @@ class Client:
         profile: Named AWS profile.
         credentials: Static credentials (default: the AWS provider chain).
         account_id: AWS account id (avoids an STS call when deriving topic ARNs).
-        source: CloudEvents ``source`` of published messages, e.g. ``"urn:service:orders"``.
-        envelope: Envelope for publishing (default: CloudEvents JSON).
+        source: CloudEvents ``source`` of published messages, e.g. ``"urn:service:orders"`` (only
+            carried by CloudEvents envelopes).
+        envelope: Envelope for publishing (default: :class:`~fanferro.envelopes.Raw`: the payload
+            is the body, the message id and type travel in attributes). Pass
+            ``fanferro.envelopes.CloudEvents()`` for self-describing CloudEvents.
         accept_envelopes: Envelopes consumers try, in order (default: CloudEvents JSON,
             CloudEvents protobuf, raw).
         codecs: Codec registry (default: protobuf, pydantic, msgspec, dataclass, bytes, text, JSON).
@@ -87,7 +90,8 @@ class Client:
         aws_retry: Retries of individual AWS calls.
         timeouts: Timeouts of AWS calls.
         publish_retry_attempts: Attempts for failed batch entries and checksum mismatches.
-        verify_md5: Verify SQS MD5 digests of sent and received messages.
+        verify_md5: Verify SQS MD5 digests of sent and received messages (opt-in; TLS already
+            protects messages in transit).
         publish_middleware: Middleware wrapping message preparation.
         consume_middleware: Middleware wrapping every handler of every consumer.
         broker: Use an in-memory broker instead of AWS (see :mod:`fanferro.testing`).
@@ -118,7 +122,7 @@ class Client:
         aws_retry: AwsRetry | None = None,
         timeouts: Timeouts | None = None,
         publish_retry_attempts: int = 4,
-        verify_md5: bool = True,
+        verify_md5: bool = False,
         publish_middleware: Sequence[PublishMiddleware] = (),
         consume_middleware: Sequence[ConsumeMiddleware] = (),
         broker: MemoryBroker | None = None,
@@ -133,7 +137,7 @@ class Client:
         self.credentials = credentials
         self.account_id = account_id
         self.source = source
-        self.envelope: Envelope = envelope or CloudEvents(default_source=source)
+        self.envelope: Envelope = envelope or Raw()
         self.accept_envelopes: tuple[Envelope, ...] | None = as_tuple(accept_envelopes)
         if isinstance(codecs, CodecRegistry):
             self.codecs = codecs

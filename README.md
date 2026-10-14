@@ -40,16 +40,16 @@ async def main() -> None:
 
 ## Why fanferro
 
-* **A consumer you do not have to write.** Long polling with in-flight limits, prefetch and rate
-  limiting; visibility **heartbeats** that run on Rust threads (a busy event loop never loses a
-  lease); batched acks; **graceful shutdown** with drain timeouts, progress events and no
-  messages stuck behind orphaned long polls.
+* **A consumer you do not have to write.** Long polling with full receive batches, in-flight
+  limits, prefetch and rate limiting; visibility **heartbeats** that run on Rust threads (a busy
+  event loop never loses a lease); batched acks; **graceful shutdown** that stops receiving at
+  once and drains running handlers with timeouts and progress events.
 * **Failure handling built in.** Retry policies with backoff (change visibility or re-enqueue),
   max-attempt limits, dead-letter forwarding with error metadata, `Retry` / `Requeue` / `Reject` /
   `Discard` handler actions, policies for undecodable and unroutable messages.
 * **Any message type.** Pydantic, dataclasses, msgspec, protobuf, JSON, text, bytes - or your own
-  codec. **CloudEvents** envelopes (JSON or binary protobuf), raw messages for interop, or your own
-  envelope.
+  codec. Plain message bodies that any SQS/SNS client reads (the default), **CloudEvents**
+  envelopes (JSON or binary protobuf), or your own envelope.
 * **Routing** by message type, version header, attributes, JSON body fields or SNS topic.
 * **Large payloads** go through S3 automatically (claim checks with bucket/key or **presigned URLs**,
   SHA-256 verified, SSRF-safe, AWS Extended Client compatible).
