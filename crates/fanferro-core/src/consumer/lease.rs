@@ -1,9 +1,11 @@
 //! Leases: exclusive, heartbeat-protected ownership of a received message.
 //!
 //! A lease exists from the moment a message is received until it is settled (acked,
-//! retried, released, requeued or dead-lettered). While it exists the heartbeat keeps the
-//! message invisible to other consumers and the lease holds one in-flight permit, which is
-//! what bounds how many messages a consumer holds at once. Dropping an unsettled lease
+//! retried, released, requeued or dead-lettered). Until its settlement starts, the heartbeat
+//! keeps the message invisible to other consumers and the lease holds one in-flight permit,
+//! which is what bounds how many unsettled messages a consumer holds at once. A settlement
+//! exchanges that permit for a settling permit (bounding the settlement backlog), so the
+//! poller can refill the slot during the settlement's round trip. Dropping an unsettled lease
 //! releases the message (makes it visible again immediately) as a safety net.
 
 use std::collections::BTreeMap;
@@ -85,7 +87,10 @@ pub struct Lease {
     pub(crate) id: u64,
     pub(crate) inner: Arc<EngineInner>,
     pub(crate) message: Arc<ReceivedMessage>,
+    /// In-flight slot: held from receipt until the settlement starts.
     permit: Mutex<Option<OwnedSemaphorePermit>>,
+    /// Settling slot: held while the settlement is in progress.
+    settling: Mutex<Option<OwnedSemaphorePermit>>,
     settled: AtomicBool,
 }
 
@@ -115,7 +120,14 @@ impl Lease {
         message: Arc<ReceivedMessage>,
         permit: OwnedSemaphorePermit,
     ) -> Self {
-        Self { id, inner, message, permit: Mutex::new(Some(permit)), settled: AtomicBool::new(false) }
+        Self {
+            id,
+            inner,
+            message,
+            permit: Mutex::new(Some(permit)),
+            settling: Mutex::new(None),
+            settled: AtomicBool::new(false),
+        }
     }
 
     /// The raw received message.
@@ -151,14 +163,30 @@ impl Lease {
         }
     }
 
-    fn begin(&self) -> Result<()> {
+    /// Starts a settlement: waits for a settling slot (heartbeats keep protecting the message
+    /// meanwhile), then hands the in-flight slot back so that receiving continues while the
+    /// settlement completes. The lease stays tracked until [`Lease::finish`].
+    async fn begin(&self) -> Result<()> {
         if self.settled.swap(true, Ordering::SeqCst) {
             return Err(Error::Lease(format!("message {} was already settled", self.message.message_id)));
+        }
+        // The semaphore is never closed, so this only fails if the engine is gone.
+        if let Ok(permit) = self.inner.settling.clone().acquire_owned().await {
+            *self.settling.lock() = Some(permit);
+            self.inner.metrics.settling.add(1);
         }
         if let Some(entry) = self.inner.leases.lock().get_mut(&self.id) {
             entry.status = LeaseStatus::Settling;
         }
+        self.permit.lock().take();
         Ok(())
+    }
+
+    /// Returns the settling slot (if one is held).
+    fn end_settling(&self) {
+        if self.settling.lock().take().is_some() {
+            self.inner.metrics.settling.add(-1);
+        }
     }
 
     fn finish(&self, outcome: Outcome, result: &Result<()>) {
@@ -166,6 +194,7 @@ impl Lease {
             self.inner.metrics.in_flight.add(-1);
         }
         self.permit.lock().take();
+        self.end_settling();
         let metrics = &self.inner.metrics;
         let message_id = self.message.message_id.clone();
         let queue = self.inner.settings.queue_url.clone();
@@ -213,7 +242,7 @@ impl Lease {
 
     /// Deletes the message (successful processing).
     pub async fn ack(&self) -> Result<()> {
-        self.begin()?;
+        self.begin().await?;
         let result = self.settle(SettleKind::Delete).await;
         self.finish(Outcome::Acked, &result);
         result
@@ -221,7 +250,7 @@ impl Lease {
 
     /// Makes the message visible again after `delay` (retry with backoff).
     pub async fn nack(&self, delay: Duration) -> Result<()> {
-        self.begin()?;
+        self.begin().await?;
         let delay = self.cap_visibility(self.inner.visibility_floor(delay));
         let result = self.settle(SettleKind::Visibility(delay)).await;
         self.finish(Outcome::Retried, &result);
@@ -245,7 +274,7 @@ impl Lease {
 
     /// Makes the message visible again immediately (no processing happened).
     pub async fn release(&self) -> Result<()> {
-        self.begin()?;
+        self.begin().await?;
         let result = self.settle(SettleKind::Visibility(self.inner.visibility_floor(Duration::ZERO))).await;
         self.finish(Outcome::Released, &result);
         if result.is_ok() {
@@ -288,7 +317,7 @@ impl Lease {
                 self.message.message_id, self.inner.settings.queue_url
             )));
         };
-        self.begin()?;
+        self.begin().await?;
         let result = self.forward_to_dead_letter_queue(&dlq_url, reason, details).await;
         let result = match result {
             Ok(()) => self.settle(SettleKind::Delete).await,
@@ -362,7 +391,7 @@ impl Lease {
     /// Sends a copy of the message back to the queue with an incremented attempt counter
     /// (and optional delay on standard queues), then deletes the original.
     pub async fn requeue(&self, delay: Option<Duration>, attempt: u32) -> Result<()> {
-        self.begin()?;
+        self.begin().await?;
         let message = &self.message;
         let mut attributes = message.attributes.clone();
         let result = if attributes.len() >= MAX_ATTRIBUTES && !attributes.contains_key(reserved::ATTEMPT) {
@@ -403,6 +432,7 @@ impl Lease {
 
 impl Drop for Lease {
     fn drop(&mut self) {
+        self.end_settling();
         let was_settled = self.settled.swap(true, Ordering::SeqCst);
         // `finish` and `close` remove settled entries; anything still tracked is ours to clean up.
         let tracked = self.inner.leases.lock().remove(&self.id).is_some();

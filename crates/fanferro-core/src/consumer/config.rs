@@ -91,9 +91,15 @@ pub struct ConsumerConfig {
     /// FIFO queue.
     #[serde(default)]
     pub fifo: bool,
-    /// Maximum leased messages (processing plus prefetched).
+    /// Maximum leased messages that are not being settled (processing plus prefetched).
     #[serde(default = "d10")]
     pub max_in_flight: usize,
+    /// Maximum messages whose settlement (delete, visibility change, dead-letter, requeue) is in
+    /// progress (default: four times `max_in_flight`). A message hands its in-flight slot back
+    /// when its settlement starts, so receiving continues during the settlement round trip;
+    /// this bounds that backlog.
+    #[serde(default)]
+    pub max_settling: Option<usize>,
     /// Messages per receive call (1-10).
     #[serde(default = "d10u8")]
     pub batch_size: u8,
@@ -146,6 +152,7 @@ pub(crate) struct Settings {
     pub queue_arn: Option<String>,
     pub fifo: bool,
     pub max_in_flight: usize,
+    pub max_settling: usize,
     pub batch_size: u8,
     pub wait_time: Duration,
     pub pollers: usize,
@@ -174,6 +181,9 @@ impl ConsumerConfig {
         }
         if self.max_in_flight == 0 {
             return Err(Error::config("max_in_flight must be at least 1"));
+        }
+        if self.max_settling == Some(0) {
+            return Err(Error::config("max_settling must be at least 1"));
         }
         if !(1..=10).contains(&self.batch_size) {
             return Err(Error::config("batch_size must be between 1 and 10"));
@@ -235,6 +245,7 @@ impl ConsumerConfig {
             queue_arn: self.queue_arn.clone(),
             fifo: self.fifo,
             max_in_flight: self.max_in_flight,
+            max_settling: self.max_settling.unwrap_or_else(|| self.max_in_flight.saturating_mul(4)),
             batch_size: self.batch_size,
             wait_time,
             pollers: self.pollers,
@@ -264,6 +275,7 @@ impl ConsumerConfig {
             queue_arn: None,
             fifo: false,
             max_in_flight: d10(),
+            max_settling: None,
             batch_size: d10u8(),
             wait_time: d20(),
             pollers: d1(),
@@ -292,12 +304,14 @@ mod tests {
         assert_eq!(settings.extend_by, Duration::from_secs(30));
         assert_eq!(settings.max_lease, MAX_VISIBILITY);
         assert!(settings.heartbeat_enabled);
+        assert_eq!(settings.max_settling, 40);
     }
 
     #[test]
     fn invalid_configs_are_rejected() {
         let base = ConsumerConfig::new("u");
         assert!(ConsumerConfig { max_in_flight: 0, ..base.clone() }.validate().is_err());
+        assert!(ConsumerConfig { max_settling: Some(0), ..base.clone() }.validate().is_err());
         assert!(ConsumerConfig { batch_size: 11, ..base.clone() }.validate().is_err());
         assert!(ConsumerConfig { wait_time: 21.0, ..base.clone() }.validate().is_err());
         assert!(ConsumerConfig { pollers: 0, ..base.clone() }.validate().is_err());

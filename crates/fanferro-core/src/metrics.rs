@@ -138,8 +138,10 @@ metric_set! {
         leases_lost: Counter,
         /// Leases that hit the maximum lease duration.
         leases_expired: Counter,
-        /// Messages leased and not yet settled (buffered or processing).
+        /// Messages leased and not yet settled (buffered, processing or settling).
         in_flight: Gauge,
+        /// Messages whose settlement is in progress (their in-flight slot is free again).
+        settling: Gauge,
         /// Messages decoded and waiting to be picked up by the dispatcher.
         buffered: Gauge,
     }

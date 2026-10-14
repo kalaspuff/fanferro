@@ -112,6 +112,75 @@ async fn max_in_flight_bounds_leases() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn settlement_frees_the_in_flight_slot_when_it_starts() {
+    let fx = fixture(ClientConfig::default()).await;
+    fx.send("a").await;
+    fx.send("b").await;
+    let engine = fx.engine(|c| {
+        c.max_in_flight = 1;
+        c.settle.linger = 1.0;
+    });
+    let first = collect(&engine, 1).await.remove(0);
+    let acking = tokio::spawn(async move { first.lease.ack().await });
+    // The delete lingers in the settle loop, but the slot is free as soon as the ack started.
+    let second = collect_within(&engine, 1, Duration::from_millis(500)).await;
+    assert_eq!(second.len(), 1);
+    assert!(!acking.is_finished());
+    let stats = engine.stats();
+    assert_eq!(stats.metrics["settling"], 1);
+    assert_eq!(stats.metrics["in_flight"], 2, "a settling message stays leased until the delete completed");
+    assert_eq!(stats.leases, 2);
+    acking.await.unwrap().unwrap();
+    assert_eq!(engine.stats().metrics["settling"], 0);
+    second[0].lease.ack().await.unwrap();
+    assert_eq!(engine.stats().metrics["in_flight"], 0);
+    engine.close(true).await;
+    assert!(fx.stored().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn settling_backlog_is_bounded() {
+    let fx = fixture(ClientConfig::default()).await;
+    for i in 0..3 {
+        fx.send(&format!("m{i}")).await;
+    }
+    let engine = fx.engine(|c| {
+        c.max_in_flight = 2;
+        c.max_settling = Some(1);
+        c.settle.linger = 1.0;
+    });
+    let mut deliveries = collect(&engine, 2).await;
+    let second = deliveries.pop().unwrap();
+    let first = deliveries.pop().unwrap();
+    first.lease.mark_active();
+    second.lease.mark_active();
+    let first_ack = tokio::spawn(async move { first.lease.ack().await });
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let second = Arc::new(second);
+    let second_ack = tokio::spawn({
+        let second = second.clone();
+        async move { second.lease.ack().await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The second ack waits for a settling slot and keeps its in-flight slot meanwhile (and its
+    // status, so heartbeats still extend it); only the first message's slot was handed back
+    // (and refilled with the third message).
+    assert_eq!(second.lease.status(), LeaseStatus::Active);
+    let stats = engine.stats();
+    assert_eq!(stats.metrics["settling"], 1);
+    assert_eq!(stats.metrics["in_flight"], 3);
+    assert_eq!(stats.available_permits, 0);
+    let third = collect(&engine, 1).await.remove(0);
+    first_ack.await.unwrap().unwrap();
+    second_ack.await.unwrap().unwrap();
+    assert_eq!(second.lease.status(), LeaseStatus::Settled);
+    third.lease.ack().await.unwrap();
+    assert_eq!(engine.stats().metrics["settling"], 0);
+    engine.close(true).await;
+    assert!(fx.stored().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
 async fn heartbeats_keep_messages_invisible() {
     let fx = fixture(ClientConfig::default()).await;
     fx.send("slow").await;
@@ -376,7 +445,10 @@ async fn max_lease_expires_heartbeats() {
     let stored = fx.stored();
     assert!(!stored[0].in_flight, "visibility must not be extended past max_lease");
     assert_eq!(stored[0].receive_count, 1);
-    delivery.lease.ack().await.unwrap();
+    // Settling frees the slot as soon as it starts, and the message is visible again already:
+    // the engine may receive it again before the delete lands (like any other consumer could),
+    // in which case the old receipt handle is stale.
+    let _ = delivery.lease.ack().await;
     engine.close(true).await;
 }
 

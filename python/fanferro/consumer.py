@@ -79,6 +79,28 @@ class _Stats:
         }
 
 
+class _Slot:
+    """A handler slot (one of ``concurrency``), held while decoding, middleware and the handler run.
+
+    It is released before the message is settled (auto-ack, retries, dead-lettering), so the next
+    message can start while the settlement's round trip completes.
+    """
+
+    __slots__ = ("_consumer", "_semaphore", "held")
+
+    def __init__(self, consumer: Consumer, semaphore: asyncio.Semaphore) -> None:
+        self._consumer = consumer
+        self._semaphore = semaphore
+        self.held = True
+
+    def release(self) -> None:
+        """Frees the slot (idempotent)."""
+        if self.held:
+            self.held = False
+            self._consumer._active -= 1
+            self._semaphore.release()
+
+
 class _Settler:
     """Settles messages for the consumer (used by :class:`Message` methods)."""
 
@@ -659,17 +681,20 @@ class Consumer:
             await delivery.release()
 
     async def _run(self, delivery: Delivery) -> Outcome | None:
-        assert self._semaphore is not None
-        async with self._semaphore:
-            if self._stopping and self.shutdown_policy.release_prefetched:
-                await self._release_quietly(delivery)
-                return "released"
-            delivery.mark_active()
-            self._active += 1
-            try:
-                return await self._process(delivery)
-            finally:
-                self._active -= 1
+        semaphore = self._semaphore
+        assert semaphore is not None
+        await semaphore.acquire()
+        if self._stopping and self.shutdown_policy.release_prefetched:
+            semaphore.release()
+            await self._release_quietly(delivery)
+            return "released"
+        delivery.mark_active()
+        self._active += 1
+        slot = _Slot(self, semaphore)
+        try:
+            return await self._process(delivery, slot)
+        finally:
+            slot.release()
 
     # -- processing ------------------------------------------------------------------------
 
@@ -726,18 +751,19 @@ class Consumer:
             return message.data
         return codecs.decode(message.data, target, content_type)
 
-    async def _process(self, delivery: Delivery) -> Outcome | None:
+    async def _process(self, delivery: Delivery, slot: _Slot) -> Outcome | None:
         started = monotonic()
         try:
             message = self._build_message(delivery)
         except Exception as error:  # noqa: BLE001 - deliberate catch-all; the error is reported, never swallowed silently
             self._stats.decode_failures += 1
+            slot.release()
             return await self._undecodable(delivery, error)
         telemetry = self._client._telemetry
         with telemetry.process_span(message, self.queue.name) as span:
             error: BaseException | None = None
             try:
-                await self._handle(message)
+                await self._handle(message, slot)
             except asyncio.CancelledError:
                 if not message.settled and self.shutdown_policy.release_unfinished:
                     with contextlib.suppress(Exception):
@@ -752,15 +778,18 @@ class Consumer:
                 telemetry.record_process(self.queue.name, monotonic() - started, error)
         return message.outcome
 
-    async def _handle(self, message: Message[Any]) -> None:
+    async def _handle(self, message: Message[Any], slot: _Slot) -> None:
+        """Routes, decodes and runs the handler while holding ``slot``, then settles without it."""
         policy = self.retry_policy
         if policy.max_attempts is not None and message.attempt > policy.max_attempts:
+            slot.release()
             await self._apply_action(message, self.dead_letter_policy.on_exhausted, "maximum attempts exceeded", None)
             return
         route = self.router.resolve(message, self._client.types)
         if route is None:
             self._stats.unroutable += 1
             self._emit(EventKind.MESSAGE_UNROUTABLE, "no route matched the message", message=message)
+            slot.release()
             await self._apply_action(message, self.dead_letter_policy.on_unroutable, "no route matched", None)
             return
         try:
@@ -774,6 +803,7 @@ class Consumer:
                 exception=error,
                 route=route.name,
             )
+            slot.release()
             await self._apply_action(message, self.dead_letter_policy.on_decode_error, "decode failed", error)
             return
         handler_started = monotonic()
@@ -795,6 +825,8 @@ class Consumer:
                 await call(message)
         finally:
             self._stats.handler_seconds += monotonic() - handler_started
+            # Settling (auto-ack below, or the failure handling in `_process`) needs no slot.
+            slot.release()
         if not message.settled and self.auto_ack:
             try:
                 await message.ack()
