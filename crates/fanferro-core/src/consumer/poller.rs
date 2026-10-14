@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use tokio::sync::OwnedSemaphorePermit;
+
 use crate::backend::{ReceiveRequest, ReceivedMessage, VisibilityChange};
 use crate::events::{Event, EventKind};
 use crate::retry::sleep_or_cancel;
@@ -11,25 +13,13 @@ use super::EngineInner;
 /// One receive loop. Runs until the engine's receive token is cancelled.
 pub(crate) async fn poll_loop(inner: Arc<EngineInner>) {
     let mut consecutive_failures: u32 = 0;
-    let batch_size = usize::from(inner.settings.batch_size);
     loop {
         if inner.receive_token.is_cancelled() || !inner.wait_unpaused().await {
             break;
         }
-        let first = tokio::select! {
-            () = inner.receive_token.cancelled() => break,
-            permit = inner.permits.clone().acquire_owned() => match permit {
-                Ok(permit) => permit,
-                Err(_) => break,
-            },
+        let Some(mut permits) = acquire_permits(&inner).await else {
+            break;
         };
-        let mut permits = vec![first];
-        while permits.len() < batch_size {
-            match inner.permits.clone().try_acquire_owned() {
-                Ok(permit) => permits.push(permit),
-                Err(_) => break,
-            }
-        }
         if let Some(limiter) = &inner.rate_limiter {
             let wanted = u32::try_from(permits.len()).unwrap_or(10);
             match limiter.acquire_up_to(wanted, &inner.receive_token).await {
@@ -111,6 +101,43 @@ pub(crate) async fn poll_loop(inner: Arc<EngineInner>) {
             }
         }
     }
+}
+
+/// In-flight permits for the next receive, one per requested message: waits for a free slot,
+/// then up to `receive_batch_wait` until `min_receive_batch` slots are free (so receives stay
+/// full instead of asking for whatever single slot just became free), then takes every other
+/// free slot up to `batch_size`. Returns `None` once receiving stops.
+async fn acquire_permits(inner: &EngineInner) -> Option<Vec<OwnedSemaphorePermit>> {
+    let settings = &inner.settings;
+    let batch_size = usize::from(settings.batch_size);
+    let first = tokio::select! {
+        () = inner.receive_token.cancelled() => return None,
+        permit = inner.permits.clone().acquire_owned() => permit.ok()?,
+    };
+    let mut permits = Vec::with_capacity(batch_size);
+    permits.push(first);
+    if settings.min_receive_batch > 1 {
+        let rest = u32::try_from(settings.min_receive_batch - 1).unwrap_or(u32::MAX);
+        tokio::select! {
+            () = inner.receive_token.cancelled() => return None,
+            more = inner.permits.clone().acquire_many_owned(rest) => {
+                if let Ok(mut more) = more {
+                    while let Some(permit) = more.split(1) {
+                        permits.push(permit);
+                    }
+                }
+            }
+            // Slow handlers must not hold back the slots that are free (head-of-line blocking).
+            () = tokio::time::sleep(settings.receive_batch_wait) => {}
+        }
+    }
+    while permits.len() < batch_size {
+        match inner.permits.clone().try_acquire_owned() {
+            Ok(permit) => permits.push(permit),
+            Err(_) => break,
+        }
+    }
+    Some(permits)
 }
 
 /// Makes messages visible again right away (in batches of ten).

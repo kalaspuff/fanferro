@@ -255,6 +255,56 @@ async def test_explicit_acks_are_not_delayed_by_the_linger(client_factory: Clien
     assert elapsed < 5, f"explicit acks lingered ({elapsed:.1f} s for 10 messages)"
 
 
+async def test_receives_are_full_batches(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory()
+    queue = client.queue(name("full-receives"))
+    handled = 0
+    consumer = client.consumer(queue, wait_time=1)
+
+    @consumer.default
+    async def handle(message: fanferro.Message[bytes]) -> None:
+        nonlocal handled
+        handled += 1
+
+    async with client:
+        await queue.send_batch([{"n": i} for i in range(2000)])
+        await consume_until(consumer, lambda: consumer.stats()["engine"].get("messages_acked", 0) == 2000, timeout=120)
+    engine = consumer.stats()["engine"]
+    assert handled == 2000
+    per_receive = engine["messages_received"] / (engine["receive_requests"] - engine["empty_receives"])
+    assert per_receive >= 9.5, engine
+    assert engine["delete_requests"] <= 240, engine
+
+
+async def test_a_slow_handler_does_not_hold_back_free_slots(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory()
+    queue = client.queue(name("slow-one"))
+    done: list[int] = []
+    release = asyncio.Event()
+    consumer = client.consumer(queue, wait_time=1, prefetch=0)
+
+    @consumer.route(OrderCreated)
+    async def handle(order: OrderCreated) -> None:
+        if order.order_id == 0:
+            await release.wait()
+        done.append(order.order_id)
+
+    async with client:
+        await queue.send(OrderCreated(order_id=0))
+        await consumer.start()
+        await wait_for(lambda: consumer.in_flight == 1)
+        await queue.send_batch([OrderCreated(order_id=i) for i in range(1, 31)])
+        began = time.monotonic()
+        # Nine slots are free: they are refilled after `receive_batch_wait` instead of waiting
+        # for the slow handler to complete a full batch.
+        await wait_for(lambda: len(done) == 30, timeout=10)
+        elapsed = time.monotonic() - began
+        release.set()
+        await wait_for(lambda: len(done) == 31)
+        await consumer.stop()
+    assert elapsed < 5, f"{elapsed:.2f} s"
+
+
 async def test_concurrency_limit(client_factory: ClientFactory, name: Any) -> None:
     client = client_factory()
     queue = client.queue(name("concurrency"))

@@ -92,6 +92,96 @@ async fn receives_and_acks() {
     assert_eq!(engine.state(), EngineState::Stopped);
 }
 
+fn receives(engine: &ConsumerEngine) -> i64 {
+    engine.stats().metrics["receive_requests"]
+}
+
+#[tokio::test(start_paused = true)]
+async fn receives_wait_for_a_full_batch() {
+    let fx = fixture(ClientConfig::default()).await;
+    for i in 0..30 {
+        fx.send(&format!("m{i}")).await;
+    }
+    let engine = fx.engine(|_| {});
+    let mut first = collect(&engine, 10).await;
+    assert_eq!(receives(&engine), 1);
+    let rest = first.split_off(3);
+    ack_all(first).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(receives(&engine), 1, "three free slots are not a full batch yet");
+    ack_all(rest).await;
+    let second = collect(&engine, 10).await;
+    assert_eq!(second.len(), 10);
+    assert_eq!(receives(&engine), 2, "one receive for the whole batch");
+    ack_all(second).await;
+    engine.close(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn receives_fall_back_to_the_free_slots_after_the_batch_wait() {
+    let fx = fixture(ClientConfig::default()).await;
+    for i in 0..30 {
+        fx.send(&format!("m{i}")).await;
+    }
+    let engine = fx.engine(|_| {});
+    let mut slow = collect(&engine, 10).await;
+    let done = slow.split_off(6);
+    let freed_at = tokio::time::Instant::now();
+    ack_all(done).await;
+    // Six handlers are slow; the four free slots are used after `receive_batch_wait`.
+    let next = engine.next_batch(10, Duration::from_secs(5)).await;
+    assert_eq!(next.len(), 4);
+    let waited = freed_at.elapsed();
+    assert!(waited >= Duration::from_millis(100) && waited < Duration::from_millis(150), "{waited:?}");
+    assert_eq!(receives(&engine), 2);
+    ack_all(slow.into_iter().chain(next).collect()).await;
+    engine.close(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_minimum_of_one_receives_into_any_free_slot() {
+    let fx = fixture(ClientConfig::default()).await;
+    for i in 0..30 {
+        fx.send(&format!("m{i}")).await;
+    }
+    let engine = fx.engine(|c| c.min_receive_batch = Some(1));
+    let mut first = collect(&engine, 10).await;
+    let freed_at = tokio::time::Instant::now();
+    ack_all(first.split_off(9)).await;
+    let next = engine.next_batch(10, Duration::from_secs(5)).await;
+    assert_eq!(next.len(), 1);
+    assert!(freed_at.elapsed() < Duration::from_millis(20));
+    ack_all(first.into_iter().chain(next).collect()).await;
+    engine.close(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_minimum_receive_batch_is_capped_by_the_in_flight_limit() {
+    let fx = fixture(ClientConfig::default()).await;
+    fx.client.events().set_enabled(&[EventKind::ConfigWarning]);
+    for i in 0..10 {
+        fx.send(&format!("m{i}")).await;
+    }
+    let engine = fx.engine(|c| c.max_in_flight = 3);
+    assert!(fx.client.events().drain(10).is_empty(), "the default minimum is capped silently");
+    let first = collect(&engine, 3).await;
+    let freed_at = tokio::time::Instant::now();
+    ack_all(first).await;
+    let next = engine.next_batch(10, Duration::from_secs(5)).await;
+    assert_eq!(next.len(), 3);
+    assert!(freed_at.elapsed() < Duration::from_millis(20), "three slots are a full batch here");
+    ack_all(next).await;
+    engine.close(true).await;
+    // An explicit minimum above the limit is capped too, with a warning.
+    let engine = fx.engine(|c| {
+        c.max_in_flight = 3;
+        c.min_receive_batch = Some(8);
+    });
+    let warnings = fx.client.events().drain(10);
+    assert!(warnings.iter().any(|e| e.kind == EventKind::ConfigWarning && e.message.contains("min_receive_batch")));
+    engine.close(true).await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn max_in_flight_bounds_leases() {
     let fx = fixture(ClientConfig::default()).await;

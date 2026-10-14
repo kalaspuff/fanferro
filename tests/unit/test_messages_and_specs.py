@@ -219,6 +219,33 @@ def test_policies() -> None:
     }
 
 
+async def _noop(message: fanferro.Message) -> None: ...
+
+
+def test_consumer_options() -> None:
+    client = fanferro.testing.memory_client()
+    queue = client.queue("options")
+    consumer = client.consumer(queue, _noop)
+    assert consumer.prefetch == 10, "one receive batch per poller ahead of the handlers"
+    assert consumer.min_receive_batch is None
+    assert consumer.receive_batch_wait == 0.1
+    assert consumer.settle_linger == 0.005
+    assert client.consumer(queue, _noop, pollers=3).prefetch == 30
+    assert client.consumer(queue, _noop, batch_size=4, pollers=2).prefetch == 8
+    assert client.consumer(queue, _noop, concurrency=2, pollers=2).prefetch == 4, "at most what handlers take"
+    assert client.consumer(queue, _noop, prefetch=0).prefetch == 0
+    for options, error in (
+        ({"min_receive_batch": 0}, "min_receive_batch"),
+        ({"batch_size": 5, "min_receive_batch": 6}, "min_receive_batch"),
+        ({"receive_batch_wait": -1}, "receive_batch_wait"),
+        ({"settle_linger": 2}, "settle_linger"),
+        ({"pollers": 0}, "pollers"),
+        ({"prefetch": -1}, "prefetch"),
+    ):
+        with pytest.raises(ValueError, match=error):
+            client.consumer(queue, _noop, **options)
+
+
 def test_large_payload_settings() -> None:
     settings = fanferro.LargePayloads("bucket", reference="both", encryption=fanferro.Kms("key"), presign_ttl=60)
     core = settings.to_core()

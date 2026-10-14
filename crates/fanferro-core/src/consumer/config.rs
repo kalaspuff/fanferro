@@ -30,6 +30,9 @@ fn d30() -> f64 {
 fn dtrue() -> bool {
     true
 }
+fn d_receive_batch_wait() -> f64 {
+    0.1
+}
 
 /// Receive rate limit.
 #[derive(Clone, Debug, Deserialize)]
@@ -107,6 +110,15 @@ pub struct ConsumerConfig {
     /// Messages per receive call (1-10).
     #[serde(default = "d10u8")]
     pub batch_size: u8,
+    /// Free in-flight slots a poller waits for before receiving (1 to `batch_size`; default:
+    /// `batch_size` on standard queues, 1 on FIFO queues; at most `max_in_flight`). Waiting for
+    /// a full batch keeps receives full when handlers are fast.
+    #[serde(default)]
+    pub min_receive_batch: Option<u8>,
+    /// Seconds a poller waits, after the first slot is free, for `min_receive_batch` slots
+    /// before it receives with fewer (0-20).
+    #[serde(default = "d_receive_batch_wait")]
+    pub receive_batch_wait: f64,
     /// Long polling wait time in seconds (0-20).
     #[serde(default = "d20")]
     pub wait_time: f64,
@@ -158,6 +170,8 @@ pub(crate) struct Settings {
     pub max_in_flight: usize,
     pub max_settling: usize,
     pub batch_size: u8,
+    pub min_receive_batch: usize,
+    pub receive_batch_wait: Duration,
     pub wait_time: Duration,
     pub pollers: usize,
     pub rate_limit: Option<(f64, u32)>,
@@ -191,6 +205,18 @@ impl ConsumerConfig {
         }
         if !(1..=10).contains(&self.batch_size) {
             return Err(Error::config("batch_size must be between 1 and 10"));
+        }
+        if let Some(min) = self.min_receive_batch
+            && !(1..=self.batch_size).contains(&min)
+        {
+            return Err(Error::config(format!(
+                "min_receive_batch must be between 1 and batch_size ({}), got {min}",
+                self.batch_size
+            )));
+        }
+        let receive_batch_wait = duration_from_secs(self.receive_batch_wait, "receive_batch_wait")?;
+        if receive_batch_wait > Duration::from_secs(20) {
+            return Err(Error::config("receive_batch_wait must be at most 20 seconds"));
         }
         if !(1..=64).contains(&self.pollers) {
             return Err(Error::config("pollers must be between 1 and 64"));
@@ -257,6 +283,8 @@ impl ConsumerConfig {
                 .max_settling
                 .unwrap_or_else(|| self.max_in_flight.saturating_mul(4).max(2 * crate::publish::MAX_BATCH_ENTRIES)),
             batch_size: self.batch_size,
+            min_receive_batch: self.requested_min_receive_batch().min(self.max_in_flight),
+            receive_batch_wait,
             wait_time,
             pollers: self.pollers,
             rate_limit,
@@ -278,6 +306,16 @@ impl ConsumerConfig {
         })
     }
 
+    /// The configured minimum receive batch, or its default (before the in-flight limit).
+    pub(crate) fn requested_min_receive_batch(&self) -> usize {
+        match self.min_receive_batch {
+            Some(min) => usize::from(min),
+            // Waiting to fill a batch would hold back FIFO message groups.
+            None if self.fifo => 1,
+            None => usize::from(self.batch_size),
+        }
+    }
+
     /// A configuration with defaults for `queue_url`.
     pub fn new(queue_url: impl Into<String>) -> Self {
         Self {
@@ -287,6 +325,8 @@ impl ConsumerConfig {
             max_in_flight: d10(),
             max_settling: None,
             batch_size: d10u8(),
+            min_receive_batch: None,
+            receive_batch_wait: d_receive_batch_wait(),
             wait_time: d20(),
             pollers: d1(),
             rate_limit: None,
@@ -315,9 +355,27 @@ mod tests {
         assert_eq!(settings.max_lease, MAX_VISIBILITY);
         assert!(settings.heartbeat_enabled);
         assert_eq!(settings.max_settling, 40);
+        assert_eq!(settings.settle_linger, Duration::from_millis(5));
         let small = ConsumerConfig { max_in_flight: 1, ..ConsumerConfig::new("u") }.validate().unwrap();
         assert_eq!(small.max_settling, 20, "room for two full batches");
-        assert_eq!(settings.settle_linger, Duration::from_millis(5));
+    }
+
+    #[test]
+    fn minimum_receive_batch_defaults_and_limits() {
+        let base = ConsumerConfig::new("u");
+        let settings = base.validate().unwrap();
+        assert_eq!(settings.min_receive_batch, 10);
+        assert_eq!(settings.receive_batch_wait, Duration::from_millis(100));
+        assert_eq!(ConsumerConfig { fifo: true, ..base.clone() }.validate().unwrap().min_receive_batch, 1);
+        assert_eq!(ConsumerConfig { batch_size: 4, ..base.clone() }.validate().unwrap().min_receive_batch, 4);
+        // Never more than the in-flight limit allows.
+        assert_eq!(ConsumerConfig { max_in_flight: 3, ..base.clone() }.validate().unwrap().min_receive_batch, 3);
+        let explicit = ConsumerConfig { fifo: true, min_receive_batch: Some(5), ..base.clone() };
+        assert_eq!(explicit.validate().unwrap().min_receive_batch, 5);
+        assert!(ConsumerConfig { min_receive_batch: Some(0), ..base.clone() }.validate().is_err());
+        assert!(ConsumerConfig { batch_size: 5, min_receive_batch: Some(6), ..base.clone() }.validate().is_err());
+        assert!(ConsumerConfig { receive_batch_wait: 21.0, ..base.clone() }.validate().is_err());
+        assert!(ConsumerConfig { receive_batch_wait: -1.0, ..base }.validate().is_err());
     }
 
     #[test]

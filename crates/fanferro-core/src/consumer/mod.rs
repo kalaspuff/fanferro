@@ -375,6 +375,22 @@ impl ConsumerEngine {
     /// Creates an engine; must be called within a Tokio runtime.
     pub fn new(client: &Client, config: ConsumerConfig) -> Result<Self> {
         let settings = config.validate()?;
+        if config.min_receive_batch.is_some() && config.requested_min_receive_batch() > settings.max_in_flight {
+            client.events().emit(EventKind::ConfigWarning, || {
+                Event::new(
+                    EventKind::ConfigWarning,
+                    format!(
+                        "min_receive_batch ({}) exceeds the in-flight limit ({}); receives ask for at most {} messages",
+                        config.requested_min_receive_batch(),
+                        settings.max_in_flight,
+                        settings.min_receive_batch
+                    ),
+                )
+                .field("queue", settings.queue_url.as_str())
+                .field("min_receive_batch", settings.min_receive_batch)
+                .field("max_in_flight", settings.max_in_flight)
+            });
+        }
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| Error::config("ConsumerEngine::new must be called within a Tokio runtime"))?;
         // Every delivery holds an in-flight permit, so the channel never holds more batches.
@@ -455,6 +471,7 @@ impl ConsumerEngine {
             Event::new(EventKind::ConsumerStarted, "consumer started")
                 .field("queue", inner.queue())
                 .field("max_in_flight", inner.settings.max_in_flight)
+                .field("min_receive_batch", inner.settings.min_receive_batch)
                 .field("pollers", inner.settings.pollers)
         });
         Ok(())
