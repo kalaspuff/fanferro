@@ -611,11 +611,11 @@ class Client:
             handler: A handler (receives every message), a :class:`~fanferro.Router`, or ``None``
                 to add routes later with ``@consumer.route(...)``.
             **options: :class:`~fanferro.Consumer` options: ``concurrency``, ``prefetch``,
-                ``batch_size``, ``wait_time``, ``pollers``, ``rate_limit``, ``visibility_timeout``,
-                ``heartbeat``, ``retry``, ``dead_letter``, ``shutdown``, ``handler_timeout``,
-                ``ordering``, ``envelopes``, ``middleware``, ``auto_ack``, ``settle_linger``,
-                ``sns_unwrap``, ``auto_confirm_subscriptions``, ``delete_offloaded_payloads``,
-                ``name``.
+                ``batch_size``, ``min_receive_batch``, ``receive_batch_wait``, ``wait_time``,
+                ``pollers``, ``rate_limit``, ``visibility_timeout``, ``heartbeat``, ``retry``,
+                ``dead_letter``, ``shutdown``, ``handler_timeout``, ``ordering``, ``envelopes``,
+                ``middleware``, ``auto_ack``, ``settle_linger``, ``sns_unwrap``,
+                ``auto_confirm_subscriptions``, ``delete_offloaded_payloads``, ``name``.
         """
         from fanferro.consumer import Consumer
 

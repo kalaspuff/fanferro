@@ -94,8 +94,10 @@ slot to the next message right away; the automatic ack completes in the backgrou
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `concurrency` | 10 | handlers running at the same time |
-| `prefetch` | 0 | extra messages leased ahead (kept invisible by heartbeats) |
+| `prefetch` | `min(batch_size, concurrency) × pollers` | extra messages leased ahead (kept invisible by heartbeats) |
 | `batch_size` | 10 | messages per `ReceiveMessage` (1-10) |
+| `min_receive_batch` | `batch_size` (FIFO: 1) | free slots a poller waits for before receiving |
+| `receive_batch_wait` | 0.1 | seconds to wait for `min_receive_batch` free slots before receiving fewer |
 | `wait_time` | 20 | long polling wait (0-20 s) |
 | `pollers` | 1 | concurrent receive loops (raise for high-throughput queues) |
 | `rate_limit` | `None` | `RateLimit(per_second, burst)` or a number: max messages received per second |
@@ -107,6 +109,12 @@ of up to ten messages: a batch goes out as soon as it is full, or `settle_linger
 settlement. When every running handler awaits an explicit settlement (`await message.ack()`),
 nothing else can fill the batch, so it is sent right away. `consumer.stats()["engine"]` counts the
 calls (`delete_requests`, `visibility_requests`).
+
+Receives are full by default: a poller waits until `min_receive_batch` handler slots are free
+(after the first one, for at most `receive_batch_wait`), so a busy consumer asks SQS for ten
+messages per call instead of whatever single slot just became free. FIFO queues receive as soon as
+one slot is free (waiting would hold back message groups). The default `prefetch` leases one more
+batch per poller (at most `concurrency` messages), so the next receive overlaps with the handlers.
 
 The engine never leases more than `concurrency + prefetch` unsettled messages. A message gives
 its slot back as soon as its settlement starts (the handler returned or raised), so receiving and

@@ -80,8 +80,10 @@ each parameter and field listed here exists in the code and that every one in th
 | --- | --- | --- |
 | `name` | queue name | Name used in events and metrics |
 | `concurrency` | `10` | Handlers running at the same time |
-| `prefetch` | `0` | Extra messages leased ahead |
+| `prefetch` | `min(batch_size, concurrency) × pollers` | Extra messages leased ahead (a receive batch per poller) |
 | `batch_size` | `10` | Messages per receive call (1-10) |
+| `min_receive_batch` | `batch_size` (FIFO: 1) | Free slots a poller waits for before receiving (1 to `batch_size`) |
+| `receive_batch_wait` | `0.1` | Seconds a poller waits for `min_receive_batch` free slots before receiving fewer |
 | `wait_time` | `20` | Long polling wait in seconds (0-20) |
 | `pollers` | `1` | Concurrent receive loops |
 | `rate_limit` | `None` | `RateLimit(per_second, burst)` or messages per second |

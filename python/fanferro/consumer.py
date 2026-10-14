@@ -309,8 +309,10 @@ class Consumer:
         *,
         name: str | None = None,
         concurrency: int = 10,
-        prefetch: int = 0,
+        prefetch: int | None = None,
         batch_size: int = 10,
+        min_receive_batch: int | None = None,
+        receive_batch_wait: float = 0.1,
         wait_time: float = 20.0,
         pollers: int = 1,
         rate_limit: RateLimit | float | None = None,
@@ -331,12 +333,18 @@ class Consumer:
     ) -> None:
         if concurrency < 1:
             raise ValueError("concurrency must be at least 1")
-        if prefetch < 0:
+        if prefetch is not None and prefetch < 0:
             raise ValueError("prefetch must be non-negative")
         if not 1 <= batch_size <= 10:
             raise ValueError("batch_size must be between 1 and 10")
+        if min_receive_batch is not None and not 1 <= min_receive_batch <= batch_size:
+            raise ValueError(f"min_receive_batch must be between 1 and batch_size ({batch_size})")
+        if not 0 <= receive_batch_wait <= 20:
+            raise ValueError("receive_batch_wait must be between 0 and 20 seconds")
         if not 0 <= wait_time <= 20:
             raise ValueError("wait_time must be between 0 and 20 seconds")
+        if not 1 <= pollers <= 64:
+            raise ValueError("pollers must be between 1 and 64")
         if not 0 <= settle_linger <= 1:
             raise ValueError("settle_linger must be between 0 and 1 second")
         self._client = client
@@ -344,8 +352,12 @@ class Consumer:
         self.router = router
         self.name = name or queue.name
         self.concurrency = concurrency
-        self.prefetch = prefetch
+        # One receive batch per poller ahead of the handlers (the next receive overlaps with them),
+        # but not more than the handlers can take at once.
+        self.prefetch = min(batch_size, concurrency) * pollers if prefetch is None else prefetch
         self.batch_size = batch_size
+        self.min_receive_batch = min_receive_batch
+        self.receive_batch_wait = receive_batch_wait
         self.wait_time = wait_time
         self.pollers = pollers
         self.rate_limit = RateLimit(rate_limit) if isinstance(rate_limit, int | float) else rate_limit
@@ -480,6 +492,8 @@ class Consumer:
             "fifo": info.fifo,
             "max_in_flight": self.concurrency + self.prefetch,
             "batch_size": self.batch_size,
+            "min_receive_batch": self.min_receive_batch,
+            "receive_batch_wait": float(self.receive_batch_wait),
             "wait_time": float(self.wait_time),
             "pollers": self.pollers,
             "rate_limit": (

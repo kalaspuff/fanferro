@@ -96,10 +96,11 @@ Publish options (keywords or `fanferro.OutgoingMessage`): `type`, `attributes`, 
 `time`, `subject`, `source`, `data_schema`, `content_type`, `group_id` (FIFO), `deduplication_id`,
 `delay` (queues), `sns_subject` (topics), `codec`, `envelope`.
 
-Consumer options: `concurrency`, `prefetch`, `batch_size`, `wait_time`, `pollers`, `rate_limit`,
-`visibility_timeout`, `heartbeat`, `retry`, `dead_letter`, `shutdown`, `handler_timeout`,
-`ordering`, `envelopes`, `middleware`, `auto_ack`, `settle_linger`, `sns_unwrap`,
-`auto_confirm_subscriptions`, `delete_offloaded_payloads`, `name`.
+Consumer options: `concurrency`, `prefetch`, `batch_size`, `min_receive_batch`,
+`receive_batch_wait`, `wait_time`, `pollers`, `rate_limit`, `visibility_timeout`, `heartbeat`,
+`retry`, `dead_letter`, `shutdown`, `handler_timeout`, `ordering`, `envelopes`, `middleware`,
+`auto_ack`, `settle_linger`, `sns_unwrap`, `auto_confirm_subscriptions`,
+`delete_offloaded_payloads`, `name`.
 
 ## Handler signatures
 
