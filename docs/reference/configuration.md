@@ -95,6 +95,7 @@ each parameter and field listed here exists in the code and that every one in th
 | `envelopes` | client default | Envelopes to try |
 | `middleware` | `()` | Consume middleware for this consumer |
 | `auto_ack` | `True` | Ack when the handler returns |
+| `settle_linger` | `0.005` | Seconds a batch of acks/retries waits to fill up (0-1; full batches of 10 go at once) |
 | `sns_unwrap` | `True` | Unwrap SNS notification JSON |
 | `auto_confirm_subscriptions` | `False` | Confirm SNS subscription confirmation messages |
 | `delete_offloaded_payloads` | `False` | Delete S3 payload objects after acking |

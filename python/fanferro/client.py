@@ -613,8 +613,9 @@ class Client:
             **options: :class:`~fanferro.Consumer` options: ``concurrency``, ``prefetch``,
                 ``batch_size``, ``wait_time``, ``pollers``, ``rate_limit``, ``visibility_timeout``,
                 ``heartbeat``, ``retry``, ``dead_letter``, ``shutdown``, ``handler_timeout``,
-                ``ordering``, ``envelopes``, ``middleware``, ``auto_ack``, ``sns_unwrap``,
-                ``auto_confirm_subscriptions``, ``delete_offloaded_payloads``, ``name``.
+                ``ordering``, ``envelopes``, ``middleware``, ``auto_ack``, ``settle_linger``,
+                ``sns_unwrap``, ``auto_confirm_subscriptions``, ``delete_offloaded_payloads``,
+                ``name``.
         """
         from fanferro.consumer import Consumer
 

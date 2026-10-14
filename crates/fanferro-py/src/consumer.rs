@@ -286,6 +286,11 @@ impl PyDelivery {
         self.inner.lease.mark_active();
     }
 
+    /// Sends the next settlement right away instead of waiting to fill a batch.
+    fn expedite(&self) {
+        self.inner.lease.expedite();
+    }
+
     /// Deletes the message (awaitable).
     fn ack<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();

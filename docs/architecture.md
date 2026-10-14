@@ -64,8 +64,9 @@ Python  dispatcher: next_batch() ─▶ per-message task (FIFO: sequenced per gr
         envelope unwrap (configured order) ─▶ Message ─▶ attempts check (max_attempts)
         router.resolve ─▶ codec decode into the route's type ─▶ middleware ─▶ handler
         success → ack (batched delete)   failure → RetryPolicy/DeadLetterPolicy
-Rust    settle loop batches DeleteMessage / ChangeMessageVisibility; DLQ forward / requeue
-        send a copy (original body + attributes + fanferro.dead-letter / fanferro.attempt)
+Rust    settle loop batches DeleteMessage / ChangeMessageVisibility (sent when ten are pending,
+        after the linger, or at once when every handler awaits its settlement); DLQ forward /
+        requeue send a copy (original body + attributes + fanferro.dead-letter / fanferro.attempt)
 ```
 
 ## Invariants
@@ -78,8 +79,9 @@ These are relied upon across layers; tests cover each of them.
 2. **Bounded in-flight.** A consumer never holds more than `concurrency + prefetch` unsettled
    messages; pollers acquire one in-flight permit per requested message before calling
    `ReceiveMessage`. A settlement exchanges the message's permit for one of `max_settling`
-   settling permits (default: four times the in-flight limit) when it starts, so receiving
-   continues during the settlement's round trip and the settlement backlog is bounded too.
+   settling permits (default: four times the in-flight limit, at least 20) when it starts, so
+   receiving continues during the settlement's round trip and the settlement backlog is bounded
+   too.
 3. **Leases are protected until settled.** Heartbeats extend visibility (batched by ten) while a
    message is buffered, processing or waiting for a settling permit, capped at 12 hours after
    receipt and `max_duration`. The lease stays tracked until its settlement completed.

@@ -159,6 +159,7 @@ class Message[T]:
         "_json",
         "_settled",
         "_settler",
+        "_slot",
         "attributes",
         "delivery",
         "envelope",
@@ -200,6 +201,7 @@ class Message[T]:
         """How the message was settled (``None`` while unsettled)."""
         self._settler = settler
         self._settled = False
+        self._slot: Any = None  # the consumer's handler slot while the handler runs
         self._body: Any = body
         self._json: Any = _UNSET
 

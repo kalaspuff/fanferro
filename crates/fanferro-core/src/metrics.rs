@@ -110,6 +110,11 @@ metric_set! {
         empty_receives: Counter,
         /// ReceiveMessage calls that failed.
         receive_errors: Counter,
+        /// DeleteMessageBatch calls made to settle messages (acks, dead-letters, requeues).
+        delete_requests: Counter,
+        /// ChangeMessageVisibilityBatch calls made to settle messages (retries, releases,
+        /// explicit extensions; heartbeats are counted as `lease_extensions`).
+        visibility_requests: Counter,
         /// Messages received.
         messages_received: Counter,
         /// Messages deleted after processing.

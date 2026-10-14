@@ -19,10 +19,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import signal
 import time
 from collections import deque
-from typing import TYPE_CHECKING, Any, Literal, Self
+from typing import TYPE_CHECKING, Any, Literal, Self, cast
 
 from fanferro._core import Delivery, FanferroError, LeaseError, ShutdownError
 from fanferro.actions import Discard, HandlerAction, Reject, Requeue, Retry
@@ -36,7 +37,7 @@ from fanferro.policies import DeadLetterPolicy, FailureAction, Heartbeat, RateLi
 from fanferro.telemetry import monotonic
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Coroutine, Sequence
 
     from fanferro.client import Client
     from fanferro.resources import Queue
@@ -86,11 +87,12 @@ class _Slot:
     message can start while the settlement's round trip completes.
     """
 
-    __slots__ = ("_consumer", "_semaphore", "held")
+    __slots__ = ("_consumer", "_semaphore", "_waits", "held")
 
     def __init__(self, consumer: Consumer, semaphore: asyncio.Semaphore) -> None:
         self._consumer = consumer
         self._semaphore = semaphore
+        self._waits = 0
         self.held = True
 
     def release(self) -> None:
@@ -99,6 +101,45 @@ class _Slot:
             self.held = False
             self._consumer._active -= 1
             self._semaphore.release()
+
+    def block(self) -> bool:
+        """Notes that the handler waits for a settlement it requested (an explicit ``ack()``...).
+
+        Returns whether the settlement should be sent right away instead of waiting to fill a
+        batch: when every handler that could request another settlement is waiting too.
+        """
+        consumer = self._consumer
+        self._waits += 1
+        if self._waits == 1:
+            consumer._blocked += 1
+        return consumer._blocked >= consumer._active and (
+            consumer._waiting == 0 or consumer._active >= consumer.concurrency
+        )
+
+    def unblock(self) -> None:
+        """Ends a wait started with :meth:`block`."""
+        self._waits -= 1
+        if self._waits == 0:
+            self._consumer._blocked -= 1
+
+
+def _awaited_by_handler[F: Callable[..., Coroutine[Any, Any, None]]](method: F) -> F:
+    """Marks a settlement as awaited by its (still running) handler, see :meth:`_Slot.block`."""
+
+    @functools.wraps(method)
+    async def settle(self: _Settler, message: Message[Any], *args: Any, **kwargs: Any) -> None:
+        slot: _Slot | None = message._slot
+        if slot is None or not slot.held:
+            await method(self, message, *args, **kwargs)
+            return
+        if slot.block() and message.delivery is not None:
+            message.delivery.expedite()
+        try:
+            await method(self, message, *args, **kwargs)
+        finally:
+            slot.unblock()
+
+    return cast("F", settle)
 
 
 class _Settler:
@@ -112,10 +153,12 @@ class _Settler:
             raise ConsumerStateError("message has no delivery")
         return message.delivery
 
+    @_awaited_by_handler
     async def ack(self, message: Message[Any]) -> None:
         await self._delivery(message).ack()
         await self._consumer._after_ack(message)
 
+    @_awaited_by_handler
     async def retry(self, message: Message[Any], delay: float | None, error: BaseException | None) -> None:
         consumer = self._consumer
         policy = consumer.retry_policy
@@ -154,11 +197,13 @@ class _Settler:
             message.outcome = "retried"
             await self._delivery(message).nack(min(backoff.maximum, _MAX_VISIBILITY_DELAY))
 
+    @_awaited_by_handler
     async def requeue(self, message: Message[Any], delay: float | None, error: BaseException | None) -> None:
         if delay is None:
             delay = self._consumer.retry_policy.backoff.delay(message.attempt)
         await self._delivery(message).requeue(message.attempt, min(delay, _MAX_REQUEUE_DELAY))
 
+    @_awaited_by_handler
     async def dead_letter(self, message: Message[Any], reason: str, error: BaseException | None) -> None:
         consumer = self._consumer
         if not consumer._dead_letter_url:
@@ -192,13 +237,16 @@ class _Settler:
             details["error_message"] = info["error_message"]
         await self._delivery(message).dead_letter(reason, details)
 
+    @_awaited_by_handler
     async def release(self, message: Message[Any]) -> None:
         await self._delivery(message).release()
 
+    @_awaited_by_handler
     async def discard(self, message: Message[Any], reason: str) -> None:
         await self._delivery(message).ack()
         self._consumer._emit(EventKind.MESSAGE_DROPPED, f"message dropped: {reason}", message=message, reason=reason)
 
+    @_awaited_by_handler
     async def extend(self, message: Message[Any], timeout: float) -> None:
         await self._delivery(message).extend(timeout)
 
@@ -217,22 +265,30 @@ class _GroupSequencer:
             queue.append(delivery)
             return
         self._pending[group] = deque([delivery])
+        self._consumer._waiting += 1  # the group's first message competes for a slot right away
         self._consumer._spawn(self._drain(group))
 
     async def _drain(self, group: str) -> None:
         queue = self._pending[group]
+        counted = True  # whether the next message is already counted as waiting for a slot
         try:
             while queue:
                 delivery = queue.popleft()
                 if group in self._poisoned:
                     # An earlier message of this group was not completed: keep the order by
                     # handing this one back; SQS redelivers the group in sequence.
+                    if counted:
+                        counted = False
+                        self._consumer._waiting -= 1
                     await self._consumer._release_quietly(delivery)
                     continue
-                outcome = await self._consumer._run(delivery)
+                was_counted, counted = counted, False
+                outcome = await self._consumer._run(delivery, counted=was_counted)
                 if outcome not in ("acked", "discarded", "dead_lettered"):
                     self._poisoned.add(group)
         finally:
+            if counted:
+                self._consumer._waiting -= 1
             self._pending.pop(group, None)
             self._poisoned.discard(group)
 
@@ -268,6 +324,7 @@ class Consumer:
         envelopes: Sequence[Envelope] | None = None,
         middleware: Sequence[ConsumeMiddleware] = (),
         auto_ack: bool = True,
+        settle_linger: float = 0.005,
         sns_unwrap: bool = True,
         auto_confirm_subscriptions: bool = False,
         delete_offloaded_payloads: bool = False,
@@ -280,6 +337,8 @@ class Consumer:
             raise ValueError("batch_size must be between 1 and 10")
         if not 0 <= wait_time <= 20:
             raise ValueError("wait_time must be between 0 and 20 seconds")
+        if not 0 <= settle_linger <= 1:
+            raise ValueError("settle_linger must be between 0 and 1 second")
         self._client = client
         self.queue = queue
         self.router = router
@@ -300,6 +359,7 @@ class Consumer:
         self._envelopes = tuple(envelopes) if envelopes is not None else None
         self._middleware = tuple(middleware)
         self.auto_ack = auto_ack
+        self.settle_linger = settle_linger
         self.sns_unwrap = sns_unwrap
         self.auto_confirm_subscriptions = auto_confirm_subscriptions
         self.delete_offloaded_payloads = delete_offloaded_payloads
@@ -316,7 +376,9 @@ class Consumer:
         self._sequencer = _GroupSequencer(self)
         self._settler = _Settler(self)
         self._stats = _Stats()
-        self._active = 0
+        self._active = 0  # handlers holding a slot
+        self._waiting = 0  # messages scheduled for a handler that have no slot yet
+        self._blocked = 0  # handlers waiting for a settlement they requested
         self._last_activity = 0.0
 
     # -- routing shortcuts -----------------------------------------------------------------
@@ -425,6 +487,7 @@ class Consumer:
             ),
             "visibility_timeout": float(visibility),
             "heartbeat": heartbeat,
+            "settle": {"linger": float(self.settle_linger)},
             "dead_letter_queue_url": self._dead_letter_url,
             "sns_unwrap": "auto" if self.sns_unwrap else "never",
             "auto_confirm_subscriptions": self.auto_confirm_subscriptions,
@@ -437,6 +500,7 @@ class Consumer:
         self._stop_event = asyncio.Event()
         self._stopping = False
         self._force_stop = False
+        self._active = self._waiting = self._blocked = 0
         client._acquire_pump()
         client._register_consumer(self)
         try:
@@ -661,7 +725,8 @@ class Consumer:
         if fifo and group is not None:
             self._sequencer.submit(group, delivery)
         else:
-            self._spawn(self._run(delivery))
+            self._waiting += 1
+            self._spawn(self._run(delivery, counted=True))
 
     def _spawn(self, coroutine: Any) -> None:
         task = asyncio.get_running_loop().create_task(coroutine)
@@ -680,10 +745,15 @@ class Consumer:
         with contextlib.suppress(FanferroError):
             await delivery.release()
 
-    async def _run(self, delivery: Delivery) -> Outcome | None:
+    async def _run(self, delivery: Delivery, *, counted: bool = False) -> Outcome | None:
         semaphore = self._semaphore
         assert semaphore is not None
-        await semaphore.acquire()
+        if not counted:
+            self._waiting += 1
+        try:
+            await semaphore.acquire()
+        finally:
+            self._waiting -= 1
         if self._stopping and self.shutdown_policy.release_prefetched:
             semaphore.release()
             await self._release_quietly(delivery)
@@ -759,6 +829,7 @@ class Consumer:
             self._stats.decode_failures += 1
             slot.release()
             return await self._undecodable(delivery, error)
+        message._slot = slot
         telemetry = self._client._telemetry
         with telemetry.process_span(message, self.queue.name) as span:
             error: BaseException | None = None
