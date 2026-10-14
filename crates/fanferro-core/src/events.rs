@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use time::OffsetDateTime;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, Notify, mpsc};
 
 use crate::error::Error;
 
@@ -291,6 +291,7 @@ pub struct EventBus {
     receiver: Mutex<mpsc::Receiver<Event>>,
     enabled: Vec<AtomicBool>,
     dropped: AtomicU64,
+    wake: Notify,
 }
 
 impl EventBus {
@@ -302,6 +303,7 @@ impl EventBus {
             receiver: Mutex::new(receiver),
             enabled: EventKind::ALL.iter().map(|_| AtomicBool::new(false)).collect(),
             dropped: AtomicU64::new(0),
+            wake: Notify::new(),
         }
     }
 
@@ -333,12 +335,24 @@ impl EventBus {
         self.dropped.swap(0, Ordering::Relaxed)
     }
 
-    /// Waits for at least one event (or `timeout`) and returns up to `max` events.
+    /// Waits for at least one event (or `timeout`, or [`Self::wake`]) and returns up to `max`
+    /// events.
     pub async fn next_batch(&self, max: usize, timeout: std::time::Duration) -> Vec<Event> {
         let mut receiver = self.receiver.lock().await;
         let mut events = Vec::new();
-        let _ = tokio::time::timeout(timeout, receiver.recv_many(&mut events, max.max(1))).await;
+        tokio::select! {
+            biased;
+            _ = receiver.recv_many(&mut events, max.max(1)) => {}
+            () = self.wake.notified() => {}
+            () = tokio::time::sleep(timeout) => {}
+        }
         events
+    }
+
+    /// Makes a pending [`Self::next_batch`] (or the next one) return right away, so that a
+    /// consumer of events can stop without abandoning events a pending call already took.
+    pub fn wake(&self) {
+        self.wake.notify_one();
     }
 
     /// Returns up to `max` buffered events without waiting.
@@ -385,5 +399,27 @@ mod tests {
         assert!(bus.next_batch(10, std::time::Duration::from_millis(1)).await.is_empty());
         bus.emit(EventKind::MessageAcked, || Event::new(EventKind::MessageAcked, "acked"));
         assert_eq!(bus.drain(10).len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wake_ends_a_pending_wait() {
+        let bus = std::sync::Arc::new(EventBus::new(8));
+        let waiting = tokio::spawn({
+            let bus = bus.clone();
+            async move {
+                let started = tokio::time::Instant::now();
+                (bus.next_batch(10, std::time::Duration::from_secs(60)).await.len(), started.elapsed())
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        bus.wake();
+        let (count, elapsed) = waiting.await.unwrap();
+        assert_eq!(count, 0);
+        assert!(elapsed < std::time::Duration::from_secs(1));
+        // Buffered events still come first after a wake.
+        bus.set_enabled(&[EventKind::MessageAcked]);
+        bus.emit(EventKind::MessageAcked, || Event::new(EventKind::MessageAcked, "acked"));
+        bus.wake();
+        assert_eq!(bus.next_batch(10, std::time::Duration::from_secs(60)).await.len(), 1);
     }
 }

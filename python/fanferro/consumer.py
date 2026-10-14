@@ -562,7 +562,7 @@ class Consumer:
         abort = policy.abort_receives if abort_receives is None else abort_receives
         stop_receiving = asyncio.ensure_future(engine.stop_receiving(abort))
         try:
-            # The dispatcher exits on its own once it sees `_stopping` (within one fetch interval).
+            # The dispatcher exits on its own: `next_batch` returns as soon as receiving stops.
             if self._dispatcher is not None:
                 try:
                     await asyncio.wait_for(asyncio.shield(self._dispatcher), timeout=5.0)
