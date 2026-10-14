@@ -180,6 +180,126 @@ async fn settling_backlog_is_bounded() {
     assert!(fx.stored().is_empty());
 }
 
+/// Acks every delivery concurrently and returns how long the slowest ack took.
+async fn ack_all(deliveries: Vec<Delivery>) -> Duration {
+    let started = tokio::time::Instant::now();
+    let acks = deliveries.into_iter().map(|delivery| async move { delivery.lease.ack().await.unwrap() });
+    futures::future::join_all(acks).await;
+    started.elapsed()
+}
+
+#[tokio::test(start_paused = true)]
+async fn acks_within_the_linger_share_one_call() {
+    let fx = fixture(ClientConfig::default()).await;
+    for i in 0..10 {
+        fx.send(&format!("m{i}")).await;
+    }
+    let engine = fx.engine(|_| {});
+    let deliveries = collect(&engine, 10).await;
+    let elapsed = ack_all(deliveries).await;
+    assert_eq!(engine.stats().metrics["delete_requests"], 1);
+    assert!(elapsed < Duration::from_millis(5), "a full batch is sent without lingering ({elapsed:?})");
+    engine.close(true).await;
+    assert!(fx.stored().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_single_ack_is_sent_after_the_linger() {
+    let fx = fixture(ClientConfig::default()).await;
+    fx.send("alone").await;
+    let engine = fx.engine(|_| {});
+    let deliveries = collect(&engine, 1).await;
+    let elapsed = ack_all(deliveries).await;
+    assert_eq!(engine.stats().metrics["delete_requests"], 1);
+    assert!(elapsed >= Duration::from_millis(5) && elapsed < Duration::from_millis(10), "{elapsed:?}");
+    engine.close(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_burst_of_acks_is_sent_in_full_batches() {
+    let fx = fixture(ClientConfig::default()).await;
+    for i in 0..25 {
+        fx.send(&format!("m{i}")).await;
+    }
+    let engine = fx.engine(|c| c.max_in_flight = 25);
+    let deliveries = collect(&engine, 25).await;
+    ack_all(deliveries).await;
+    assert_eq!(engine.stats().metrics["delete_requests"], 3);
+    engine.close(true).await;
+    assert!(fx.stored().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn deletes_and_visibility_changes_use_separate_calls() {
+    let fx = fixture(ClientConfig::default()).await;
+    for i in 0..12 {
+        fx.send(&format!("m{i}")).await;
+    }
+    let engine = fx.engine(|c| {
+        c.max_in_flight = 12;
+        c.heartbeat.enabled = false;
+    });
+    let deliveries = collect(&engine, 12).await;
+    let settlements = deliveries.iter().enumerate().map(|(index, delivery)| async move {
+        if index % 2 == 0 { delivery.lease.ack().await } else { delivery.lease.nack(Duration::from_secs(60)).await }
+    });
+    for result in futures::future::join_all(settlements).await {
+        result.unwrap();
+    }
+    let metrics = engine.stats().metrics;
+    assert_eq!(metrics["delete_requests"], 1);
+    assert_eq!(metrics["visibility_requests"], 1);
+    assert_eq!(fx.stored().len(), 6);
+    engine.close(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn expedited_settlements_are_sent_at_once() {
+    let fx = fixture(ClientConfig::default()).await;
+    for i in 0..3 {
+        fx.send(&format!("m{i}")).await;
+    }
+    let engine = fx.engine(|c| c.settle.linger = 1.0);
+    let deliveries = collect(&engine, 3).await;
+    let started = tokio::time::Instant::now();
+    let (first, rest) = deliveries.split_first().unwrap();
+    let lingering = futures::future::join_all(rest.iter().map(|delivery| delivery.lease.ack()));
+    let expedited = async {
+        // Joins the two lingering acks' batch and sends it right away.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        first.lease.expedite();
+        first.lease.ack().await
+    };
+    let (results, result) = tokio::join!(lingering, expedited);
+    assert!(results.into_iter().chain([result]).all(|r| r.is_ok()));
+    assert!(started.elapsed() < Duration::from_millis(100), "{:?}", started.elapsed());
+    assert_eq!(engine.stats().metrics["delete_requests"], 1);
+    engine.close(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_received_batch_is_handed_out_together() {
+    let fx = fixture(ClientConfig::default()).await;
+    for i in 0..7 {
+        fx.send(&format!("m{i}")).await;
+    }
+    let engine = fx.engine(|_| {});
+    // One receive returned all seven; they arrive in one next_batch call.
+    let deliveries = engine.next_batch(10, Duration::from_secs(5)).await;
+    assert_eq!(deliveries.len(), 7);
+    ack_all(deliveries).await;
+    // A smaller max keeps the rest of a batch for the next call.
+    for i in 0..4 {
+        fx.send(&format!("n{i}")).await;
+    }
+    let first = engine.next_batch(3, Duration::from_secs(5)).await;
+    let second = engine.next_batch(3, Duration::from_millis(1)).await;
+    assert_eq!((first.len(), second.len()), (3, 1));
+    assert_eq!(engine.stats().metrics["buffered"], 0);
+    ack_all(first.into_iter().chain(second).collect()).await;
+    engine.close(true).await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn heartbeats_keep_messages_invisible() {
     let fx = fixture(ClientConfig::default()).await;

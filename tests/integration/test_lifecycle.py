@@ -195,6 +195,66 @@ async def test_client_close_is_immediate_and_keeps_events(memory_client: fanferr
     assert "consumer.stopped" in kinds, "the engine's last event is dispatched before close() returns"
 
 
+async def test_acks_are_batched(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory()
+    queue = client.queue(name("batched-acks"))
+    done: list[int] = []
+    consumer = client.consumer(queue, wait_time=1)
+
+    @consumer.route(OrderCreated)
+    async def handle(order: OrderCreated) -> None:
+        done.append(order.order_id)
+
+    async with client:
+        await queue.send_batch([OrderCreated(order_id=i) for i in range(50)])
+        await consume_until(consumer, lambda: consumer.stats()["engine"].get("messages_acked", 0) == 50, timeout=30)
+    engine = consumer.stats()["engine"]
+    assert sorted(done) == list(range(50))
+    assert engine["delete_requests"] <= 10, engine
+
+
+async def test_handlers_do_not_wait_for_automatic_acks(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory()
+    queue = client.queue(name("auto-acks"))
+    done: list[int] = []
+    consumer = client.consumer(queue, wait_time=1, concurrency=1, settle_linger=1.0)
+
+    @consumer.route(OrderCreated)
+    async def handle(order: OrderCreated) -> None:
+        done.append(order.order_id)
+
+    async with client:
+        await queue.send_batch([OrderCreated(order_id=i) for i in range(10)])
+        await consumer.start()
+        began = time.monotonic()
+        await wait_for(lambda: len(done) == 10)
+        handled = time.monotonic() - began
+        await wait_for(lambda: consumer.stats()["engine"].get("messages_acked", 0) == 10)
+        await consumer.stop()
+    assert handled < 0.9, f"handlers waited for lingering acks ({handled:.2f} s)"
+    assert consumer.stats()["engine"]["delete_requests"] == 1
+
+
+async def test_explicit_acks_are_not_delayed_by_the_linger(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory()
+    queue = client.queue(name("explicit-acks"))
+    done: list[int] = []
+    consumer = client.consumer(queue, wait_time=1, concurrency=1, settle_linger=1.0)
+
+    @consumer.route(OrderCreated)
+    async def handle(message: fanferro.Message[OrderCreated]) -> None:
+        await message.ack()  # the only running handler waits for this delete: it is sent at once
+        done.append(message.body.order_id)
+
+    async with client:
+        await queue.send_batch([OrderCreated(order_id=i) for i in range(10)])
+        began = time.monotonic()
+        await consume_until(consumer, lambda: len(done) == 10, timeout=30)
+        elapsed = time.monotonic() - began
+    assert sorted(done) == list(range(10))
+    assert elapsed < 5, f"explicit acks lingered ({elapsed:.1f} s for 10 messages)"
+
+
 async def test_concurrency_limit(client_factory: ClientFactory, name: Any) -> None:
     client = client_factory()
     queue = client.queue(name("concurrency"))

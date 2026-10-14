@@ -27,7 +27,7 @@ mod lease;
 mod poller;
 mod settle;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -110,8 +110,9 @@ pub(crate) struct EngineInner {
     pub(crate) leases: Mutex<HashMap<u64, LeaseEntry>>,
     pub(crate) metrics: Arc<ConsumerMetrics>,
     next_lease_id: AtomicU64,
-    deliveries_tx: mpsc::Sender<Delivery>,
-    deliveries_rx: tokio::sync::Mutex<mpsc::Receiver<Delivery>>,
+    /// Decoded deliveries, one entry per received batch (dispatched together).
+    deliveries_tx: mpsc::Sender<Vec<Delivery>>,
+    deliveries_rx: tokio::sync::Mutex<DeliveryBuffer>,
     settle_tx: Mutex<Option<mpsc::UnboundedSender<SettleCommand>>>,
     receive_token: CancellationToken,
     abort_token: CancellationToken,
@@ -126,6 +127,25 @@ pub(crate) struct EngineInner {
     /// Until when an aborted long poll may still be served by the queue (see
     /// [`EngineInner::visibility_floor`]).
     orphaned_receives_until: Mutex<Option<Instant>>,
+}
+
+/// The receiving end of the delivery channel plus deliveries a smaller `next_batch` left over.
+struct DeliveryBuffer {
+    receiver: mpsc::Receiver<Vec<Delivery>>,
+    leftover: VecDeque<Delivery>,
+}
+
+impl DeliveryBuffer {
+    /// Moves up to `max` deliveries (leftovers first) into `deliveries`.
+    fn take(&mut self, max: usize, deliveries: &mut Vec<Delivery>) {
+        while self.leftover.len() < max
+            && let Ok(batch) = self.receiver.try_recv()
+        {
+            self.leftover.extend(batch);
+        }
+        let count = max.min(self.leftover.len());
+        deliveries.extend(self.leftover.drain(..count));
+    }
 }
 
 impl EngineInner {
@@ -192,15 +212,19 @@ impl EngineInner {
         }
         let inner = self.clone();
         self.decoders.spawn(async move {
-            for lease in leased {
-                if let Some(delivery) = inner.decode(lease).await {
-                    inner.metrics.buffered.add(1);
-                    if let Err(error) = inner.deliveries_tx.send(delivery).await {
-                        // The engine is gone; dropping the delivery releases the message.
-                        inner.metrics.buffered.add(-1);
-                        drop(error);
-                    }
-                }
+            // Decoded concurrently (claim-check downloads overlap), handed over in order and
+            // together, so the dispatcher sees the whole receive batch at once.
+            let decoded = futures::future::join_all(leased.into_iter().map(|lease| inner.decode(lease))).await;
+            let deliveries: Vec<Delivery> = decoded.into_iter().flatten().collect();
+            if deliveries.is_empty() {
+                return;
+            }
+            let count = i64::try_from(deliveries.len()).unwrap_or(i64::MAX);
+            inner.metrics.buffered.add(count);
+            if let Err(error) = inner.deliveries_tx.send(deliveries).await {
+                // The engine is gone; dropping the deliveries releases the messages.
+                inner.metrics.buffered.add(-count);
+                drop(error);
             }
         });
     }
@@ -353,6 +377,7 @@ impl ConsumerEngine {
         let settings = config.validate()?;
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| Error::config("ConsumerEngine::new must be called within a Tokio runtime"))?;
+        // Every delivery holds an in-flight permit, so the channel never holds more batches.
         let (deliveries_tx, deliveries_rx) = mpsc::channel(settings.max_in_flight);
         let rate_limiter = settings.rate_limit.map(|(per_second, burst)| RateLimiter::new(per_second, burst));
         Ok(Self {
@@ -364,7 +389,10 @@ impl ConsumerEngine {
                 metrics: Arc::new(ConsumerMetrics::default()),
                 next_lease_id: AtomicU64::new(1),
                 deliveries_tx,
-                deliveries_rx: tokio::sync::Mutex::new(deliveries_rx),
+                deliveries_rx: tokio::sync::Mutex::new(DeliveryBuffer {
+                    receiver: deliveries_rx,
+                    leftover: VecDeque::new(),
+                }),
                 settle_tx: Mutex::new(None),
                 receive_token: CancellationToken::new(),
                 abort_token: CancellationToken::new(),
@@ -405,12 +433,15 @@ impl ConsumerEngine {
         let (settle_tx, settle_rx) = mpsc::unbounded_channel();
         *inner.settle_tx.lock() = Some(settle_tx);
         let settle_task = inner.runtime.spawn(settle::settle_loop(
-            inner.client.clone(),
-            inner.settings.queue_url.clone(),
+            settle::SettleContext {
+                client: inner.client.clone(),
+                queue_url: inner.settings.queue_url.clone(),
+                metrics: inner.metrics.clone(),
+                linger: inner.settings.settle_linger,
+                retry: inner.settings.settle_retry.clone(),
+                backoff: inner.settings.settle_backoff,
+            },
             settle_rx,
-            inner.settings.settle_linger,
-            inner.settings.settle_retry.clone(),
-            inner.settings.settle_backoff,
         ));
         let mut background = vec![settle_task];
         if inner.settings.heartbeat_enabled {
@@ -436,29 +467,32 @@ impl ConsumerEngine {
     /// that are still being decoded when receiving stops are left for [`Self::drain_buffered`]
     /// (after [`Self::stop_receiving`] returned).
     pub async fn next_batch(&self, max: usize, timeout: Duration) -> Vec<Delivery> {
-        let mut receiver = self.inner.deliveries_rx.lock().await;
+        let mut buffer = self.inner.deliveries_rx.lock().await;
         let mut deliveries = Vec::new();
         if max == 0 {
             return deliveries;
         }
-        tokio::select! {
-            biased;
-            _ = receiver.recv_many(&mut deliveries, max) => {}
-            () = self.inner.receive_token.cancelled() => {}
-            () = self.inner.shutdown_token.cancelled() => {}
-            () = tokio::time::sleep(timeout) => {}
+        if buffer.leftover.is_empty() {
+            let mut batches = Vec::new();
+            tokio::select! {
+                biased;
+                _ = buffer.receiver.recv_many(&mut batches, max) => {}
+                () = self.inner.receive_token.cancelled() => {}
+                () = self.inner.shutdown_token.cancelled() => {}
+                () = tokio::time::sleep(timeout) => {}
+            }
+            buffer.leftover.extend(batches.into_iter().flatten());
         }
+        buffer.take(max, &mut deliveries);
         self.inner.metrics.buffered.add(-i64::try_from(deliveries.len()).unwrap_or(0));
         deliveries
     }
 
     /// Returns buffered deliveries without waiting.
     pub fn drain_buffered(&self) -> Vec<Delivery> {
-        let Ok(mut receiver) = self.inner.deliveries_rx.try_lock() else { return Vec::new() };
+        let Ok(mut buffer) = self.inner.deliveries_rx.try_lock() else { return Vec::new() };
         let mut deliveries = Vec::new();
-        while let Ok(delivery) = receiver.try_recv() {
-            deliveries.push(delivery);
-        }
+        buffer.take(usize::MAX, &mut deliveries);
         self.inner.metrics.buffered.add(-i64::try_from(deliveries.len()).unwrap_or(0));
         deliveries
     }
@@ -537,14 +571,13 @@ impl ConsumerEngine {
             for (_, entry) in remaining {
                 if matches!(entry.status, LeaseStatus::Buffered | LeaseStatus::Active) {
                     let (reply, receiver) = tokio::sync::oneshot::channel();
-                    if sender
-                        .send(SettleCommand {
-                            receipt_handle: entry.receipt_handle,
-                            kind: SettleKind::Visibility(self.inner.visibility_floor(Duration::ZERO)),
-                            reply: Some(reply),
-                        })
-                        .is_ok()
-                    {
+                    let mut command = SettleCommand::new(
+                        entry.receipt_handle,
+                        SettleKind::Visibility(self.inner.visibility_floor(Duration::ZERO)),
+                        Some(reply),
+                    );
+                    command.urgent = true;
+                    if sender.send(command).is_ok() {
                         self.inner.metrics.messages_released.inc();
                         replies.push(receiver);
                     }

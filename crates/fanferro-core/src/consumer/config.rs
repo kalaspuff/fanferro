@@ -66,16 +66,20 @@ impl Default for HeartbeatConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SettleConfig {
-    /// Seconds to wait for more settlements before flushing a batch (0 = flush whatever
-    /// is queued immediately; batches still form naturally under load).
+    /// Seconds a batch waits for more settlements (at most 1). A batch is sent as soon as it
+    /// holds ten deletes or ten visibility changes, or when a settlement is urgent; 0 sends
+    /// whatever is queued immediately.
     pub linger: f64,
     /// Retries for failed delete/visibility calls.
     pub retry: RetrySettings,
 }
 
+/// Default settlement linger (seconds).
+const DEFAULT_SETTLE_LINGER: f64 = 0.005;
+
 impl Default for SettleConfig {
     fn default() -> Self {
-        Self { linger: 0.0, retry: RetrySettings::default() }
+        Self { linger: DEFAULT_SETTLE_LINGER, retry: RetrySettings::default() }
     }
 }
 
@@ -95,9 +99,9 @@ pub struct ConsumerConfig {
     #[serde(default = "d10")]
     pub max_in_flight: usize,
     /// Maximum messages whose settlement (delete, visibility change, dead-letter, requeue) is in
-    /// progress (default: four times `max_in_flight`). A message hands its in-flight slot back
-    /// when its settlement starts, so receiving continues during the settlement round trip;
-    /// this bounds that backlog.
+    /// progress (default: four times `max_in_flight`, at least 20 so that full batches can form).
+    /// A message hands its in-flight slot back when its settlement starts, so receiving
+    /// continues during the settlement round trip; this bounds that backlog.
     #[serde(default)]
     pub max_settling: Option<usize>,
     /// Messages per receive call (1-10).
@@ -240,12 +244,18 @@ impl ConsumerConfig {
             None => MAX_VISIBILITY,
         };
         let heartbeat_tick = (heartbeat_interval / 4).clamp(Duration::from_millis(50), Duration::from_secs(1));
+        let settle_linger = duration_from_secs(self.settle.linger, "settle.linger")?;
+        if settle_linger > Duration::from_secs(1) {
+            return Err(Error::config("settle.linger must be at most 1 second"));
+        }
         Ok(Settings {
             queue_url: self.queue_url.clone(),
             queue_arn: self.queue_arn.clone(),
             fifo: self.fifo,
             max_in_flight: self.max_in_flight,
-            max_settling: self.max_settling.unwrap_or_else(|| self.max_in_flight.saturating_mul(4)),
+            max_settling: self
+                .max_settling
+                .unwrap_or_else(|| self.max_in_flight.saturating_mul(4).max(2 * crate::publish::MAX_BATCH_ENTRIES)),
             batch_size: self.batch_size,
             wait_time,
             pollers: self.pollers,
@@ -256,7 +266,7 @@ impl ConsumerConfig {
             heartbeat_tick,
             extend_by,
             max_lease,
-            settle_linger: duration_from_secs(self.settle.linger, "settle.linger")?,
+            settle_linger,
             settle_retry: self.settle.retry.clone(),
             settle_backoff: self.settle.retry.backoff()?,
             dead_letter_queue_url: self.dead_letter_queue_url.clone(),
@@ -305,6 +315,9 @@ mod tests {
         assert_eq!(settings.max_lease, MAX_VISIBILITY);
         assert!(settings.heartbeat_enabled);
         assert_eq!(settings.max_settling, 40);
+        let small = ConsumerConfig { max_in_flight: 1, ..ConsumerConfig::new("u") }.validate().unwrap();
+        assert_eq!(small.max_settling, 20, "room for two full batches");
+        assert_eq!(settings.settle_linger, Duration::from_millis(5));
     }
 
     #[test]
@@ -325,6 +338,11 @@ mod tests {
         );
         assert!(
             ConsumerConfig { rate_limit: Some(RateLimitConfig { per_second: 0.0, burst: None }), ..base.clone() }
+                .validate()
+                .is_err()
+        );
+        assert!(
+            ConsumerConfig { settle: SettleConfig { linger: 1.5, ..SettleConfig::default() }, ..base.clone() }
                 .validate()
                 .is_err()
         );

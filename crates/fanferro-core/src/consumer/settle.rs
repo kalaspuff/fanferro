@@ -1,13 +1,21 @@
 //! Batched settlement: deletes and visibility changes grouped into batch calls.
+//!
+//! The first pending settlement opens a batch that stays open for at most `linger`. It is sent
+//! as soon as one call's worth (ten deletes or ten visibility changes) is pending, or when a
+//! settlement is marked urgent (its caller is blocked on it and nothing else is expected
+//! soon), or when the linger expires. Settlements already queued at that point go along.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::join_all;
 use tokio::sync::{mpsc, oneshot};
+use tokio::time::Instant;
 
 use crate::backend::{BatchEntryError, VisibilityChange};
 use crate::client::Client;
 use crate::error::{AwsError, Error, Result};
+use crate::metrics::ConsumerMetrics;
 use crate::publish::MAX_BATCH_ENTRIES;
 use crate::retry::{Backoff, RetrySettings};
 
@@ -24,6 +32,42 @@ pub(crate) struct SettleCommand {
     pub receipt_handle: String,
     pub kind: SettleKind,
     pub reply: Option<oneshot::Sender<Result<()>>>,
+    /// Send the open batch now instead of waiting to fill it.
+    pub urgent: bool,
+    /// When the command was queued (the linger counts from the oldest pending command).
+    pub queued_at: Instant,
+}
+
+impl SettleCommand {
+    pub(crate) fn new(receipt_handle: String, kind: SettleKind, reply: Option<oneshot::Sender<Result<()>>>) -> Self {
+        Self { receipt_handle, kind, reply, urgent: false, queued_at: Instant::now() }
+    }
+}
+
+/// Settlements collected for the next round of batch calls.
+struct Pending {
+    commands: Vec<SettleCommand>,
+    deletes: usize,
+    urgent: bool,
+}
+
+impl Pending {
+    fn new(first: SettleCommand) -> Self {
+        let mut pending = Self { commands: Vec::new(), deletes: 0, urgent: false };
+        pending.push(first);
+        pending
+    }
+
+    fn push(&mut self, command: SettleCommand) {
+        self.deletes += usize::from(command.kind == SettleKind::Delete);
+        self.urgent |= command.urgent;
+        self.commands.push(command);
+    }
+
+    /// Whether waiting longer cannot make the next call fuller (or a caller cannot wait).
+    fn ready(&self) -> bool {
+        self.urgent || self.deletes >= MAX_BATCH_ENTRIES || self.commands.len() - self.deletes >= MAX_BATCH_ENTRIES
+    }
 }
 
 fn entry_error(operation: &'static str, entry: &BatchEntryError) -> Error {
@@ -42,64 +86,72 @@ fn reply(command: SettleCommand, result: Result<()>) {
     }
 }
 
+/// Everything the settle loop needs besides its commands.
+pub(crate) struct SettleContext {
+    pub client: Client,
+    pub queue_url: String,
+    pub metrics: Arc<ConsumerMetrics>,
+    pub linger: Duration,
+    pub retry: RetrySettings,
+    pub backoff: Backoff,
+}
+
 /// Runs until every sender is dropped, then flushes what is left and returns.
-pub(crate) async fn settle_loop(
-    client: Client,
-    queue_url: String,
-    mut receiver: mpsc::UnboundedReceiver<SettleCommand>,
-    linger: Duration,
-    retry: RetrySettings,
-    backoff: Backoff,
-) {
+pub(crate) async fn settle_loop(context: SettleContext, mut receiver: mpsc::UnboundedReceiver<SettleCommand>) {
     while let Some(first) = receiver.recv().await {
-        let mut batch = vec![first];
-        if !linger.is_zero() {
-            let deadline = tokio::time::Instant::now() + linger;
-            while batch.len() < MAX_BATCH_ENTRIES * 2 {
-                tokio::select! {
-                    command = receiver.recv() => match command {
-                        Some(command) => batch.push(command),
-                        None => break,
-                    },
-                    () = tokio::time::sleep_until(deadline) => break,
-                }
+        let deadline = first.queued_at + context.linger;
+        let mut pending = Pending::new(first);
+        while !pending.ready() {
+            // Already queued settlements join without waiting for the deadline.
+            let command = match receiver.try_recv() {
+                Ok(command) => Some(command),
+                Err(mpsc::error::TryRecvError::Disconnected) => None,
+                Err(mpsc::error::TryRecvError::Empty) => tokio::select! {
+                    command = receiver.recv() => command,
+                    () = tokio::time::sleep_until(deadline) => None,
+                },
+            };
+            match command {
+                Some(command) => pending.push(command),
+                None => break,
             }
         }
-        while batch.len() < MAX_BATCH_ENTRIES * 10 {
+        while pending.commands.len() < MAX_BATCH_ENTRIES * 10 {
             match receiver.try_recv() {
-                Ok(command) => batch.push(command),
+                Ok(command) => pending.push(command),
                 Err(_) => break,
             }
         }
-        let (deletes, changes): (Vec<_>, Vec<_>) = batch.into_iter().partition(|c| c.kind == SettleKind::Delete);
+        let (deletes, changes): (Vec<_>, Vec<_>) =
+            pending.commands.into_iter().partition(|c| c.kind == SettleKind::Delete);
         let mut flushes = Vec::new();
         let mut deletes = deletes;
         while !deletes.is_empty() {
             let rest = deletes.split_off(deletes.len().min(MAX_BATCH_ENTRIES));
-            flushes.push(flush(&client, &queue_url, std::mem::replace(&mut deletes, rest), &retry, backoff));
+            flushes.push(flush(&context, std::mem::replace(&mut deletes, rest)));
         }
         let mut changes = changes;
         while !changes.is_empty() {
             let rest = changes.split_off(changes.len().min(MAX_BATCH_ENTRIES));
-            flushes.push(flush(&client, &queue_url, std::mem::replace(&mut changes, rest), &retry, backoff));
+            flushes.push(flush(&context, std::mem::replace(&mut changes, rest)));
         }
         join_all(flushes).await;
     }
 }
 
 /// Sends one batch (all deletes or all visibility changes), retrying retryable failures.
-async fn flush(
-    client: &Client,
-    queue_url: &str,
-    mut pending: Vec<SettleCommand>,
-    retry: &RetrySettings,
-    backoff: Backoff,
-) {
+async fn flush(context: &SettleContext, mut pending: Vec<SettleCommand>) {
+    let SettleContext { client, queue_url, metrics, retry, backoff, .. } = context;
     let max_attempts = retry.max_attempts.max(1);
     let mut attempt = 0;
     while !pending.is_empty() {
         let is_delete = pending[0].kind == SettleKind::Delete;
         let operation = if is_delete { "DeleteMessageBatch" } else { "ChangeMessageVisibilityBatch" };
+        if is_delete {
+            metrics.delete_requests.inc();
+        } else {
+            metrics.visibility_requests.inc();
+        }
         let call = if is_delete {
             client
                 .backend()

@@ -100,6 +100,13 @@ slot to the next message right away; the automatic ack completes in the backgrou
 | `pollers` | 1 | concurrent receive loops (raise for high-throughput queues) |
 | `rate_limit` | `None` | `RateLimit(per_second, burst)` or a number: max messages received per second |
 | `handler_timeout` | `None` | cancel handlers after N seconds (`HandlerTimeoutError`, retried) |
+| `settle_linger` | 0.005 | seconds a batch of acks or retries waits for more before it is sent |
+
+Acks and retries are sent in batch calls (`DeleteMessageBatch`, `ChangeMessageVisibilityBatch`)
+of up to ten messages: a batch goes out as soon as it is full, or `settle_linger` after its first
+settlement. When every running handler awaits an explicit settlement (`await message.ack()`),
+nothing else can fill the batch, so it is sent right away. `consumer.stats()["engine"]` counts the
+calls (`delete_requests`, `visibility_requests`).
 
 The engine never leases more than `concurrency + prefetch` unsettled messages. A message gives
 its slot back as soon as its settlement starts (the handler returned or raised), so receiving and

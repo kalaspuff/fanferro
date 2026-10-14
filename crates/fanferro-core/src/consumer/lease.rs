@@ -92,6 +92,8 @@ pub struct Lease {
     /// Settling slot: held while the settlement is in progress.
     settling: Mutex<Option<OwnedSemaphorePermit>>,
     settled: AtomicBool,
+    /// The next settlement command is urgent (see [`Lease::expedite`]).
+    expedite: AtomicBool,
 }
 
 impl std::fmt::Debug for Lease {
@@ -127,6 +129,7 @@ impl Lease {
             permit: Mutex::new(Some(permit)),
             settling: Mutex::new(None),
             settled: AtomicBool::new(false),
+            expedite: AtomicBool::new(false),
         }
     }
 
@@ -228,10 +231,17 @@ impl Lease {
     async fn settle(&self, kind: SettleKind) -> Result<()> {
         let sender = self.inner.settle_sender().ok_or_else(|| Error::Shutdown("the consumer is closed".into()))?;
         let (reply, receiver) = oneshot::channel();
-        sender
-            .send(SettleCommand { receipt_handle: self.message.receipt_handle.clone(), kind, reply: Some(reply) })
-            .map_err(|_| Error::Shutdown("the consumer is closed".into()))?;
+        let mut command = SettleCommand::new(self.message.receipt_handle.clone(), kind, Some(reply));
+        command.urgent = self.expedite.swap(false, Ordering::SeqCst);
+        sender.send(command).map_err(|_| Error::Shutdown("the consumer is closed".into()))?;
         receiver.await.map_err(|_| Error::Shutdown("the consumer closed before settling".into()))?
+    }
+
+    /// Sends this lease's next settlement (or explicit extension) right away instead of letting
+    /// it wait to fill a batch. Use it when the caller is blocked on that settlement and no
+    /// other settlement is expected soon (e.g. every handler awaits an explicit ack).
+    pub fn expedite(&self) {
+        self.expedite.store(true, Ordering::SeqCst);
     }
 
     fn cap_visibility(&self, timeout: Duration) -> Duration {
@@ -446,11 +456,11 @@ impl Drop for Lease {
         }
         // Dropped without settlement: stop heartbeating and make the message visible again.
         if let Some(sender) = self.inner.settle_sender() {
-            let _ = sender.send(SettleCommand {
-                receipt_handle: self.message.receipt_handle.clone(),
-                kind: SettleKind::Visibility(self.inner.visibility_floor(Duration::ZERO)),
-                reply: None,
-            });
+            let _ = sender.send(SettleCommand::new(
+                self.message.receipt_handle.clone(),
+                SettleKind::Visibility(self.inner.visibility_floor(Duration::ZERO)),
+                None,
+            ));
             self.inner.metrics.messages_released.inc();
         }
     }
