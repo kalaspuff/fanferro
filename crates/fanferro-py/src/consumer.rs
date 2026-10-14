@@ -1,6 +1,7 @@
 //! `ConsumerEngine` and `Delivery` bindings.
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,7 +13,7 @@ use pyo3::types::{PyDict, PyList};
 use crate::client::pointer_to_py;
 use crate::convert::{attributes_to_py, seconds, time_to_py};
 use crate::errors::{ShutdownError, to_py_err, to_py_err_with};
-use crate::runtime::{future_into_py, handle};
+use crate::runtime::{Completions, future_into_py, handle};
 use crate::types::wire_to_py;
 
 /// Receives messages from one queue.
@@ -20,11 +21,13 @@ use crate::types::wire_to_py;
 pub struct PyConsumerEngine {
     engine: ConsumerEngine,
     pid: u32,
+    /// Resolves the settlement awaitables of this engine's deliveries in batches.
+    completions: Arc<Completions>,
 }
 
 impl PyConsumerEngine {
     pub fn new(engine: ConsumerEngine, pid: u32) -> Self {
-        Self { engine, pid }
+        Self { engine, pid, completions: Arc::default() }
     }
 
     fn engine(&self) -> PyResult<ConsumerEngine> {
@@ -37,10 +40,10 @@ impl PyConsumerEngine {
     }
 }
 
-fn deliveries_to_py(py: Python<'_>, deliveries: Vec<Delivery>) -> PyResult<Py<PyAny>> {
+fn deliveries_to_py(py: Python<'_>, deliveries: Vec<Delivery>, completions: &Arc<Completions>) -> PyResult<Py<PyAny>> {
     let list = PyList::empty(py);
     for delivery in deliveries {
-        list.append(Py::new(py, PyDelivery { inner: Arc::new(delivery) })?)?;
+        list.append(Py::new(py, PyDelivery { inner: Arc::new(delivery), completions: completions.clone() })?)?;
     }
     list.into_py_any(py)
 }
@@ -59,16 +62,17 @@ impl PyConsumerEngine {
     fn next_batch<'py>(&self, py: Python<'py>, max: usize, timeout: f64) -> PyResult<Bound<'py, PyAny>> {
         let engine = self.engine()?;
         let timeout = seconds(Some(timeout), "timeout")?.unwrap_or(Duration::from_secs(1));
+        let completions = self.completions.clone();
         future_into_py(py, async move {
             let deliveries = engine.next_batch(max, timeout).await;
-            Python::attach(|py| deliveries_to_py(py, deliveries))
+            Python::attach(|py| deliveries_to_py(py, deliveries, &completions))
         })
     }
 
     /// Returns buffered deliveries without waiting.
     fn drain_buffered<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let engine = self.engine()?;
-        deliveries_to_py(py, engine.drain_buffered()).map(|list| list.into_bound(py))
+        deliveries_to_py(py, engine.drain_buffered(), &self.completions).map(|list| list.into_bound(py))
     }
 
     /// Pauses receiving.
@@ -135,6 +139,21 @@ impl PyConsumerEngine {
 #[pyclass(name = "Delivery", module = "fanferro._core", frozen)]
 pub struct PyDelivery {
     inner: Arc<Delivery>,
+    completions: Arc<Completions>,
+}
+
+impl PyDelivery {
+    /// Starts a settlement in the background (tracked by the engine) and returns an asyncio
+    /// future that is resolved with its outcome, batched with other completed settlements.
+    fn settle<'py, Settle, Fut>(&self, py: Python<'py>, settle: Settle) -> PyResult<Bound<'py, PyAny>>
+    where
+        Settle: FnOnce(Arc<Delivery>) -> Fut + Send + 'static,
+        Fut: Future<Output = fanferro_core::Result<()>> + Send + 'static,
+    {
+        let (future, pending) = self.completions.future(py)?;
+        self.inner.spawn_settlement(settle, move |result| pending.complete(result));
+        Ok(future)
+    }
 }
 
 #[pymethods]
@@ -286,35 +305,41 @@ impl PyDelivery {
         self.inner.lease.mark_active();
     }
 
-    /// Sends the next settlement right away instead of waiting to fill a batch.
-    fn expedite(&self) {
-        self.inner.lease.expedite();
+    /// Notes that a handler waits for the next settlement; `waiting_handlers`: how many handlers
+    /// wait when all of them do (the batch is then sent once it holds all their settlements).
+    #[pyo3(signature = (waiting_handlers=None))]
+    fn mark_awaited(&self, waiting_handlers: Option<usize>) {
+        self.inner.lease.mark_awaited(waiting_handlers);
+    }
+
+    /// Deletes the message in the background (not awaitable; the engine tracks the delete and
+    /// reports failures as events and metrics).
+    fn ack_in_background(&self) -> PyResult<()> {
+        self.inner.ack_in_background().map_err(to_py_err)
     }
 
     /// Deletes the message (awaitable).
     fn ack<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
-        future_into_py(py, async move { inner.lease.ack().await.map_err(to_py_err) })
+        let (future, pending) = self.completions.future(py)?;
+        self.inner.spawn_ack(move |result| pending.complete(result));
+        Ok(future)
     }
 
     /// Makes the message visible again after `delay` seconds (awaitable).
     fn nack<'py>(&self, py: Python<'py>, delay: f64) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
         let delay = seconds(Some(delay), "delay")?.unwrap_or_default();
-        future_into_py(py, async move { inner.lease.nack(delay).await.map_err(to_py_err) })
+        self.settle(py, move |delivery| async move { delivery.lease.nack(delay).await })
     }
 
     /// Makes the message visible again immediately (awaitable).
     fn release<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
-        future_into_py(py, async move { inner.lease.release().await.map_err(to_py_err) })
+        self.settle(py, |delivery| async move { delivery.lease.release().await })
     }
 
     /// Sets the visibility timeout to `timeout` seconds from now (awaitable).
     fn extend<'py>(&self, py: Python<'py>, timeout: f64) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
         let timeout = seconds(Some(timeout), "timeout")?.unwrap_or_default();
-        future_into_py(py, async move { inner.lease.extend(timeout).await.map_err(to_py_err) })
+        self.settle(py, move |delivery| async move { delivery.lease.extend(timeout).await })
     }
 
     /// Forwards the message to the dead-letter queue, then deletes it (awaitable).
@@ -325,17 +350,15 @@ impl PyDelivery {
         reason: String,
         details: Option<BTreeMap<String, String>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
         let details = details.unwrap_or_default();
-        future_into_py(py, async move { inner.lease.dead_letter(&reason, &details).await.map_err(to_py_err) })
+        self.settle(py, move |delivery| async move { delivery.lease.dead_letter(&reason, &details).await })
     }
 
     /// Re-enqueues a copy with `fanferro.attempt=attempt`, then deletes the original (awaitable).
     #[pyo3(signature = (attempt, delay=None))]
     fn requeue<'py>(&self, py: Python<'py>, attempt: u32, delay: Option<f64>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
         let delay = seconds(delay, "delay")?;
-        future_into_py(py, async move { inner.lease.requeue(delay, attempt).await.map_err(to_py_err) })
+        self.settle(py, move |delivery| async move { delivery.lease.requeue(delay, attempt).await })
     }
 
     fn __repr__(&self) -> String {

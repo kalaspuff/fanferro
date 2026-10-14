@@ -338,10 +338,25 @@ class EventDispatcher:
     """Routes events to logging and hooks. Owned by :class:`fanferro.Client`."""
 
     def __init__(self, config: LoggingConfig | None = None) -> None:
-        self.config = config or LoggingConfig()
+        self._config = config or LoggingConfig()
         self._hooks: list[tuple[list[str], EventHook]] = []
         self._tasks: set[asyncio.Task[None]] = set()
         self._listeners: list[Callable[[], None]] = []
+        # Per-kind lookups behind `is_enabled`, which runs for every message: the logger and level
+        # a kind is logged at (the logger's own level is checked live) and whether a hook wants it.
+        self._log_targets: dict[EventKind, tuple[logging.Logger, int] | None] = {}
+        self._hooked: dict[EventKind, bool] = {}
+
+    @property
+    def config(self) -> LoggingConfig:
+        """How events are logged."""
+        return self._config
+
+    @config.setter
+    def config(self, config: LoggingConfig) -> None:
+        self._config = config
+        self._log_targets.clear()
+        self._changed()
 
     def subscribe(self, selector: KindSelector, hook: EventHook) -> Callable[[], None]:
         """Calls ``hook`` for every event matching ``selector``; returns an unsubscribe function."""
@@ -361,15 +376,29 @@ class EventDispatcher:
         self._listeners.append(listener)
 
     def _changed(self) -> None:
+        self._hooked.clear()
         for listener in self._listeners:
             listener()
 
+    def _log_target(self, kind: EventKind) -> tuple[logging.Logger, int] | None:
+        try:
+            return self._log_targets[kind]
+        except KeyError:
+            level = self._config.level_for(kind)
+            target = None if level is None else (self._config.logger_for(kind), level)
+            self._log_targets[kind] = target
+            return target
+
     def is_enabled(self, kind: EventKind) -> bool:
         """Whether anything (logging or a hook) wants events of ``kind``."""
-        level = self.config.level_for(kind)
-        if level is not None and self.config.logger_for(kind).isEnabledFor(level):
+        target = self._log_target(kind)
+        if target is not None and target[0].isEnabledFor(target[1]):
             return True
-        return any(any(fnmatch.fnmatchcase(kind.value, p) for p in patterns) for patterns, _ in self._hooks)
+        hooked = self._hooked.get(kind)
+        if hooked is None:
+            hooked = any(any(fnmatch.fnmatchcase(kind.value, p) for p in patterns) for patterns, _ in self._hooks)
+            self._hooked[kind] = hooked
+        return hooked
 
     def enabled_kinds(self) -> list[EventKind]:
         """All kinds currently wanted."""
@@ -388,16 +417,16 @@ class EventDispatcher:
                 self._call(hook, event)
 
     def _log(self, event: Event) -> None:
-        level = self.config.level_for(event.kind)
-        if level is None:
+        target = self._log_target(event.kind)
+        if target is None:
             return
-        logger = self.config.logger_for(event.kind)
+        logger, level = target
         if not logger.isEnabledFor(level):
             return
         try:
-            if self.config.formatter is not None:
-                text = self.config.formatter(event)
-            elif self.config.include_fields and event.fields:
+            if self._config.formatter is not None:
+                text = self._config.formatter(event)
+            elif self._config.include_fields and event.fields:
                 text = f"{event.message} ({_format_fields(event.fields)})"
             else:
                 text = event.message
@@ -405,7 +434,7 @@ class EventDispatcher:
                 text = f"{text}: {event.error.message}"
         except Exception:  # a broken formatter must never break message processing  # noqa: BLE001 - deliberate catch-all; the error is reported, never swallowed silently
             text = event.message
-        exc_info = event.exception if self.config.include_tracebacks and event.exception is not None else None
+        exc_info = event.exception if self._config.include_tracebacks and event.exception is not None else None
         logger.log(
             level,
             text,

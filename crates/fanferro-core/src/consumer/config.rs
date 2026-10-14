@@ -67,8 +67,8 @@ impl Default for HeartbeatConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct SettleConfig {
     /// Seconds a batch waits for more settlements (at most 1). A batch is sent as soon as it
-    /// holds ten deletes or ten visibility changes, or when a settlement is urgent; 0 sends
-    /// whatever is queued immediately.
+    /// holds ten deletes or ten visibility changes, or when no other settlement can join it;
+    /// 0 sends whatever is queued immediately.
     pub linger: f64,
     /// Retries for failed delete/visibility calls.
     pub retry: RetrySettings,

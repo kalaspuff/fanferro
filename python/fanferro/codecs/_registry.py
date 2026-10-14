@@ -19,6 +19,11 @@ if TYPE_CHECKING:
 __all__ = ["CodecRegistry", "default_codecs"]
 
 
+_BUILTIN_CODECS: frozenset[type] = frozenset(
+    {ProtobufCodec, PydanticCodec, MsgspecCodec, DataclassCodec, BytesCodec, TextCodec, JsonCodec}
+)
+
+
 def default_codecs() -> list[Codec]:
     """The built-in codecs in lookup order.
 
@@ -43,6 +48,21 @@ class CodecRegistry:
     def __init__(self, codecs: Iterable[Codec] | None = None) -> None:
         self._codecs: list[Codec] = list(codecs) if codecs is not None else default_codecs()
         self._decoders: dict[tuple[Any, str | None], Codec] = {}
+        self._encoders: dict[type, Codec] | None = {} if self._type_based() else None
+        self._generation = 0
+
+    def _type_based(self) -> bool:
+        """Whether every codec decides ``can_encode`` from the value's type alone.
+
+        The built-in codecs do, so the encoder found for a type is reused for every value of
+        that type; a custom codec may look at values, so it disables the cache.
+        """
+        return all(type(codec) in _BUILTIN_CODECS for codec in self._codecs)
+
+    @property
+    def generation(self) -> int:
+        """Incremented whenever a codec is registered (lets dependent caches refresh)."""
+        return self._generation
 
     @property
     def codecs(self) -> tuple[Codec, ...]:
@@ -56,6 +76,8 @@ class CodecRegistry:
         else:
             self._codecs.append(codec)
         self._decoders.clear()
+        self._encoders = {} if self._type_based() else None
+        self._generation += 1
 
     def copy(self) -> CodecRegistry:
         """An independent copy."""
@@ -70,8 +92,15 @@ class CodecRegistry:
 
     def encoder_for(self, value: object) -> Codec:
         """The first codec that can encode ``value``."""
+        encoders = self._encoders
+        if encoders is not None:
+            cached = encoders.get(type(value))
+            if cached is not None:
+                return cached
         for codec in self._codecs:
             if codec.can_encode(value):
+                if encoders is not None:
+                    encoders[type(value)] = codec
                 return codec
         raise EncodeError(f"no codec can encode values of type {type(value).__name__}; register a codec for it")
 

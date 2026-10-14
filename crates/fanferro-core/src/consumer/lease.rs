@@ -10,18 +10,18 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use parking_lot::Mutex;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use tokio::sync::{OwnedSemaphorePermit, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, mpsc, oneshot};
 use tokio::time::Instant;
 
 use super::EngineInner;
 use super::config::MAX_VISIBILITY;
-use super::settle::{SettleCommand, SettleKind};
+use super::settle::{Reply, SettleCommand, SettleKind};
 use crate::backend::{ReceivedMessage, SendRequest};
 use crate::error::{AwsErrorKind, Error, Result};
 use crate::events::{Event, EventKind};
@@ -92,8 +92,10 @@ pub struct Lease {
     /// Settling slot: held while the settlement is in progress.
     settling: Mutex<Option<OwnedSemaphorePermit>>,
     settled: AtomicBool,
-    /// The next settlement command is urgent (see [`Lease::expedite`]).
-    expedite: AtomicBool,
+    /// The next settlement is awaited by a handler (see [`Lease::mark_awaited`]).
+    awaited: AtomicBool,
+    /// How many handlers wait, when all of them do (0: unknown; see [`Lease::mark_awaited`]).
+    waiting_handlers: AtomicUsize,
 }
 
 impl std::fmt::Debug for Lease {
@@ -129,7 +131,8 @@ impl Lease {
             permit: Mutex::new(Some(permit)),
             settling: Mutex::new(None),
             settled: AtomicBool::new(false),
-            expedite: AtomicBool::new(false),
+            awaited: AtomicBool::new(false),
+            waiting_handlers: AtomicUsize::new(0),
         }
     }
 
@@ -170,11 +173,28 @@ impl Lease {
     /// meanwhile), then hands the in-flight slot back so that receiving continues while the
     /// settlement completes. The lease stays tracked until [`Lease::finish`].
     async fn begin(&self) -> Result<()> {
+        self.claim()?;
+        self.start_settling().await;
+        Ok(())
+    }
+
+    /// Marks the lease as being settled; fails if a settlement was requested already.
+    pub(crate) fn claim(&self) -> Result<()> {
         if self.settled.swap(true, Ordering::SeqCst) {
             return Err(Error::Lease(format!("message {} was already settled", self.message.message_id)));
         }
+        Ok(())
+    }
+
+    pub(crate) async fn start_settling(&self) {
         // The semaphore is never closed, so this only fails if the engine is gone.
-        if let Ok(permit) = self.inner.settling.clone().acquire_owned().await {
+        let permit = self.inner.settling.clone().acquire_owned().await.ok();
+        self.enter_settling(permit);
+    }
+
+    /// Takes the settling slot, then hands the in-flight slot back.
+    fn enter_settling(&self, permit: Option<OwnedSemaphorePermit>) {
+        if let Some(permit) = permit {
             *self.settling.lock() = Some(permit);
             self.inner.metrics.settling.add(1);
         }
@@ -182,7 +202,6 @@ impl Lease {
             entry.status = LeaseStatus::Settling;
         }
         self.permit.lock().take();
-        Ok(())
     }
 
     /// Returns the settling slot (if one is held).
@@ -229,19 +248,38 @@ impl Lease {
     }
 
     async fn settle(&self, kind: SettleKind) -> Result<()> {
-        let sender = self.inner.settle_sender().ok_or_else(|| Error::Shutdown("the consumer is closed".into()))?;
         let (reply, receiver) = oneshot::channel();
-        let mut command = SettleCommand::new(self.message.receipt_handle.clone(), kind, Some(reply));
-        command.urgent = self.expedite.swap(false, Ordering::SeqCst);
-        sender.send(command).map_err(|_| Error::Shutdown("the consumer is closed".into()))?;
+        self.queue(kind, Reply::Channel(reply));
         receiver.await.map_err(|_| Error::Shutdown("the consumer closed before settling".into()))?
     }
 
-    /// Sends this lease's next settlement (or explicit extension) right away instead of letting
-    /// it wait to fill a batch. Use it when the caller is blocked on that settlement and no
-    /// other settlement is expected soon (e.g. every handler awaits an explicit ack).
-    pub fn expedite(&self) {
-        self.expedite.store(true, Ordering::SeqCst);
+    /// Hands a settlement command to the settle loop, which sends the outcome to `reply` (right
+    /// away if the consumer is closed).
+    pub(crate) fn queue(&self, kind: SettleKind, reply: Reply) {
+        let Some(sender) = self.inner.settle_sender() else {
+            reply.send(Err(Error::Shutdown("the consumer is closed".into())));
+            return;
+        };
+        let mut command = SettleCommand::new(self.message.receipt_handle.clone(), kind, Some(reply));
+        command.awaited = self.awaited.swap(false, Ordering::SeqCst);
+        command.waiting_handlers = Some(self.waiting_handlers.swap(0, Ordering::SeqCst)).filter(|&n| n > 0);
+        if let Err(mpsc::error::SendError(command)) = sender.send(command)
+            && let Some(reply) = command.reply
+        {
+            reply.send(Err(Error::Shutdown("the consumer is closed".into())));
+        }
+    }
+
+    /// Notes that a handler waits for this lease's next settlement (or explicit extension), so
+    /// that the batch it joins is not held back for settlements that cannot come.
+    ///
+    /// `waiting_handlers`: when every handler that could request another settlement waits for
+    /// one, how many handlers wait. The settle loop sends the batch as soon as it holds that many
+    /// awaited settlements; while fewer are pending, some handlers wait for settlements that were
+    /// sent already, and their slots will soon go to handlers that settle more.
+    pub fn mark_awaited(&self, waiting_handlers: Option<usize>) {
+        self.awaited.store(true, Ordering::SeqCst);
+        self.waiting_handlers.store(waiting_handlers.unwrap_or(0), Ordering::SeqCst);
     }
 
     fn cap_visibility(&self, timeout: Duration) -> Duration {
@@ -252,10 +290,33 @@ impl Lease {
 
     /// Deletes the message (successful processing).
     pub async fn ack(&self) -> Result<()> {
-        self.begin().await?;
+        self.claim()?;
+        self.ack_claimed().await
+    }
+
+    /// [`Lease::ack`] after [`Lease::claim`] succeeded.
+    pub(crate) async fn ack_claimed(&self) -> Result<()> {
+        self.start_settling().await;
         let result = self.settle(SettleKind::Delete).await;
         self.finish(Outcome::Acked, &result);
         result
+    }
+
+    /// The fast path of an ack after [`Lease::claim`]: when a settling slot is free (the usual
+    /// case), takes it and queues the delete with `reply` right away, so acks requested one after
+    /// another reach the settle loop in that order. Hands `reply` back when no slot is free.
+    pub(crate) fn try_queue_ack(&self, reply: Reply) -> std::result::Result<(), Reply> {
+        let Ok(permit) = self.inner.settling.clone().try_acquire_owned() else {
+            return Err(reply);
+        };
+        self.enter_settling(Some(permit));
+        self.queue(SettleKind::Delete, reply);
+        Ok(())
+    }
+
+    /// Records the outcome of an ack whose delete was queued with [`Lease::queue`].
+    pub(crate) fn finish_ack(&self, result: &Result<()>) {
+        self.finish(Outcome::Acked, result);
     }
 
     /// Makes the message visible again after `delay` (retry with backoff).

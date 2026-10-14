@@ -147,9 +147,12 @@ class Router:
     @property
     def routes(self) -> list[Route]:
         """Routes in evaluation order."""
+        return list(self._ordered())
+
+    def _ordered(self) -> list[Route]:
         if self._sorted is None:
             self._sorted = sorted(self._routes, key=lambda r: (r.fallback, -r.priority, r.order))
-        return list(self._sorted)
+        return self._sorted
 
     def add(
         self,
@@ -233,7 +236,7 @@ class Router:
 
     def resolve(self, message: Message[Any], types: MessageTypes) -> Route | None:
         """The first route that accepts ``message``."""
-        for route in self.routes:
+        for route in self._ordered():
             if route.matches(message, types):
                 return route
         return None

@@ -112,13 +112,20 @@ These are relied upon across layers; tests cover each of them.
 
 * One Tokio runtime per process (`crates/fanferro-py/src/runtime.rs`), 2-4 worker threads by
   default (`FANFERRO_WORKER_THREADS`). Rust futures become asyncio futures through
-  `pyo3-async-runtimes`; cancelling the asyncio future drops the Rust future.
+  `pyo3-async-runtimes`; cancelling the asyncio future drops the Rust future. Settlements
+  (`delivery.ack()`, `nack()`...) are the exception: they run as tasks the engine tracks
+  (`close()` waits for them; cancelling the awaitable does not stop a started delete), and their
+  asyncio futures are resolved in batches (`runtime::Completions`: one interpreter attach and one
+  `call_soon_threadsafe` for everything that completed meanwhile).
 * Per consumer engine: `pollers` receive loops, one heartbeat loop, one settle loop and one
-  decode task per received batch (preserving order). Lease state is in a `parking_lot` mutex
-  that is never held across an `.await`.
+  decode task per received batch (decoded concurrently, handed out together and in order). Lease
+  state is in a `parking_lot` mutex that is never held across an `.await`. An ack queues its delete
+  synchronously when a settling permit is free, so acks reach the settle loop in the order they
+  were requested; the settle loop finishes the lease when the batch call returns.
 * Per Python consumer: one dispatcher task, one task per message (or per FIFO group), a
   semaphore of `concurrency` permits held while decoding, middleware and the handler run; the
-  task settles the message (auto-ack, retry, dead-letter) after giving its permit back.
+  task settles the message after giving its permit back. Automatic acks are not awaited: the
+  engine deletes the message in the background (`message.ack_failed` events report failures).
 * Events flow Rust → Python through a bounded channel drained by an event pump task (started
   while a consumer runs or the client is entered) or synchronously after operations. The pump
   is stopped by waking its pending wait, not by cancelling it, so events that wait already took

@@ -28,9 +28,18 @@ Without any tuning, clients and consumers now perform like a hand-tuned 0.1 conf
 - **Slots are freed when settlement starts**: a handler that returns hands its slot to the next
   message while the delete is in flight; settlements in progress are bounded separately.
 - **Batched acks**: deletes and visibility changes wait up to `settle_linger` (5 ms) to fill a
-  batch of ten, and are sent at once when every running handler awaits an explicit settlement.
+  batch of ten, and are sent at once when every running handler awaits an explicit settlement
+  in that batch.
+- **Automatic acks are not awaited per message**: the engine deletes the message in the
+  background (`consumer.stop()` waits for it). `consumer.stats()["processed"]` and the
+  `message.processed` event count handlers that succeeded; `stats()["engine"]["messages_acked"]`
+  counts confirmed deletes, and a failed delete is reported as a `message.ack_failed` event. Explicit
+  settlements (`await message.ack()`...) still resolve once SQS confirmed them.
 - `consumer.stop()` and `client.close()` no longer wait up to half a second for the dispatcher or
   the event pump, and events emitted just before `close()` are no longer lost.
+- Per-message work in the consumer and publisher is lighter: settlement awaitables are resolved
+  in batches, event checks, type names and encoders are cached, and messages are no longer copied
+  while being decoded.
 
 Migrating from 0.1:
 

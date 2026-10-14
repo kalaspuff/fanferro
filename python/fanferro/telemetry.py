@@ -38,6 +38,7 @@ from fanferro._core import traceparent_from_xray, xray_from_traceparent
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
+    from contextlib import AbstractContextManager
 
     from fanferro.envelopes import Envelope
     from fanferro.messages import Message, OutgoingMessage
@@ -45,6 +46,9 @@ if TYPE_CHECKING:
 __all__ = ["Carrier", "Propagation", "Telemetry", "TelemetryRuntime"]
 
 INSTRUMENTATION_NAME = "fanferro"
+
+# Returned instead of a span context when tracing is off: no generator or span per message.
+_NO_SPAN: AbstractContextManager[None] = contextlib.nullcontext()
 
 
 class Carrier(StrEnum):
@@ -287,14 +291,20 @@ class TelemetryRuntime:
 
     # -- tracing ---------------------------------------------------------------------------
 
-    @contextlib.contextmanager
     def publish_span(
         self, destination: str, kind: str, message_id: str | None, batch_size: int | None = None
-    ) -> Iterator[Any]:
+    ) -> AbstractContextManager[Any]:
         """A producer span (no-op without tracing)."""
         if self._tracer is None or self._otel is None:
-            yield None
-            return
+            return _NO_SPAN
+        return self._publish_span(destination, kind, message_id, batch_size)
+
+    @contextlib.contextmanager
+    def _publish_span(
+        self, destination: str, kind: str, message_id: str | None, batch_size: int | None
+    ) -> Iterator[Any]:
+        assert self._tracer is not None
+        assert self._otel is not None
         trace = self._otel["trace"]
         attributes: dict[str, Any] = {
             "messaging.system": _system(kind),
@@ -362,12 +372,16 @@ class TelemetryRuntime:
                     return context
         return None
 
-    @contextlib.contextmanager
-    def process_span(self, message: Message[Any], queue: str) -> Iterator[Any]:
+    def process_span(self, message: Message[Any], queue: str) -> AbstractContextManager[Any]:
         """A consumer span around processing ``message`` (no-op without tracing)."""
         if self._tracer is None or self._otel is None:
-            yield None
-            return
+            return _NO_SPAN
+        return self._process_span(message, queue)
+
+    @contextlib.contextmanager
+    def _process_span(self, message: Message[Any], queue: str) -> Iterator[Any]:
+        assert self._tracer is not None
+        assert self._otel is not None
         trace = self._otel["trace"]
         parent = self.extract(message)
         attributes: dict[str, Any] = {
@@ -409,6 +423,5 @@ class TelemetryRuntime:
         span.set_attribute("error.type", _error_type(error) or "")
 
 
-def monotonic() -> float:
-    """Monotonic clock used for durations."""
-    return time.perf_counter()
+monotonic = time.perf_counter
+"""Monotonic clock used for durations."""

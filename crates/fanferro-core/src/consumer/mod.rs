@@ -27,7 +27,9 @@ mod lease;
 mod poller;
 mod settle;
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -55,7 +57,7 @@ use crate::types::attributes::{md5_of_attributes, md5_of_body};
 use crate::types::reserved;
 use config::Settings;
 use lease::LeaseEntry;
-use settle::{SettleCommand, SettleKind};
+use settle::{Reply, SettleCommand, SettleKind};
 
 /// A received message handed to the application.
 #[derive(Debug)]
@@ -74,6 +76,73 @@ impl Delivery {
     /// The raw message as received from SQS.
     pub fn message(&self) -> &ReceivedMessage {
         self.lease.message()
+    }
+
+    /// Acks the message without waiting for the delete. The settlement runs on the engine's
+    /// runtime and is tracked ([`ConsumerEngine::close`] waits for it); its outcome is reported
+    /// through metrics (`messages_acked`, `ack_failures`) and events (`message.acked`,
+    /// `message.ack_failed`).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Lease`] if the message was settled (or its settlement started) already.
+    pub fn ack_in_background(self: &Arc<Self>) -> Result<()> {
+        self.lease.claim()?;
+        // Failures are reported by the lease (metrics and events).
+        self.continue_ack(|_| {});
+        Ok(())
+    }
+
+    /// Acks the message and hands the outcome to `done`. The delete is queued before this
+    /// returns (when a settling slot is free), so acks requested one after another reach the
+    /// settle loop in that order; `done` runs once the delete completed.
+    pub fn spawn_ack<Done>(self: &Arc<Self>, done: Done)
+    where
+        Done: FnOnce(Result<()>) + Send + 'static,
+    {
+        match self.lease.claim() {
+            Ok(()) => self.continue_ack(done),
+            Err(error) => done(Err(error)),
+        }
+    }
+
+    /// An ack after its lease was claimed. Usually the delete is queued right away and finished by
+    /// the settle loop (no task per ack); without a free settling slot, a tracked task waits for
+    /// one.
+    fn continue_ack<Done>(self: &Arc<Self>, done: Done)
+    where
+        Done: FnOnce(Result<()>) + Send + 'static,
+    {
+        let delivery = self.clone();
+        let finish = Reply::Callback(Box::new(move |result: Result<()>| {
+            delivery.lease.finish_ack(&result);
+            done(result);
+        }));
+        if let Err(finish) = self.lease.try_queue_ack(finish) {
+            let delivery = self.clone();
+            let inner = &self.lease.inner;
+            inner.settlements.spawn_on(
+                async move {
+                    delivery.lease.start_settling().await;
+                    delivery.lease.queue(SettleKind::Delete, finish);
+                },
+                &inner.runtime,
+            );
+        }
+    }
+
+    /// Runs `settle` (an ack, retry, release... of this delivery) on the engine's runtime and
+    /// hands its outcome to `done`. Like background acks, the settlement is tracked:
+    /// [`ConsumerEngine::close`] waits for it, and it completes even if nobody waits for `done`.
+    pub fn spawn_settlement<Settle, Fut, Done>(self: &Arc<Self>, settle: Settle, done: Done)
+    where
+        Settle: FnOnce(Arc<Self>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+        Done: FnOnce(Result<()>) + Send + 'static,
+    {
+        let delivery = self.clone();
+        let inner = &self.lease.inner;
+        inner.settlements.spawn_on(async move { done(settle(delivery).await) }, &inner.runtime);
     }
 }
 
@@ -122,6 +191,8 @@ pub(crate) struct EngineInner {
     pollers: Mutex<Vec<JoinHandle<()>>>,
     background: Mutex<Vec<JoinHandle<()>>>,
     decoders: TaskTracker,
+    /// Settlements running in the background (see [`Delivery::ack_in_background`]).
+    settlements: TaskTracker,
     rate_limiter: Option<RateLimiter>,
     runtime: tokio::runtime::Handle,
     /// Until when an aborted long poll may still be served by the queue (see
@@ -231,7 +302,7 @@ impl EngineInner {
 
     async fn decode(self: &Arc<Self>, lease: Lease) -> Option<Delivery> {
         let received_at = OffsetDateTime::now_utc();
-        let message = lease.message().clone();
+        let message = lease.message.clone();
         if self.settings.verify_md5 {
             let body_ok =
                 message.md5_of_body.as_ref().is_none_or(|md5| md5.eq_ignore_ascii_case(&md5_of_body(&message.body)));
@@ -256,9 +327,9 @@ impl EngineInner {
                     self.handle_sns_control(lease, unwrapped.info).await;
                     return None;
                 }
-                (unwrapped.message, unwrapped.attributes, Some(unwrapped.info))
+                (Cow::Owned(unwrapped.message), unwrapped.attributes, Some(unwrapped.info))
             }
-            Ok(None) => (message.body.clone(), message.attributes.clone(), None),
+            Ok(None) => (Cow::Borrowed(message.body.as_str()), message.attributes.clone(), None),
             Err(error) => {
                 self.metrics.decode_failures.inc();
                 return Some(Delivery { lease, sns: None, decoded: Err(error), received_at });
@@ -418,6 +489,7 @@ impl ConsumerEngine {
                 pollers: Mutex::new(Vec::new()),
                 background: Mutex::new(Vec::new()),
                 decoders: TaskTracker::new(),
+                settlements: TaskTracker::new(),
                 rate_limiter,
                 runtime,
                 orphaned_receives_until: Mutex::new(None),
@@ -576,6 +648,9 @@ impl ConsumerEngine {
     /// and after in-flight handlers finished or were cancelled.
     pub async fn close(&self, release_unsettled: bool) {
         self.stop_receiving(false).await;
+        // Background acks complete first: they need the settle loop, which stops below.
+        self.inner.settlements.close();
+        self.inner.settlements.wait().await;
         for delivery in self.drain_buffered() {
             if release_unsettled {
                 let _ = delivery.lease.release().await;
@@ -591,7 +666,7 @@ impl ConsumerEngine {
                     let mut command = SettleCommand::new(
                         entry.receipt_handle,
                         SettleKind::Visibility(self.inner.visibility_floor(Duration::ZERO)),
-                        Some(reply),
+                        Some(Reply::Channel(reply)),
                     );
                     command.urgent = true;
                     if sender.send(command).is_ok() {

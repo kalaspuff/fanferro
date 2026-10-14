@@ -1,9 +1,10 @@
 //! Batched settlement: deletes and visibility changes grouped into batch calls.
 //!
 //! The first pending settlement opens a batch that stays open for at most `linger`. It is sent
-//! as soon as one call's worth (ten deletes or ten visibility changes) is pending, or when a
-//! settlement is marked urgent (its caller is blocked on it and nothing else is expected
-//! soon), or when the linger expires. Settlements already queued at that point go along.
+//! as soon as one call's worth (ten deletes or ten visibility changes) is pending, when nothing
+//! else can join it (every handler waits for a settlement of this batch, see
+//! [`SettleCommand::waiting_handlers`]), when a settlement is urgent (shutdown), or when the
+//! linger expires. Settlements already queued at that point go along.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,19 +29,53 @@ pub(crate) enum SettleKind {
     Visibility(Duration),
 }
 
+/// Where the outcome of a settlement goes.
+pub(crate) enum Reply {
+    /// A task awaits it.
+    Channel(oneshot::Sender<Result<()>>),
+    /// Runs in the settle loop right after the batch call (keep it short: no I/O, no waiting).
+    Callback(Box<dyn FnOnce(Result<()>) + Send>),
+}
+
+impl Reply {
+    pub(crate) fn send(self, result: Result<()>) {
+        match self {
+            Self::Channel(sender) => {
+                let _ = sender.send(result);
+            }
+            Self::Callback(callback) => callback(result),
+        }
+    }
+}
+
 pub(crate) struct SettleCommand {
     pub receipt_handle: String,
     pub kind: SettleKind,
-    pub reply: Option<oneshot::Sender<Result<()>>>,
+    pub reply: Option<Reply>,
     /// Send the open batch now instead of waiting to fill it.
     pub urgent: bool,
+    /// A handler waits for this settlement (an explicit `await message.ack()`...).
+    pub awaited: bool,
+    /// Set when every handler that could request another settlement waits for one: how many
+    /// handlers wait. Once the batch holds that many awaited settlements, nothing else can join
+    /// it; while fewer are pending, some handlers wait for settlements already sent and will
+    /// soon make room for handlers that settle more.
+    pub waiting_handlers: Option<usize>,
     /// When the command was queued (the linger counts from the oldest pending command).
     pub queued_at: Instant,
 }
 
 impl SettleCommand {
-    pub(crate) fn new(receipt_handle: String, kind: SettleKind, reply: Option<oneshot::Sender<Result<()>>>) -> Self {
-        Self { receipt_handle, kind, reply, urgent: false, queued_at: Instant::now() }
+    pub(crate) fn new(receipt_handle: String, kind: SettleKind, reply: Option<Reply>) -> Self {
+        Self {
+            receipt_handle,
+            kind,
+            reply,
+            urgent: false,
+            awaited: false,
+            waiting_handlers: None,
+            queued_at: Instant::now(),
+        }
     }
 }
 
@@ -49,11 +84,13 @@ struct Pending {
     commands: Vec<SettleCommand>,
     deletes: usize,
     urgent: bool,
+    awaited: usize,
+    waiting_handlers: Option<usize>,
 }
 
 impl Pending {
     fn new(first: SettleCommand) -> Self {
-        let mut pending = Self { commands: Vec::new(), deletes: 0, urgent: false };
+        let mut pending = Self { commands: Vec::new(), deletes: 0, urgent: false, awaited: 0, waiting_handlers: None };
         pending.push(first);
         pending
     }
@@ -61,12 +98,19 @@ impl Pending {
     fn push(&mut self, command: SettleCommand) {
         self.deletes += usize::from(command.kind == SettleKind::Delete);
         self.urgent |= command.urgent;
+        self.awaited += usize::from(command.awaited);
+        if command.waiting_handlers.is_some() {
+            self.waiting_handlers = command.waiting_handlers;
+        }
         self.commands.push(command);
     }
 
     /// Whether waiting longer cannot make the next call fuller (or a caller cannot wait).
     fn ready(&self) -> bool {
-        self.urgent || self.deletes >= MAX_BATCH_ENTRIES || self.commands.len() - self.deletes >= MAX_BATCH_ENTRIES
+        self.urgent
+            || self.deletes >= MAX_BATCH_ENTRIES
+            || self.commands.len() - self.deletes >= MAX_BATCH_ENTRIES
+            || self.waiting_handlers.is_some_and(|waiting| self.awaited >= waiting)
     }
 }
 
@@ -82,7 +126,7 @@ fn entry_error(operation: &'static str, entry: &BatchEntryError) -> Error {
 
 fn reply(command: SettleCommand, result: Result<()>) {
     if let Some(reply) = command.reply {
-        let _ = reply.send(result);
+        reply.send(result);
     }
 }
 

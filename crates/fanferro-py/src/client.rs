@@ -16,7 +16,7 @@ use fanferro_core::transport::{OffloadSettings, PayloadPointer, Transport};
 use fanferro_core::{Client, ClientConfig};
 use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyDict, PyList, PyString};
 use pythonize::depythonize;
 
 use crate::consumer::PyConsumerEngine;
@@ -268,29 +268,33 @@ fn message_from_kwargs(
     })
 }
 
-fn message_from_dict(item: &Bound<'_, PyAny>) -> PyResult<OutgoingMessage> {
+fn message_from_dict<'py>(item: &Bound<'py, PyAny>) -> PyResult<OutgoingMessage> {
+    let py = item.py();
     let dict = item.cast::<PyDict>().map_err(|_| ValidationError::new_err("batch entries must be dicts"))?;
-    let get = |key: &str| dict.get_item(key);
-    let wire = get("wire")?.ok_or_else(|| ValidationError::new_err("batch entry is missing 'wire'"))?;
+    // Interned keys: no string is created per lookup (this runs for every batch entry).
+    let get = |key: &Bound<'py, PyString>| dict.get_item(key);
+    let wire =
+        get(pyo3::intern!(py, "wire"))?.ok_or_else(|| ValidationError::new_err("batch entry is missing 'wire'"))?;
     let wire = wire.cast::<PyWireMessage>().map_err(|_| ValidationError::new_err("'wire' must be a WireMessage"))?;
-    let text = |key: &str| -> PyResult<Option<String>> {
+    let text = |key: &Bound<'py, PyString>| -> PyResult<Option<String>> {
         match get(key)? {
             Some(value) if !value.is_none() => value.extract().map(Some),
             _ => Ok(None),
         }
     };
-    let delay = match get("delay")? {
+    let delay = match get(pyo3::intern!(py, "delay"))? {
         Some(value) if !value.is_none() => Some(value.extract::<f64>()?),
         _ => None,
     };
     message_from_kwargs(
         wire,
-        text("message_id")?.ok_or_else(|| ValidationError::new_err("batch entry is missing 'message_id'"))?,
-        text("group_id")?,
-        text("deduplication_id")?,
+        text(pyo3::intern!(py, "message_id"))?
+            .ok_or_else(|| ValidationError::new_err("batch entry is missing 'message_id'"))?,
+        text(pyo3::intern!(py, "group_id"))?,
+        text(pyo3::intern!(py, "deduplication_id"))?,
         delay,
-        text("subject")?,
-        text("trace_header")?,
+        text(pyo3::intern!(py, "subject"))?,
+        text(pyo3::intern!(py, "trace_header"))?,
     )
 }
 

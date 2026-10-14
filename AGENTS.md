@@ -147,7 +147,8 @@ docstrings everywhere. README stays short and links to the docs.
 
 * Calling into Python from Rust threads (events are pulled; see ADR 0004).
 * Threads or Tokio runtimes outside `crates/fanferro-py/src/runtime.rs`, or awaitables not created
-  with `runtime::future_into_py`: they would outlive the `atexit` shutdown of the runtime.
+  with `runtime::future_into_py` (or `runtime::Completions` for settlements): they would outlive the
+  `atexit` shutdown of the runtime.
 * Holding a `parking_lot` lock across `.await`.
 * Long `wait_time` in tests; `time.sleep` in async code; global state in Python modules.
 * Logging message bodies (they may contain personal data) - log ids and types.

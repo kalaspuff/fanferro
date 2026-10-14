@@ -92,6 +92,22 @@ async def test_hooks_sync_async_and_failures() -> None:
     assert seen == ["sync:message.acked", "async:message.acked"]
 
 
+def test_enablement_follows_hooks_and_logger_levels() -> None:
+    dispatcher = EventDispatcher(LoggingConfig(logger="fanferro-test-enablement"))
+    logger = logging.getLogger("fanferro-test-enablement.message")
+    logger.setLevel(logging.INFO)
+    assert not dispatcher.is_enabled(EventKind.MESSAGE_ACKED), "debug-level kind, logger at INFO"
+    unsubscribe = dispatcher.subscribe("message.acked", lambda event: None)
+    assert dispatcher.is_enabled(EventKind.MESSAGE_ACKED), "a new hook is seen right away"
+    unsubscribe()
+    assert not dispatcher.is_enabled(EventKind.MESSAGE_ACKED)
+    logger.setLevel(logging.DEBUG)
+    assert dispatcher.is_enabled(EventKind.MESSAGE_ACKED), "logger levels are checked live"
+    dispatcher.config = LoggingConfig(logger="fanferro-test-enablement", disabled=["message.*"])
+    assert not dispatcher.is_enabled(EventKind.MESSAGE_ACKED), "a new configuration applies at once"
+    logger.setLevel(logging.NOTSET)
+
+
 def test_invalid_selector() -> None:
     with pytest.raises(ValueError, match="does not match"):
         EventDispatcher().subscribe("nothing.matches", print)
