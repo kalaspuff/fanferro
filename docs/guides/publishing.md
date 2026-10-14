@@ -23,9 +23,9 @@ Every option is a field of `fanferro.OutgoingMessage`; pass them as keywords or 
 | --- | --- |
 | `type` | Message type name (routing, filter policies) |
 | `attributes` | User message attributes: `str` → String, numbers → Number, `bytes` → Binary |
-| `headers` | Envelope headers (CloudEvents extensions; lowercase alphanumeric names) |
+| `headers` | Envelope headers (CloudEvents extensions, lowercase alphanumeric names; message attributes with the raw envelope) |
 | `id` | Message id; stable across retries; FIFO deduplication id by default |
-| `time`, `source`, `subject`, `data_schema` | CloudEvents attributes |
+| `time`, `source`, `subject`, `data_schema` | CloudEvents attributes (not carried by the raw envelope) |
 | `content_type` | Override the codec's content type (for `bytes`/`str` bodies) |
 | `group_id` | Message group id (required for FIFO destinations) |
 | `deduplication_id` | FIFO deduplication id (defaults to `id`) |

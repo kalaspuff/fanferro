@@ -22,8 +22,11 @@ compact reference for writing applications with it. Print it with `fanferro guid
 7. **Return to ack, raise to retry.** Raise `fanferro.Reject` for permanent errors (dead-letter now),
    `fanferro.Discard` for irrelevant messages, `fanferro.Retry(delay=...)` for "not yet".
 8. **Do not block the event loop** in handlers: use async clients or `await asyncio.to_thread(...)`.
-9. **Stay within 10 message attributes**; fanferro uses 2 by default (+1-2 for trace context).
-   Prefer envelope headers for metadata that needs no SNS filtering.
+9. **Stay within 10 message attributes**; fanferro uses 1-2 by default (`fanferro.id`, plus
+   `fanferro.type` for typed messages and `content-type` for non-JSON payloads; +1-2 for trace
+   context). Messages are raw by default (the body is the JSON document); use
+   `Client(envelope=fanferro.envelopes.CloudEvents())` when consumers need CloudEvents metadata
+   (`source`, `subject`, headers inside the body).
 10. **Test with `fanferro.testing.memory_client()`**, end to end with MiniStack.
 
 ## Minimal service
@@ -223,4 +226,6 @@ async def test_flow() -> None:
 * Using more than 10 attributes, empty attribute values, or names starting with `fanferro.`.
 * Combining matchers without parentheses: `(m.topic() == "a") | (m.topic() == "b")`.
 * Expecting exactly-once delivery: design for at-least-once.
-* Very long `wait_time` in tests: stopping waits for the last long poll; use `wait_time=1`.
+* Long `wait_time` in tests: stopping aborts the long poll in flight, but SQS keeps serving it for
+  up to `wait_time` and may hide a message sent meanwhile for a visibility timeout; use
+  `wait_time=1` (or `ShutdownPolicy(abort_receives=False)`) where a test reuses the queue.

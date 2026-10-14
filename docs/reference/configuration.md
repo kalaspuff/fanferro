@@ -13,7 +13,7 @@ each parameter and field listed here exists in the code and that every one in th
 | `credentials` | provider chain | `Credentials(access_key_id, secret_access_key, session_token)` |
 | `account_id` | STS lookup | Account id used to derive topic ARNs and assumed queue URLs |
 | `source` | `"fanferro"` | CloudEvents `source` of published messages (e.g. `urn:service:orders`) |
-| `envelope` | `CloudEvents()` | Envelope for publishing |
+| `envelope` | `Raw()` | Envelope for publishing (`CloudEvents()` for CloudEvents) |
 | `accept_envelopes` | CloudEvents, CloudEventsProtobuf, Raw | Envelopes consumers try, in order |
 | `codecs` | `CodecRegistry()` | Codec registry or list of codecs |
 | `naming` | class name | Fallback `(cls) -> str` for message type names |
@@ -25,7 +25,7 @@ each parameter and field listed here exists in the code and that every one in th
 | `aws_retry` | `AwsRetry()` | SDK retries per AWS call |
 | `timeouts` | `Timeouts()` | AWS call timeouts |
 | `publish_retry_attempts` | `4` | Attempts for failed batch entries and checksum mismatches |
-| `verify_md5` | `True` | Verify SQS MD5 digests (standard queues) |
+| `verify_md5` | `False` | Verify SQS MD5 digests of sent and received messages (standard queues) |
 | `publish_middleware` | `()` | Publish middleware |
 | `consume_middleware` | `()` | Consume middleware applied to every consumer |
 | `broker` | `None` | `MemoryBroker` to use instead of AWS |
@@ -116,7 +116,7 @@ constructors `exponential()`, `constant()`, `immediate()`.
 
 `ShutdownPolicy`: `drain_timeout` (30.0; `None` = wait forever), `cancel_timeout` (10.0),
 `progress_interval` (5.0), `release_unfinished` (`True`), `release_prefetched` (`True`),
-`abort_receives` (`False`).
+`abort_receives` (`True`).
 
 `Heartbeat`: `interval`, `extend_by`, `max_duration` (defaults derived from the visibility timeout;
 at most 12 hours).

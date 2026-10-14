@@ -851,6 +851,7 @@ dependencies = [
  "futures",
  "hex",
  "md-5",
+ "memchr",
  "parking_lot",
  "prost",
  "prost-types",

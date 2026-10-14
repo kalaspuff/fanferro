@@ -1,6 +1,6 @@
 # 0002: CloudEvents 1.0 (JSON) as the default envelope
 
-Status: Accepted
+Status: Superseded by [0008](0008-lean-defaults.md) (CloudEvents remains supported; the default is the raw envelope)
 
 ## Context
 

@@ -159,10 +159,13 @@ class DeadLetterPolicy:
 class ShutdownPolicy:
     """Graceful shutdown of a consumer.
 
-    1. Receiving stops. A long poll that is in flight is allowed to finish (at most the consumer's
-       ``wait_time``, overlapping with step 2) and whatever it returns is released immediately. With
-       ``abort_receives=True`` it is aborted instead: shutdown is faster, but SQS keeps serving the
-       abandoned poll and may hide a message in it until that message's visibility timeout expires.
+    1. Receiving stops at once: a long poll that is in flight is aborted (``abort_receives``). SQS
+       keeps serving the abandoned poll on its side until its wait time ends and may hand it a
+       message, which then stays invisible until its visibility timeout expires (redelivery is
+       delayed, nothing is lost); messages released during shutdown stay invisible until the
+       abandoned poll is over, so it cannot capture them. With ``abort_receives=False`` the poll is
+       allowed to finish instead (at most the consumer's ``wait_time``, overlapping with step 2) and
+       whatever it returns is released immediately.
        Prefetched messages that have not started are released (made visible) when
        ``release_prefetched`` is set, otherwise they are processed as part of the drain.
     2. In-flight handlers get ``drain_timeout`` seconds to finish (``None`` waits forever); a
@@ -176,7 +179,7 @@ class ShutdownPolicy:
     progress_interval: float = 5.0
     release_unfinished: bool = True
     release_prefetched: bool = True
-    abort_receives: bool = False
+    abort_receives: bool = True
 
     def __post_init__(self) -> None:
         if self.drain_timeout is not None and self.drain_timeout < 0:

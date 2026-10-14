@@ -59,8 +59,9 @@ What happened:
 
 * `client.topic/queue/subscription` declare resources; entering the client provisions them
   according to their [provisioning policy](provisioning.md) (here: create if missing, fix drift).
-* `publish` encoded the model as JSON, wrapped it in a CloudEvents envelope, added the
-  `fanferro.type` attribute (usable in SNS filter policies), and published to SNS.
+* `publish` encoded the model as JSON (the message body), added the `fanferro.id` and
+  `fanferro.type` attributes (the type is usable in SNS filter policies), and published to SNS.
+  `Client(envelope=fanferro.envelopes.CloudEvents())` wraps messages in CloudEvents instead.
 * The consumer long-polls SQS from Rust, keeps messages invisible with heartbeats while the handler
   runs, decodes the body into `OrderPlaced` and acks it when the handler returns.
 

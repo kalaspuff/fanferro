@@ -23,7 +23,9 @@ It is authoritative for the installed version (this skill only summarizes it). A
 5. Handlers are `async def`, idempotent (at-least-once delivery; key on `message.id`), and non-blocking.
 6. Return to ack; raise to retry; `fanferro.Reject` = dead-letter now; `fanferro.Discard` = drop.
 7. Business events from DB writes go through the transactional outbox (`topic.prepare()` + `fanferro.outbox.OutboxRelay`).
-8. ≤ 10 message attributes (fanferro uses 2, +1-2 for tracing); `fanferro.*` names are reserved.
+8. ≤ 10 message attributes (fanferro uses 1-2, +1-2 for tracing); `fanferro.*` names are reserved.
+   Messages are raw JSON bodies by default; opt into CloudEvents with
+   `Client(envelope=fanferro.envelopes.CloudEvents())`.
 9. Tests: `fanferro.testing.memory_client()` + `consumer.run_until_idle()`; handler unit tests with
    `fanferro.testing.build_message(obj)`; end-to-end against MiniStack (`endpoint_url=http://localhost:4566`).
 

@@ -92,7 +92,7 @@ async def main() -> list[str]:
 
     async with client:
         await legacy_queue.send({"sku-1": -2}, type="inventory.adjusted")
-        # A CSV payload inside the default CloudEvents envelope (envelope overridden per message).
+        # A CSV payload inside a CloudEvents envelope (envelope chosen per message).
         await legacy_queue.send(
             [Row("a", 1), Row("b", 2)], type="inventory.snapshot", envelope=fanferro.envelopes.CloudEvents()
         )

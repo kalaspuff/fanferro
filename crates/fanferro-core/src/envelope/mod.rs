@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 pub use cloudevents_json::{CLOUDEVENTS_JSON_CONTENT_TYPE, CloudEventsJson};
 pub use cloudevents_proto::{CLOUDEVENTS_PROTOBUF_CONTENT_TYPE, CloudEventsProtobuf};
-pub use raw::RawEnvelope;
+pub use raw::{IMPLICIT_CONTENT_TYPE, RawEnvelope};
 
 use crate::error::{Error, Result};
 use crate::types::{AttributeValue, MessageAttributes, Payload, WireMessage, reserved};

@@ -52,6 +52,7 @@ their queues. See [Provisioning → IAM permissions](provisioning.md#iam-permiss
 
 fanferro is designed for long-running consumers. In Lambda with an SQS event source mapping,
 use fanferro for publishing (create the client outside the handler and `asyncio.run(...)` the
-publish per invocation) and parse records with
-`fanferro.envelopes.CloudEvents().unwrap(fanferro.WireMessage(record["body"]))` if you need
-envelope metadata.
+publish per invocation) and read records directly: with the default raw envelope the record body
+is the message (e.g. the JSON document) and `fanferro.id` / `fanferro.type` are in its
+`messageAttributes`; with CloudEvents, parse the body with
+`fanferro.envelopes.CloudEvents().unwrap(fanferro.WireMessage(record["body"]))`.

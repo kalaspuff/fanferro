@@ -103,7 +103,7 @@ async def test_drain_timeout_cancels_and_releases(client_factory: ClientFactory,
 async def test_stop_returns_immediately_when_idle(client_factory: ClientFactory, name: Any) -> None:
     client = client_factory()
     queue = client.queue(name("idle-stop"))
-    consumer = client.consumer(queue, wait_time=20, shutdown=fanferro.ShutdownPolicy(abort_receives=True))
+    consumer = client.consumer(queue, wait_time=20)
 
     @consumer.default
     async def handle(message: fanferro.Message[Any]) -> None: ...
@@ -124,7 +124,7 @@ async def test_stop_waits_for_running_handlers(client_factory: ClientFactory, na
     queue = client.queue(name("busy-stop"))
     started = asyncio.Event()
     finished: list[int] = []
-    consumer = client.consumer(queue, wait_time=20, shutdown=fanferro.ShutdownPolicy(abort_receives=True))
+    consumer = client.consumer(queue, wait_time=20)
 
     @consumer.route(OrderCreated)
     async def handle(order: OrderCreated) -> None:
@@ -149,9 +149,7 @@ async def test_stop_mid_stream_loses_nothing(client_factory: ClientFactory, name
     client = client_factory()
     queue = client.queue(name("restart"), attributes=fanferro.QueueAttributes(visibility_timeout=2))
     seen: set[int] = set()
-    first = client.consumer(
-        queue, wait_time=2, concurrency=2, prefetch=4, shutdown=fanferro.ShutdownPolicy(abort_receives=True)
-    )
+    first = client.consumer(queue, wait_time=2, concurrency=2, prefetch=4)
 
     @first.route(OrderCreated)
     async def slow(order: OrderCreated) -> None:
@@ -175,11 +173,38 @@ async def test_stop_mid_stream_loses_nothing(client_factory: ClientFactory, name
     assert seen == set(range(30))
 
 
+async def test_stop_can_wait_for_the_last_long_poll(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory()
+    queue = client.queue(name("polite-stop"))
+    first = client.consumer(queue, wait_time=1, shutdown=fanferro.ShutdownPolicy(abort_receives=False))
+    done: list[int] = []
+
+    @first.route(OrderCreated)
+    async def handle(order: OrderCreated) -> None:
+        done.append(order.order_id)
+
+    async with client:
+        await first.start()
+        await wait_for(lambda: first.stats()["engine"].get("receive_requests", 0) >= 1)
+        await first.stop()  # waits up to wait_time for the long poll in flight
+        # No abandoned long poll can hide this message: the next consumer gets it right away.
+        await queue.send(OrderCreated(order_id=1))
+        second = client.consumer(queue, wait_time=1, name="second")
+
+        @second.route(OrderCreated)
+        async def again(order: OrderCreated) -> None:
+            done.append(order.order_id)
+
+        began = time.monotonic()
+        await consume_until(second, lambda: done == [1], timeout=20)
+    assert time.monotonic() - began < 5
+
+
 async def test_client_close_is_immediate_and_keeps_events(memory_client: fanferro.Client, name: Any) -> None:
     queue = memory_client.queue(name("close"))
     kinds: list[str] = []
     memory_client.on("consumer.*", lambda event: kinds.append(event.kind.value))
-    consumer = memory_client.consumer(queue, wait_time=20, shutdown=fanferro.ShutdownPolicy(abort_receives=True))
+    consumer = memory_client.consumer(queue, wait_time=20)
 
     @consumer.default
     async def handle(message: fanferro.Message[Any]) -> None: ...
@@ -371,7 +396,8 @@ async def test_run_until_request_stop_and_client_run(client_factory: ClientFacto
     client = client_factory()
     queue = client.queue(name("run"))
     done: list[int] = []
-    consumer = client.consumer(queue, wait_time=1)
+    # The queue is used again right after this consumer stops: let its last long poll finish.
+    consumer = client.consumer(queue, wait_time=1, shutdown=fanferro.ShutdownPolicy(abort_receives=False))
 
     @consumer.route(OrderCreated)
     async def handle(order: OrderCreated) -> None:

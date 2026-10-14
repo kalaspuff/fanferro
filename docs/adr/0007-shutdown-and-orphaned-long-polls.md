@@ -1,6 +1,6 @@
 # 0007: Shutdown waits for the last long poll by default
 
-Status: Accepted
+Status: Superseded by [0008](0008-lean-defaults.md) (`abort_receives=True` is the default; the protection of released messages below still applies)
 
 ## Context
 

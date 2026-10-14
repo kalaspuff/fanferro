@@ -193,7 +193,10 @@ async def test_attempts_beyond_limit_skip_the_handler(client_factory: ClientFact
     queue = queue_with_dlq(client, name("limit"))
     calls: list[int] = []
     slow_retry = fanferro.RetryPolicy(max_attempts=None, backoff=fanferro.Backoff.constant(1))
-    first = client.consumer(queue, wait_time=1, retry=slow_retry)
+    # The next consumer reuses the queue right away: an aborted long poll could hide the retried
+    # message for a visibility timeout, so this one lets its last poll finish.
+    polite = fanferro.ShutdownPolicy(abort_receives=False)
+    first = client.consumer(queue, wait_time=1, retry=slow_retry, shutdown=polite)
 
     @first.route(OrderCreated)
     async def fail(message: fanferro.Message[OrderCreated]) -> None:

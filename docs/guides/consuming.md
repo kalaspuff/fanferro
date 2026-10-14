@@ -157,15 +157,18 @@ await client.run()                    # all consumers of the client, with signal
 
 Shutdown follows `ShutdownPolicy`:
 
-1. receiving stops; the last long poll may finish (≤ `wait_time`) and its messages are released
-   (`abort_receives=True` aborts it instead - faster, see ADR 0007);
+1. receiving stops at once: the long poll in flight is aborted, and messages released during
+   shutdown stay invisible until SQS ended the abandoned poll, so it cannot capture them (SQS may
+   still hand that poll up to `batch_size` new messages; they are redelivered after their
+   visibility timeout). With `abort_receives=False` the poll may finish instead (≤ `wait_time`) and
+   its messages are released right away - slower to stop, nothing delayed (ADR 0007, ADR 0008);
 2. prefetched messages are released (`release_prefetched`), in-flight handlers get `drain_timeout`
    seconds (`None` = forever) with `consumer.draining` progress events every `progress_interval`;
 3. remaining handlers are cancelled and get `cancel_timeout` seconds to unwind;
 4. unfinished messages are released (`release_unfinished`) or left to time out;
 5. pending acks are flushed.
 
-A second SIGINT/SIGTERM skips the drain and aborts the poll.
+A second SIGINT/SIGTERM skips the drain.
 
 ## Consume middleware
 
