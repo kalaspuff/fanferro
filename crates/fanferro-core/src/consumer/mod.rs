@@ -424,6 +424,10 @@ impl ConsumerEngine {
 
     /// Waits up to `timeout` for deliveries and returns at most `max` of them. Returns an
     /// empty list on timeout or once receiving has stopped and the buffer is empty.
+    ///
+    /// Buffered deliveries are always returned first, also after receiving stopped; messages
+    /// that are still being decoded when receiving stops are left for [`Self::drain_buffered`]
+    /// (after [`Self::stop_receiving`] returned).
     pub async fn next_batch(&self, max: usize, timeout: Duration) -> Vec<Delivery> {
         let mut receiver = self.inner.deliveries_rx.lock().await;
         let mut deliveries = Vec::new();
@@ -431,9 +435,11 @@ impl ConsumerEngine {
             return deliveries;
         }
         tokio::select! {
+            biased;
             _ = receiver.recv_many(&mut deliveries, max) => {}
-            () = tokio::time::sleep(timeout) => {}
+            () = self.inner.receive_token.cancelled() => {}
             () = self.inner.shutdown_token.cancelled() => {}
+            () = tokio::time::sleep(timeout) => {}
         }
         self.inner.metrics.buffered.add(-i64::try_from(deliveries.len()).unwrap_or(0));
         deliveries

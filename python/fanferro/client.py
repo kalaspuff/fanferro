@@ -287,31 +287,42 @@ class Client:
 
     def _release_pump(self) -> None:
         self._pump_users = max(0, self._pump_users - 1)
-        if self._pump_users == 0 and self._pump_task is not None:
-            self._pump_task.cancel()
+        if self._pump_users == 0 and self._core_client is not None:
+            # The pump dispatches what its pending wait already took, then exits on its own
+            # (cancelling it could drop events that wait had taken from the buffer).
+            self._core_client.wake_events()
 
     async def _stop_pump(self) -> None:
         task = self._pump_task
         self._pump_task = None
-        if task is not None:
+        self._pump_users = 0
+        if task is None:
+            return
+        if self._core_client is not None:
+            self._core_client.wake_events()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
+        except TimeoutError:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, RuntimeError):
                 await task
+        except RuntimeError:
+            pass
 
     async def _pump(self) -> None:
         core = await self._core()
+        current = asyncio.current_task()
         refreshed = monotonic()
         try:
-            while True:
+            while self._pump_users > 0 and self._pump_task is current:
                 events = await core.next_events(256, 1.0)
                 self._dispatch_core(events)
                 self._report_dropped(core)
                 if monotonic() - refreshed > 10:
                     refreshed = monotonic()
                     self._update_event_filter()
-        except asyncio.CancelledError:
+        finally:
             self._dispatch_core(core.drain_events())
-            raise
 
     # -- resources -------------------------------------------------------------------------
 

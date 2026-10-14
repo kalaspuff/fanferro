@@ -239,6 +239,57 @@ async fn dropped_leases_release_messages() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn next_batch_returns_as_soon_as_receiving_stops() {
+    let fx = fixture(ClientConfig::default()).await;
+    for abort in [true, false] {
+        let engine = fx.engine(|c| c.wait_time = 20.0);
+        let waiting = tokio::spawn({
+            let engine = engine.clone();
+            async move {
+                let started = tokio::time::Instant::now();
+                let batch = engine.next_batch(10, Duration::from_secs(60)).await;
+                (batch.len(), started.elapsed())
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Without `abort` the long poll in flight keeps `stop_receiving` busy for up to 20 s;
+        // the dispatcher must not wait for it.
+        let stopping = tokio::spawn({
+            let engine = engine.clone();
+            async move { engine.stop_receiving(abort).await }
+        });
+        let (count, elapsed) = waiting.await.unwrap();
+        assert_eq!(count, 0);
+        assert!(elapsed < Duration::from_millis(200), "abort={abort}: next_batch took {elapsed:?}");
+        stopping.await.unwrap();
+        engine.close(true).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn buffered_deliveries_are_returned_after_receiving_stops() {
+    let fx = fixture(ClientConfig::default()).await;
+    for i in 0..3 {
+        fx.send(&format!("m{i}")).await;
+    }
+    let engine = fx.engine(|_| {});
+    while engine.stats().metrics["buffered"] < 3 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    engine.stop_receiving(true).await;
+    let started = tokio::time::Instant::now();
+    let deliveries = engine.next_batch(10, Duration::from_secs(5)).await;
+    assert_eq!(deliveries.len(), 3);
+    assert!(engine.next_batch(10, Duration::from_secs(5)).await.is_empty());
+    assert!(started.elapsed() < Duration::from_millis(100));
+    for delivery in deliveries {
+        delivery.lease.ack().await.unwrap();
+    }
+    engine.close(true).await;
+    assert!(fx.stored().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
 async fn close_releases_unsettled_messages() {
     let fx = fixture(ClientConfig::default()).await;
     for i in 0..4 {

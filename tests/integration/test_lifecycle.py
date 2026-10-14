@@ -100,6 +100,101 @@ async def test_drain_timeout_cancels_and_releases(client_factory: ClientFactory,
     assert second == [2]
 
 
+async def test_stop_returns_immediately_when_idle(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory()
+    queue = client.queue(name("idle-stop"))
+    consumer = client.consumer(queue, wait_time=20, shutdown=fanferro.ShutdownPolicy(abort_receives=True))
+
+    @consumer.default
+    async def handle(message: fanferro.Message[Any]) -> None: ...
+
+    async with client:
+        await consumer.start()
+        await wait_for(lambda: consumer.stats()["engine"].get("receive_requests", 0) >= 1)
+        await asyncio.sleep(0.2)  # a long poll is in flight
+        began = time.monotonic()
+        await consumer.stop()
+        elapsed = time.monotonic() - began
+    assert consumer.state == "stopped"
+    assert elapsed < 0.25, f"stop() took {elapsed:.3f} s"
+
+
+async def test_stop_waits_for_running_handlers(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory()
+    queue = client.queue(name("busy-stop"))
+    started = asyncio.Event()
+    finished: list[int] = []
+    consumer = client.consumer(queue, wait_time=20, shutdown=fanferro.ShutdownPolicy(abort_receives=True))
+
+    @consumer.route(OrderCreated)
+    async def handle(order: OrderCreated) -> None:
+        started.set()
+        await asyncio.sleep(1)
+        finished.append(order.order_id)
+
+    async with client:
+        await queue.send(OrderCreated(order_id=1))
+        await consumer.start()
+        await asyncio.wait_for(started.wait(), 15)
+        began = time.monotonic()
+        await consumer.stop()
+        elapsed = time.monotonic() - began
+        assert finished == [1]
+        assert 0.5 < elapsed < 2.5, f"stop() took {elapsed:.3f} s"
+        assert consumer.stats()["engine"]["messages_acked"] == 1
+        assert (await queue.approximate_count()) == {"visible": 0, "in_flight": 0, "delayed": 0}
+
+
+async def test_stop_mid_stream_loses_nothing(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory()
+    queue = client.queue(name("restart"), attributes=fanferro.QueueAttributes(visibility_timeout=2))
+    seen: set[int] = set()
+    first = client.consumer(
+        queue, wait_time=2, concurrency=2, prefetch=4, shutdown=fanferro.ShutdownPolicy(abort_receives=True)
+    )
+
+    @first.route(OrderCreated)
+    async def slow(order: OrderCreated) -> None:
+        await asyncio.sleep(0.05)
+        seen.add(order.order_id)
+
+    async with client:
+        await queue.send_batch([OrderCreated(order_id=i) for i in range(30)])
+        await first.start()
+        await wait_for(lambda: len(seen) >= 5)
+        await first.stop()
+        assert len(seen) < 30
+        second = client.consumer(queue, wait_time=1, name="second")
+
+        @second.route(OrderCreated)
+        async def rest(order: OrderCreated) -> None:
+            seen.add(order.order_id)
+
+        # Messages handed to the aborted long poll reappear after their visibility timeout.
+        await consume_until(second, lambda: len(seen) == 30, timeout=60)
+    assert seen == set(range(30))
+
+
+async def test_client_close_is_immediate_and_keeps_events(memory_client: fanferro.Client, name: Any) -> None:
+    queue = memory_client.queue(name("close"))
+    kinds: list[str] = []
+    memory_client.on("consumer.*", lambda event: kinds.append(event.kind.value))
+    consumer = memory_client.consumer(queue, wait_time=20, shutdown=fanferro.ShutdownPolicy(abort_receives=True))
+
+    @consumer.default
+    async def handle(message: fanferro.Message[Any]) -> None: ...
+
+    await memory_client.__aenter__()
+    await consumer.start()
+    await asyncio.sleep(0.1)
+    began = time.monotonic()
+    await memory_client.close()  # stops the consumer and the event pump
+    elapsed = time.monotonic() - began
+    assert consumer.state == "stopped"
+    assert elapsed < 0.25, f"close() took {elapsed:.3f} s"
+    assert "consumer.stopped" in kinds, "the engine's last event is dispatched before close() returns"
+
+
 async def test_concurrency_limit(client_factory: ClientFactory, name: Any) -> None:
     client = client_factory()
     queue = client.queue(name("concurrency"))

@@ -546,6 +546,11 @@ impl PyCoreClient {
         Ok(list)
     }
 
+    /// Makes a pending `next_events` call (or the next one) return right away.
+    fn wake_events(&self) {
+        self.client.events().wake();
+    }
+
     /// Number of events dropped because the buffer was full since the last call.
     fn take_dropped_events(&self) -> u64 {
         self.client.events().take_dropped()

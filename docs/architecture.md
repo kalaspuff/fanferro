@@ -112,7 +112,9 @@ These are relied upon across layers; tests cover each of them.
 * Per Python consumer: one dispatcher task, one task per message (or per FIFO group), a
   semaphore of `concurrency` permits.
 * Events flow Rust → Python through a bounded channel drained by an event pump task (started
-  while a consumer runs or the client is entered) or synchronously after operations.
+  while a consumer runs or the client is entered) or synchronously after operations. The pump
+  is stopped by waking its pending wait, not by cancelling it, so events that wait already took
+  are still dispatched.
 
 ## Extension points
 
