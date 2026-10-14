@@ -260,6 +260,26 @@ async def test_handlers_do_not_wait_for_automatic_acks(client_factory: ClientFac
     assert consumer.stats()["engine"]["delete_requests"] == 1
 
 
+async def test_stop_completes_automatic_acks(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory()
+    queue = client.queue(name("pending-acks"))
+    done: list[int] = []
+    consumer = client.consumer(queue, wait_time=1, settle_linger=1.0)
+
+    @consumer.route(OrderCreated)
+    async def handle(order: OrderCreated) -> None:
+        done.append(order.order_id)
+
+    async with client:
+        await queue.send_batch([OrderCreated(order_id=i) for i in range(3)])
+        await consumer.start()
+        await wait_for(lambda: len(done) == 3)
+        assert consumer.stats()["engine"]["messages_acked"] == 0, "the deletes linger"
+        await consumer.stop()  # waits for the deletes handlers no longer wait for
+        assert consumer.stats()["engine"]["messages_acked"] == 3
+        assert (await queue.approximate_count()) == {"visible": 0, "in_flight": 0, "delayed": 0}
+
+
 async def test_explicit_acks_are_not_delayed_by_the_linger(client_factory: ClientFactory, name: Any) -> None:
     client = client_factory()
     queue = client.queue(name("explicit-acks"))

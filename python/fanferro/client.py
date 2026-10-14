@@ -734,13 +734,14 @@ class Client:
                 raise
         self._telemetry.record_publish(prepared.destination_name, kind, monotonic() - started, 1, None)
         result = PublishResult.from_core(receipt, prepared.destination_name)
-        self.events.emit(
-            EventKind.PUBLISH_SUCCEEDED,
-            f"published prepared message to {prepared.destination_name}",
-            destination=prepared.destination_name,
-            message_id=result.message_id,
-            transport_message_id=result.transport_message_id,
-        )
+        if self.events.is_enabled(EventKind.PUBLISH_SUCCEEDED):
+            self.events.emit(
+                EventKind.PUBLISH_SUCCEEDED,
+                f"published prepared message to {prepared.destination_name}",
+                destination=prepared.destination_name,
+                message_id=result.message_id,
+                transport_message_id=result.transport_message_id,
+            )
         self._drain_core_events()
         return result
 

@@ -19,11 +19,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import functools
 import signal
 import time
 from collections import deque
-from typing import TYPE_CHECKING, Any, Literal, Self, cast
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 from fanferro._core import Delivery, FanferroError, LeaseError, ShutdownError
 from fanferro.actions import Discard, HandlerAction, Reject, Requeue, Retry
@@ -37,7 +36,7 @@ from fanferro.policies import DeadLetterPolicy, FailureAction, Heartbeat, RateLi
 from fanferro.telemetry import monotonic
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     from fanferro.client import Client
     from fanferro.resources import Queue
@@ -105,8 +104,9 @@ class _Slot:
     def block(self) -> bool:
         """Notes that the handler waits for a settlement it requested (an explicit ``ack()``...).
 
-        Returns whether the settlement should be sent right away instead of waiting to fill a
-        batch: when every handler that could request another settlement is waiting too.
+        Returns whether every handler that could request another settlement is waiting now: then
+        no other settlement can join the batch, unless some of these handlers wait for a
+        settlement that was sent already (the engine checks that, see ``Delivery.mark_awaited``).
         """
         consumer = self._consumer
         self._waits += 1
@@ -116,30 +116,11 @@ class _Slot:
             consumer._waiting == 0 or consumer._active >= consumer.concurrency
         )
 
-    def unblock(self) -> None:
-        """Ends a wait started with :meth:`block`."""
+    def unblock(self, _settlement: object = None) -> None:
+        """Ends a wait started with :meth:`block` (usable as a done callback)."""
         self._waits -= 1
         if self._waits == 0:
             self._consumer._blocked -= 1
-
-
-def _awaited_by_handler[F: Callable[..., Coroutine[Any, Any, None]]](method: F) -> F:
-    """Marks a settlement as awaited by its (still running) handler, see :meth:`_Slot.block`."""
-
-    @functools.wraps(method)
-    async def settle(self: _Settler, message: Message[Any], *args: Any, **kwargs: Any) -> None:
-        slot: _Slot | None = message._slot
-        if slot is None or not slot.held:
-            await method(self, message, *args, **kwargs)
-            return
-        if slot.block() and message.delivery is not None:
-            message.delivery.expedite()
-        try:
-            await method(self, message, *args, **kwargs)
-        finally:
-            slot.unblock()
-
-    return cast("F", settle)
 
 
 class _Settler:
@@ -153,12 +134,29 @@ class _Settler:
             raise ConsumerStateError("message has no delivery")
         return message.delivery
 
-    @_awaited_by_handler
+    async def _call(self, message: Message[Any], operation: Callable[[Delivery], Awaitable[None]]) -> None:
+        """Runs one settlement call on the message's delivery.
+
+        A handler that still holds its slot (an explicit ``await message.ack()``...) counts as
+        waiting for the call until the call completes (see :meth:`_Slot.block`). When every
+        handler that could request another settlement is waiting, the engine sends the batch as
+        soon as it holds all their settlements instead of waiting to fill it.
+        """
+        delivery = self._delivery(message)
+        slot: _Slot | None = message._slot
+        if slot is None or not slot.held:
+            await operation(delivery)
+            return
+        delivery.mark_awaited(self._consumer._blocked if slot.block() else None)
+        future = asyncio.ensure_future(operation(delivery))
+        # Not waiting any more once the call completed, even before the handler resumes.
+        future.add_done_callback(slot.unblock)
+        await future
+
     async def ack(self, message: Message[Any]) -> None:
-        await self._delivery(message).ack()
+        await self._call(message, lambda delivery: delivery.ack())
         await self._consumer._after_ack(message)
 
-    @_awaited_by_handler
     async def retry(self, message: Message[Any], delay: float | None, error: BaseException | None) -> None:
         consumer = self._consumer
         policy = consumer.retry_policy
@@ -174,10 +172,12 @@ class _Settler:
         if delay is None:
             delay = policy.backoff.delay(message.attempt)
         if policy.strategy == "requeue":
-            await self._delivery(message).requeue(message.attempt, min(delay, _MAX_REQUEUE_DELAY))
+            await self._call(
+                message, lambda delivery: delivery.requeue(message.attempt, min(delay, _MAX_REQUEUE_DELAY))
+            )
             message.outcome = "requeued"
         else:
-            await self._delivery(message).nack(min(delay, _MAX_VISIBILITY_DELAY))
+            await self._call(message, lambda delivery: delivery.nack(min(delay, _MAX_VISIBILITY_DELAY)))
 
     async def perform(
         self, message: Message[Any], action: FailureAction, reason: str, error: BaseException | None
@@ -192,18 +192,18 @@ class _Settler:
             await self.discard(message, reason)
         elif action == "retry":
             message.outcome = "retried"
-            await self._delivery(message).nack(min(backoff.delay(message.attempt), _MAX_VISIBILITY_DELAY))
+            await self._call(
+                message, lambda delivery: delivery.nack(min(backoff.delay(message.attempt), _MAX_VISIBILITY_DELAY))
+            )
         else:
             message.outcome = "retried"
-            await self._delivery(message).nack(min(backoff.maximum, _MAX_VISIBILITY_DELAY))
+            await self._call(message, lambda delivery: delivery.nack(min(backoff.maximum, _MAX_VISIBILITY_DELAY)))
 
-    @_awaited_by_handler
     async def requeue(self, message: Message[Any], delay: float | None, error: BaseException | None) -> None:
         if delay is None:
             delay = self._consumer.retry_policy.backoff.delay(message.attempt)
-        await self._delivery(message).requeue(message.attempt, min(delay, _MAX_REQUEUE_DELAY))
+        await self._call(message, lambda delivery: delivery.requeue(message.attempt, min(delay, _MAX_REQUEUE_DELAY)))
 
-    @_awaited_by_handler
     async def dead_letter(self, message: Message[Any], reason: str, error: BaseException | None) -> None:
         consumer = self._consumer
         if not consumer._dead_letter_url:
@@ -216,15 +216,17 @@ class _Settler:
             )
             if fallback == "discard":
                 message.outcome = "discarded"
-                await self._delivery(message).ack()
+                await self._call(message, lambda delivery: delivery.ack())
             elif fallback == "retry":
                 message.outcome = "retried"
-                await self._delivery(message).nack(
-                    min(consumer.retry_policy.backoff.delay(message.attempt), _MAX_VISIBILITY_DELAY)
-                )
+                delay = min(consumer.retry_policy.backoff.delay(message.attempt), _MAX_VISIBILITY_DELAY)
+                await self._call(message, lambda delivery: delivery.nack(delay))
             else:
                 message.outcome = "retried"
-                await self._delivery(message).nack(min(consumer.retry_policy.backoff.maximum, _MAX_VISIBILITY_DELAY))
+                await self._call(
+                    message,
+                    lambda delivery: delivery.nack(min(consumer.retry_policy.backoff.maximum, _MAX_VISIBILITY_DELAY)),
+                )
             return
         details: dict[str, str] = {"queue": consumer.queue.name, "attempt": str(message.attempt)}
         if message.type:
@@ -235,20 +237,17 @@ class _Settler:
             info = error_details(error)
             details["error_type"] = info["error_type"]
             details["error_message"] = info["error_message"]
-        await self._delivery(message).dead_letter(reason, details)
+        await self._call(message, lambda delivery: delivery.dead_letter(reason, details))
 
-    @_awaited_by_handler
     async def release(self, message: Message[Any]) -> None:
-        await self._delivery(message).release()
+        await self._call(message, lambda delivery: delivery.release())
 
-    @_awaited_by_handler
     async def discard(self, message: Message[Any], reason: str) -> None:
-        await self._delivery(message).ack()
+        await self._call(message, lambda delivery: delivery.ack())
         self._consumer._emit(EventKind.MESSAGE_DROPPED, f"message dropped: {reason}", message=message, reason=reason)
 
-    @_awaited_by_handler
     async def extend(self, message: Message[Any], timeout: float) -> None:
-        await self._delivery(message).extend(timeout)
+        await self._call(message, lambda delivery: delivery.extend(timeout))
 
 
 class _GroupSequencer:
@@ -385,6 +384,8 @@ class Consumer:
         self._force_stop = False
         self._dead_letter_url: str | None = None
         self._fifo = queue.fifo
+        self._sequenced = False  # FIFO per-group sequencing (resolved on start)
+        self._unwrap_with: tuple[Envelope, ...] = ()  # envelopes tried (resolved on start)
         self._sequencer = _GroupSequencer(self)
         self._settler = _Settler(self)
         self._stats = _Stats()
@@ -508,6 +509,8 @@ class Consumer:
             "verify_md5": client.verify_md5,
         }
         self._check_configuration(info)
+        self._sequenced = self.ordering == "fifo" or (self.ordering == "auto" and self._fifo)
+        self._unwrap_with = self.envelopes
         core = await client._core()
         self._engine = core.consumer(config)
         self._semaphore = asyncio.Semaphore(self.concurrency)
@@ -734,9 +737,7 @@ class Consumer:
                 self._schedule(delivery)
 
     def _schedule(self, delivery: Delivery) -> None:
-        fifo = self.ordering == "fifo" or (self.ordering == "auto" and self._fifo)
-        group = delivery.group_id
-        if fifo and group is not None:
+        if self._sequenced and (group := delivery.group_id) is not None:
             self._sequencer.submit(group, delivery)
         else:
             self._waiting += 1
@@ -812,7 +813,7 @@ class Consumer:
             raise error
         wire = delivery.wire
         assert wire is not None
-        payload, envelope = unwrap_first(self.envelopes, wire)
+        payload, envelope = unwrap_first(self._unwrap_with or self.envelopes, wire)
         return Message(
             payload=payload,
             attributes=wire.attributes,
@@ -914,19 +915,27 @@ class Consumer:
             slot.release()
         if not message.settled and self.auto_ack:
             try:
-                await message.ack()
+                if self.delete_offloaded_payloads or message.delivery is None:
+                    await message.ack()
+                else:
+                    # The engine deletes the message in the background (batched, tracked until the
+                    # consumer closes, failures reported as `message.ack_failed` events): no
+                    # awaitable per message.
+                    message._begin("acked")
+                    message.delivery.ack_in_background()
             except (LeaseError, FanferroError) as error:
                 self._emit(EventKind.MESSAGE_ACK_FAILED, "failed to ack message", message=message, exception=error)
                 return
         self._stats.processed += 1
-        self._emit(
-            EventKind.MESSAGE_PROCESSED,
-            f"message processed by {route.name}",
-            message=message,
-            route=route.name,
-            duration=round(monotonic() - handler_started, 6),
-            outcome=message.outcome,
-        )
+        if self._client.events.is_enabled(EventKind.MESSAGE_PROCESSED):
+            self._emit(
+                EventKind.MESSAGE_PROCESSED,
+                f"message processed by {route.name}",
+                message=message,
+                route=route.name,
+                duration=round(monotonic() - handler_started, 6),
+                outcome=message.outcome,
+            )
 
     async def _failed(self, message: Message[Any], error: BaseException) -> None:
         if message.settled and not isinstance(error, HandlerAction):

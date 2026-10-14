@@ -343,28 +343,86 @@ async fn deletes_and_visibility_changes_use_separate_calls() {
     engine.close(false).await;
 }
 
+/// Acks `deliveries` the way waiting handlers do: each marked as awaited, the last one with the
+/// number of handlers that wait. Returns how long the acks took.
+async fn awaited_acks(deliveries: &[Delivery], waiting_handlers: usize) -> Duration {
+    let started = tokio::time::Instant::now();
+    let acks = deliveries.iter().enumerate().map(|(index, delivery)| {
+        let last = index + 1 == deliveries.len();
+        delivery.lease.mark_awaited(last.then_some(waiting_handlers));
+        delivery.lease.ack()
+    });
+    for result in futures::future::join_all(acks).await {
+        result.unwrap();
+    }
+    started.elapsed()
+}
+
 #[tokio::test(start_paused = true)]
-async fn expedited_settlements_are_sent_at_once() {
+async fn a_batch_every_handler_waits_for_is_sent_at_once() {
+    let fx = fixture(ClientConfig::default()).await;
+    for i in 0..6 {
+        fx.send(&format!("m{i}")).await;
+    }
+    let engine = fx.engine(|c| c.settle.linger = 1.0);
+    let deliveries = collect(&engine, 6).await;
+    // Three handlers, all waiting for one of these acks: nothing else can join the batch.
+    let elapsed = awaited_acks(&deliveries[..3], 3).await;
+    assert!(elapsed < Duration::from_millis(100), "{elapsed:?}");
+    assert_eq!(engine.stats().metrics["delete_requests"], 1);
+    // Four handlers wait, but one of them waits for a settlement that is not in this batch
+    // (sent already): its slot will soon go to a handler that settles more, so the batch waits.
+    let elapsed = awaited_acks(&deliveries[3..], 4).await;
+    assert!(elapsed >= Duration::from_secs(1), "the batch lingers: {elapsed:?}");
+    assert_eq!(engine.stats().metrics["delete_requests"], 2);
+    engine.close(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn background_acks_are_tracked_until_close() {
     let fx = fixture(ClientConfig::default()).await;
     for i in 0..3 {
         fx.send(&format!("m{i}")).await;
     }
     let engine = fx.engine(|c| c.settle.linger = 1.0);
-    let deliveries = collect(&engine, 3).await;
-    let started = tokio::time::Instant::now();
-    let (first, rest) = deliveries.split_first().unwrap();
-    let lingering = futures::future::join_all(rest.iter().map(|delivery| delivery.lease.ack()));
-    let expedited = async {
-        // Joins the two lingering acks' batch and sends it right away.
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        first.lease.expedite();
-        first.lease.ack().await
-    };
-    let (results, result) = tokio::join!(lingering, expedited);
-    assert!(results.into_iter().chain([result]).all(|r| r.is_ok()));
-    assert!(started.elapsed() < Duration::from_millis(100), "{:?}", started.elapsed());
-    assert_eq!(engine.stats().metrics["delete_requests"], 1);
+    let deliveries: Vec<Arc<Delivery>> = collect(&engine, 3).await.into_iter().map(Arc::new).collect();
+    for delivery in &deliveries {
+        delivery.ack_in_background().unwrap();
+    }
+    assert!(deliveries[0].ack_in_background().is_err(), "a second settlement is refused");
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(engine.stats().metrics["settling"], 3, "the deletes linger in the settle loop");
+    // Closing waits for the background deletes instead of dropping them.
     engine.close(true).await;
+    assert_eq!(engine.stats().metrics["messages_acked"], 3);
+    assert!(fx.stored().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn background_acks_wait_for_a_settling_slot() {
+    let fx = fixture(ClientConfig::default()).await;
+    for i in 0..3 {
+        fx.send(&format!("m{i}")).await;
+    }
+    let engine = fx.engine(|c| {
+        c.max_settling = Some(1);
+        c.settle.linger = 0.5;
+    });
+    let deliveries: Vec<Arc<Delivery>> = collect(&engine, 3).await.into_iter().map(Arc::new).collect();
+    let outcomes = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    for delivery in &deliveries {
+        let outcomes = outcomes.clone();
+        delivery.spawn_ack(move |result| outcomes.lock().push(result.is_ok()));
+    }
+    // One settling slot: the first delete is queued, the others wait (in tracked tasks).
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(engine.stats().metrics["settling"], 1);
+    assert!(outcomes.lock().is_empty());
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(*outcomes.lock(), vec![true, true, true]);
+    assert_eq!(engine.stats().metrics["delete_requests"], 3);
+    engine.close(true).await;
+    assert!(fx.stored().is_empty());
 }
 
 #[tokio::test(start_paused = true)]

@@ -186,6 +186,36 @@ def test_custom_codec_takes_precedence() -> None:
         registry.by_name("nope")
 
 
+def test_encoders_are_cached_per_type_only_for_builtin_codecs() -> None:
+    registry = CodecRegistry()
+    assert registry.encoder_for({"a": 1}) is registry.encoder_for({"b": 2})
+
+    class CsvRows:
+        """Encodes only dicts that contain rows (a decision based on the value)."""
+
+        name = "csv"
+
+        def can_encode(self, value: object) -> bool:
+            return isinstance(value, dict) and "rows" in value
+
+        def encode(self, value: Any) -> EncodedBody:
+            return EncodedBody(b"\n".join(row.encode() for row in value["rows"]), "text/csv")
+
+        def can_decode(self, target: Any, content_type: str | None) -> bool:
+            return False
+
+        def decode(self, data: bytes, target: Any, content_type: str | None) -> Any:
+            raise NotImplementedError
+
+        def type_name(self, target: Any) -> str | None:
+            return None
+
+    registry.register(CsvRows())
+    assert registry.encode({"rows": ["a", "b"]}) == EncodedBody(b"a\nb", "text/csv")
+    assert registry.encode({"plain": 1}).content_type == "application/json"
+    assert registry.encode({"rows": ["c"]}).content_type == "text/csv"
+
+
 def test_registry_order_and_helpers() -> None:
     names = [codec.name for codec in CodecRegistry().codecs]
     assert names == ["protobuf", "pydantic", "msgspec", "dataclass", "bytes", "text", "json"]

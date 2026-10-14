@@ -27,6 +27,10 @@ A handler is an `async def` whose first parameter's annotation decides what it r
 `sent_at`, `topic_arn`, `trace_header`, `pointer`) and settlement methods.
 
 Return normally to **ack** (delete) the message. Raise to apply the [retry policy](failure-handling.md).
+Automatic acks are not awaited: the delete is batched with others and completes in the background
+(`consumer.stop()` waits for it; a failed delete is reported as a `message.ack_failed` event and
+the message is redelivered). `consumer.stats()["processed"]` counts messages whose handler
+succeeded, `stats()["engine"]["messages_acked"]` the confirmed deletes.
 
 ## Routing
 
@@ -106,9 +110,9 @@ slot to the next message right away; the automatic ack completes in the backgrou
 
 Acks and retries are sent in batch calls (`DeleteMessageBatch`, `ChangeMessageVisibilityBatch`)
 of up to ten messages: a batch goes out as soon as it is full, or `settle_linger` after its first
-settlement. When every running handler awaits an explicit settlement (`await message.ack()`),
-nothing else can fill the batch, so it is sent right away. `consumer.stats()["engine"]` counts the
-calls (`delete_requests`, `visibility_requests`).
+settlement. When every running handler awaits an explicit settlement (`await message.ack()`) and
+the batch holds all of them, nothing else can join it, so it is sent right away.
+`consumer.stats()["engine"]` counts the calls (`delete_requests`, `visibility_requests`).
 
 Receives are full by default: a poller waits until `min_receive_batch` handler slots are free
 (after the first one, for at most `receive_batch_wait`), so a busy consumer asks SQS for ten
@@ -166,7 +170,8 @@ Shutdown follows `ShutdownPolicy`:
    seconds (`None` = forever) with `consumer.draining` progress events every `progress_interval`;
 3. remaining handlers are cancelled and get `cancel_timeout` seconds to unwind;
 4. unfinished messages are released (`release_unfinished`) or left to time out;
-5. pending acks are flushed.
+5. pending acks are flushed: automatic acks run in the background and complete, and so does a
+   settlement that started (`await message.ack()`...) even if its handler was cancelled.
 
 A second SIGINT/SIGTERM skips the drain.
 

@@ -116,7 +116,9 @@ def test_message_types_registry() -> None:
     assert types.name_of(Created) == "orders.created.v1"
     assert types.names_of(Created) == ("orders.created.v1", "orders.created")
     assert types.name_of(Cancelled(1)) == "Cancelled"
+    assert types.names_of(Cancelled) == ("Cancelled",)
     types.register(Cancelled, "orders.cancelled", "orders.cancel")
     assert types.name_of(Cancelled) == "orders.cancelled"
+    assert types.names_of(Cancelled) == ("orders.cancelled", "orders.cancel"), "registering refreshes cached names"
     assert types.class_for("orders.cancel") is Cancelled
     assert MessageTypes(naming=lambda cls: f"x.{cls.__name__}").name_of(Cancelled) == "x.Cancelled"

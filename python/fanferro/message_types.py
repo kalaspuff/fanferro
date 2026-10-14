@@ -60,12 +60,15 @@ class MessageTypes:
         self._naming = naming or _default_naming
         self._names: dict[type, str] = {}
         self._classes: dict[str, type] = {}
+        self._accepted: dict[type, tuple[str, ...]] = {}  # names_of cache (routing, per message)
+        self._accepted_codecs = -1
 
     def register(self, cls: type, name: str, *aliases: str) -> None:
         """Registers ``cls`` under ``name`` (and ``aliases`` for decoding)."""
         self._names[cls] = name
         for alias in (name, *aliases):
             self._classes[alias] = cls
+        self._accepted.clear()
 
     def name_of(self, target: Any) -> str:
         """The type name of a class or instance."""
@@ -83,10 +86,19 @@ class MessageTypes:
 
     def names_of(self, cls: type) -> tuple[str, ...]:
         """The primary name and every alias accepted for ``cls``."""
+        generation = self._codecs.generation if self._codecs is not None else 0
+        if generation != self._accepted_codecs:  # codec-provided names may have changed
+            self._accepted.clear()
+            self._accepted_codecs = generation
+        cached = self._accepted.get(cls)
+        if cached is not None:
+            return cached
         primary = self.name_of(cls)
         aliases = tuple(name for name, registered in self._classes.items() if registered is cls and name != primary)
         decorated = cls.__dict__.get(_ALIASES, ())
-        return (primary, *aliases, *(alias for alias in decorated if alias not in aliases))
+        names = (primary, *aliases, *(alias for alias in decorated if alias not in aliases))
+        self._accepted[cls] = names
+        return names
 
     def class_for(self, name: str) -> type | None:
         """The class registered for ``name``."""

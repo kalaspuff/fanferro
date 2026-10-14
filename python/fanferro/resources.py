@@ -150,6 +150,7 @@ class _Destination(_Resource):
         self._group_id = group_id
         self._codec = codec
         self._transport: Transport | None = None
+        self._destination_cache: tuple[Any, dict[str, Any]] | None = None
 
     @property
     def envelope(self) -> Envelope:
@@ -168,6 +169,13 @@ class _Destination(_Resource):
 
     def _destination(self, info: Any) -> dict[str, Any]:  # pragma: no cover - implemented by subclasses
         raise NotImplementedError
+
+    def _destination_for(self, info: Any) -> dict[str, Any]:
+        """The core destination of ``info``, built once per resolved resource (read-only)."""
+        cache = self._destination_cache
+        if cache is None or cache[0] is not info:
+            cache = self._destination_cache = (info, self._destination(info))
+        return cache[1]
 
     async def _transport_for(self) -> Transport | None:
         if self._large_payloads is _UNSET:
@@ -220,7 +228,7 @@ class _Destination(_Resource):
                 attributes[name] = to_attribute_value(value)
             wire = wire.replace(attributes=attributes)
         return PreparedMessage(
-            destination=self._destination(info),
+            destination=self._destination_for(info),
             destination_name=self.name,
             wire=wire,
             message_id=message.id,
@@ -301,18 +309,19 @@ class _Destination(_Resource):
         result = PublishResult.from_core(receipt, self.name)
         duration = monotonic() - started
         client._telemetry.record_publish(self.name, self.kind, duration, 1, None)
-        client.events.emit(
-            EventKind.PUBLISH_SUCCEEDED,
-            f"published to {self.kind} {self.name}",
-            destination=self.name,
-            kind=self.kind,
-            message_id=result.message_id,
-            transport_message_id=result.transport_message_id,
-            message_type=prepared.message_type,
-            size=result.size,
-            offloaded=result.offloaded is not None,
-            duration=round(duration, 6),
-        )
+        if client.events.is_enabled(EventKind.PUBLISH_SUCCEEDED):
+            client.events.emit(
+                EventKind.PUBLISH_SUCCEEDED,
+                f"published to {self.kind} {self.name}",
+                destination=self.name,
+                kind=self.kind,
+                message_id=result.message_id,
+                transport_message_id=result.transport_message_id,
+                message_type=prepared.message_type,
+                size=result.size,
+                offloaded=result.offloaded is not None,
+                duration=round(duration, 6),
+            )
         client._drain_core_events()
         return result
 
@@ -351,7 +360,9 @@ class _Destination(_Resource):
             if entries:
                 try:
                     receipts = await core.publish_batch(
-                        self._destination(info), [prepared.core_entry() for _, prepared in entries], transport=transport
+                        self._destination_for(info),
+                        [prepared.core_entry() for _, prepared in entries],
+                        transport=transport,
                     )
                 except Exception as error:  # noqa: BLE001 - deliberate catch-all; the error is reported, never swallowed silently
                     client._telemetry.mark_error(span, error)
@@ -365,14 +376,15 @@ class _Destination(_Resource):
         duration = monotonic() - started
         if batch.successful:
             client._telemetry.record_publish(self.name, self.kind, duration, len(batch.successful), None)
-            client.events.emit(
-                EventKind.PUBLISH_SUCCEEDED,
-                f"published {len(batch.successful)} messages to {self.kind} {self.name}",
-                destination=self.name,
-                kind=self.kind,
-                count=len(batch.successful),
-                duration=round(duration, 6),
-            )
+            if client.events.is_enabled(EventKind.PUBLISH_SUCCEEDED):
+                client.events.emit(
+                    EventKind.PUBLISH_SUCCEEDED,
+                    f"published {len(batch.successful)} messages to {self.kind} {self.name}",
+                    destination=self.name,
+                    kind=self.kind,
+                    count=len(batch.successful),
+                    duration=round(duration, 6),
+                )
         for failure in batch.failed:
             client._telemetry.record_publish(self.name, self.kind, duration, 1, failure.error)
             client.events.emit(
