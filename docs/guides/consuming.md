@@ -85,6 +85,10 @@ async def handle(message: fanferro.Message[Job]) -> None:
 Also `requeue(delay=...)`, `dead_letter(reason)`, `release()`, `discard(reason)`. With
 `auto_ack=False`, unsettled messages are left to time out (heartbeats stop when the handler ends).
 
+An explicit `await message.ack()` (or any other settlement) inside a handler resolves once SQS
+confirmed it, and the handler keeps its concurrency slot until then. Returning instead hands the
+slot to the next message right away; the automatic ack completes in the background.
+
 ## Throughput and flow control
 
 | Option | Default | Meaning |
@@ -97,9 +101,11 @@ Also `requeue(delay=...)`, `dead_letter(reason)`, `release()`, `discard(reason)`
 | `rate_limit` | `None` | `RateLimit(per_second, burst)` or a number: max messages received per second |
 | `handler_timeout` | `None` | cancel handlers after N seconds (`HandlerTimeoutError`, retried) |
 
-The engine never leases more than `concurrency + prefetch` messages. `consumer.pause()` /
-`resume()` stop and restart receiving without affecting in-flight messages (back-pressure,
-circuit breaking).
+The engine never leases more than `concurrency + prefetch` unsettled messages. A message gives
+its slot back as soon as its settlement starts (the handler returned or raised), so receiving and
+the next handlers do not wait for delete round trips; settlements in progress are bounded
+separately. `consumer.pause()` / `resume()` stop and restart receiving without affecting
+in-flight messages (back-pressure, circuit breaking).
 
 ## Visibility and heartbeats
 

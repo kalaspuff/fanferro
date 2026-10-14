@@ -214,8 +214,9 @@ class TelemetryRuntime:
                 description=description,
             )
         for metric, description in (
-            ("in_flight", "Messages leased (buffered or processing)."),
+            ("in_flight", "Messages leased (buffered, processing or settling)."),
             ("buffered", "Messages waiting for a free handler slot."),
+            ("settling", "Messages whose settlement (delete, retry, dead-letter) is in progress."),
         ):
             meter.create_observable_up_down_counter(
                 f"fanferro.consumer.{metric}",

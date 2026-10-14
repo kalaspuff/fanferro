@@ -75,10 +75,14 @@ These are relied upon across layers; tests cover each of them.
 1. **At-least-once, never silently dropped.** A received message is always settled: acked,
    retried (visibility), requeued, dead-lettered, released, or explicitly discarded with an event.
    Dropping a `Delivery` without settling releases the message (Rust `Drop`).
-2. **Bounded in-flight.** A consumer never holds more than `concurrency + prefetch` messages;
-   pollers acquire one permit per requested message before calling `ReceiveMessage`.
+2. **Bounded in-flight.** A consumer never holds more than `concurrency + prefetch` unsettled
+   messages; pollers acquire one in-flight permit per requested message before calling
+   `ReceiveMessage`. A settlement exchanges the message's permit for one of `max_settling`
+   settling permits (default: four times the in-flight limit) when it starts, so receiving
+   continues during the settlement's round trip and the settlement backlog is bounded too.
 3. **Leases are protected until settled.** Heartbeats extend visibility (batched by ten) while a
-   message is buffered or processing, capped at 12 hours after receipt and `max_duration`.
+   message is buffered, processing or waiting for a settling permit, capped at 12 hours after
+   receipt and `max_duration`. The lease stays tracked until its settlement completed.
 4. **Stable message ids.** The fanferro message id is generated once per message and reused on
    retries; FIFO destinations use it as the deduplication id; idempotency keys default to it.
 5. **Transport details are invisible to handlers.** Base64, claim checks and SNS wrapping are
@@ -110,7 +114,8 @@ These are relied upon across layers; tests cover each of them.
   decode task per received batch (preserving order). Lease state is in a `parking_lot` mutex
   that is never held across an `.await`.
 * Per Python consumer: one dispatcher task, one task per message (or per FIFO group), a
-  semaphore of `concurrency` permits.
+  semaphore of `concurrency` permits held while decoding, middleware and the handler run; the
+  task settles the message (auto-ack, retry, dead-letter) after giving its permit back.
 * Events flow Rust → Python through a bounded channel drained by an event pump task (started
   while a consumer runs or the client is entered) or synchronously after operations. The pump
   is stopped by waking its pending wait, not by cancelling it, so events that wait already took

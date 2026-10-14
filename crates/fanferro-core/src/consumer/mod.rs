@@ -4,14 +4,19 @@
 //!   pollers (N) ──ReceiveMessage──▶ lease table ──decode──▶ delivery channel ──▶ next_batch()
 //!       ▲  in-flight permits + rate limiter        │                                │
 //!       │                                          ▼                                ▼
-//!   permits released on settle      heartbeat (ChangeMessageVisibilityBatch)   Lease::ack/nack/...
-//!                                                                                  │
+//!   in-flight permit returned       heartbeat (ChangeMessageVisibilityBatch)   Lease::ack/nack/...
+//!   when settlement starts                                                         │ settling permit
 //!                                                     settle loop (Delete/ChangeVisibility batches)
 //! ```
 //!
-//! * At most `max_in_flight` messages are leased at any time (buffered + processing):
-//!   pollers acquire one permit per requested message before calling `ReceiveMessage`.
-//! * Every leased message is protected by heartbeats until it is settled.
+//! * At most `max_in_flight` unsettled messages are leased at any time (buffered + processing):
+//!   pollers acquire one in-flight permit per requested message before calling `ReceiveMessage`.
+//! * A settlement first takes a settling permit (at most `max_settling` settlements run at once),
+//!   then hands the message's in-flight permit back: the next receive does not wait for the
+//!   delete round trip. A consumer therefore holds at most `max_in_flight + max_settling`
+//!   messages.
+//! * Every leased message is protected by heartbeats until its settlement starts (also while it
+//!   waits for a settling permit); it stays in the lease table until the settlement completed.
 //! * Shutdown is two-phase: [`ConsumerEngine::stop_receiving`] stops the pollers (the
 //!   caller drains in-flight work), then [`ConsumerEngine::close`] releases or abandons
 //!   what is left, flushes pending settlements and stops the heartbeat.
@@ -101,6 +106,7 @@ pub(crate) struct EngineInner {
     pub(crate) client: Client,
     pub(crate) settings: Settings,
     pub(crate) permits: Arc<Semaphore>,
+    pub(crate) settling: Arc<Semaphore>,
     pub(crate) leases: Mutex<HashMap<u64, LeaseEntry>>,
     pub(crate) metrics: Arc<ConsumerMetrics>,
     next_lease_id: AtomicU64,
@@ -353,6 +359,7 @@ impl ConsumerEngine {
             inner: Arc::new(EngineInner {
                 client: client.clone(),
                 permits: Arc::new(Semaphore::new(settings.max_in_flight)),
+                settling: Arc::new(Semaphore::new(settings.max_settling)),
                 leases: Mutex::new(HashMap::new()),
                 metrics: Arc::new(ConsumerMetrics::default()),
                 next_lease_id: AtomicU64::new(1),

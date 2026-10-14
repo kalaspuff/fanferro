@@ -80,7 +80,7 @@ With an OpenTelemetry `MeterProvider`, fanferro records the messaging semantic c
 `messaging.client.consumed.messages`, `messaging.process.duration`, and observable
 `fanferro.consumer.*` instruments (acked, retried, requeued, dead_lettered, released,
 receive_errors, lease_extensions, leases_lost, decode_failures, payloads_fetched, in_flight,
-buffered) plus `fanferro.client.*` counters.
+buffered, settling) plus `fanferro.client.*` counters.
 
 The same numbers are available on demand without OpenTelemetry:
 
