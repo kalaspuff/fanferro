@@ -8,6 +8,8 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-14
+
 ### Lean, fast defaults (breaking)
 
 Without any tuning, clients and consumers now perform like a hand-tuned 0.1 configuration
@@ -61,6 +63,21 @@ Migrating from 0.1:
       shutdown=fanferro.ShutdownPolicy(abort_receives=False),
   )
   ```
+
+### Features
+
+- **consumer:** Full receive batches (min_receive_batch, receive_batch_wait, default prefetch) (#5) (#5)
+- [**breaking**] Lean defaults - raw envelope, opt-in CloudEvents and MD5 checks, immediate stop (#6) (#6)
+
+### Bug fixes
+
+- **consumer:** Wake the dispatcher and the event pump immediately when stopping (#2) (#2)
+
+### Performance
+
+- **consumer:** Free handler slots when settlement starts and bound the settling backlog (#3) (#3)
+- **consumer:** Batch acks and retries (full batches at once, 5 ms linger) (#4) (#4)
+- Cheaper per-message consume and publish paths (#7) (#7)
 
 ## [0.1.0] - 2026-10-12
 
