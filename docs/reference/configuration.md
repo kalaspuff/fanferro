@@ -10,7 +10,7 @@ each parameter and field listed here exists in the code and that every one in th
 | `region` | provider chain | AWS region |
 | `endpoint_url` | `None` | Custom endpoint (MiniStack: `http://localhost:4566`) |
 | `profile` | `None` | Named AWS profile |
-| `credentials` | provider chain | `Credentials(access_key_id, secret_access_key, session_token)` |
+| `credentials` | provider chain | `Credentials(access_key_id, secret_access_key, session_token)`; see [Deployment → Credentials and regions](../guides/deployment.md#credentials-and-regions) |
 | `account_id` | STS lookup | Account id used to derive topic ARNs and assumed queue URLs |
 | `source` | `"fanferro"` | CloudEvents `source` of published messages (e.g. `urn:service:orders`) |
 | `envelope` | `Raw()` | Envelope for publishing (`CloudEvents()` for CloudEvents) |
@@ -151,6 +151,9 @@ envelope, AWS trace header), `attribute_keys` (`traceparent`, `tracestate`), `pr
 
 | Variable | Effect |
 | --- | --- |
-| `AWS_REGION`, `AWS_PROFILE`, `AWS_*` credentials | Standard AWS configuration |
+| `AWS_REGION`, `AWS_DEFAULT_REGION` | Region when `region=` is not passed |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | Credentials when `credentials=` is not passed (take precedence over profiles) |
+| `AWS_PROFILE` | Profile when `profile=` is not passed |
+| `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_ROLE_ARN`, `AWS_CONTAINER_CREDENTIALS_*` | Web identity (EKS IRSA), ECS task role and EKS Pod Identity credentials |
 | `FANFERRO_WORKER_THREADS` | Tokio worker threads of the native runtime (default 2-4) |
 | `FANFERRO_TEST_ENDPOINT_URL` | Test suite: use this emulator instead of starting MiniStack |
