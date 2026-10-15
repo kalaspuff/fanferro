@@ -1,0 +1,334 @@
+"""The dataclass codec's compiled converters behave exactly like the converter they replaced.
+
+`reference_convert` (end of this file) is the converter of fanferro 0.3: it inspected the target
+type for every value and built every JSON path eagerly. The compiled converters must give the same
+results and the same errors, messages included.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import datetime
+import decimal
+import enum
+import types
+import typing
+import uuid
+from collections.abc import Callable, Mapping, Sequence
+from typing import Annotated, Any, Literal
+
+import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
+from fanferro.codecs._dataclass import convert
+from fanferro.errors import DecodeError
+
+
+class Color(enum.Enum):
+    RED = "red"
+    BLUE = "blue"
+
+
+class Level(enum.IntEnum):
+    LOW = 1
+    HIGH = 2
+
+
+@dataclasses.dataclass
+class Item:
+    sku: str
+    qty: int = 1
+
+
+@dataclasses.dataclass
+class Order:
+    id: uuid.UUID
+    items: list[Item]
+    color: Color
+    created: datetime.datetime
+    total: decimal.Decimal
+    tags: set[str] = dataclasses.field(default_factory=set)
+    note: str | None = None
+    kind: Literal["a", "b"] = "a"
+    pair: tuple[int, str] = (0, "")
+    computed: int = dataclasses.field(default=0, init=False)
+
+
+@dataclasses.dataclass
+class Node:
+    name: str
+    children: list[Node] = dataclasses.field(default_factory=list)
+    parent: Node | None = None
+
+
+@dataclasses.dataclass
+class Box[T]:
+    value: T
+
+
+TARGETS: list[Any] = [
+    Any,
+    object,
+    None,
+    int,
+    float,
+    str,
+    bool,
+    bytes,
+    list,
+    dict,
+    list[int],
+    list[str],
+    list[Any],
+    tuple[int, str],
+    tuple[int, ...],
+    tuple[()],
+    set[str],
+    frozenset[int],
+    Sequence[int],
+    dict[str, int],
+    dict[int, str],
+    Mapping[str, Any],
+    typing.List[int],  # noqa: UP006 - old spellings must keep working
+    typing.Optional[int],  # noqa: UP045
+    int | None,
+    str | int,
+    int | str,  # equal to the one before, spelled differently (as some below)
+    typing.Union[str, int],  # noqa: UP007
+    int | list[int] | None,
+    list[typing.Optional[int]],  # noqa: UP045
+    list[int | None],
+    Literal["a", "b"],
+    Literal["b", "a"],
+    Literal[1, True],
+    Annotated[int, "meta"],
+    Annotated[list[Item], "meta"],
+    Color,
+    Level,
+    datetime.datetime,
+    datetime.date,
+    datetime.time,
+    datetime.timedelta,
+    uuid.UUID,
+    decimal.Decimal,
+    Item,
+    Order,
+    Node,
+    list[Node],
+    Box[int],
+    Box,
+    dict[str, list[Item]],
+]
+
+KNOWN: list[tuple[Any, Any]] = [
+    ({"sku": "a"}, Item),
+    ({"sku": "a", "qty": "2"}, Item),
+    ({"qty": 2}, Item),
+    (
+        {
+            "id": "2c6f6c0e-6b3b-4f1d-9c5e-4b8c2a1f0e11",
+            "items": [{"sku": "a", "qty": 2}, {"sku": "b"}],
+            "color": "red",
+            "created": "2026-01-01T10:00:00+00:00",
+            "total": "10.50",
+            "tags": ["x", "y"],
+            "note": None,
+            "kind": "b",
+            "pair": [1, "one"],
+            "computed": 5,
+        },
+        Order,
+    ),
+    ({"id": "nope", "items": [], "color": "red", "created": "x", "total": "1"}, Order),
+    ({"name": "root", "children": [{"name": "a", "children": [{"name": "b"}]}]}, Node),
+    ({"name": "root", "children": [{"name": 1}]}, Node),
+    ({"name": "a", "parent": {"name": "b", "parent": 3}}, Node),
+    ({"value": 1}, Box[int]),
+    ([1, "a"], tuple[int, str]),
+    ([1, "a", 2], tuple[int, str]),
+    ([1, 2, 3], tuple[int, ...]),
+    ([], tuple[()]),
+    ([1, 2], set[str]),
+    (["a", "a"], set[str]),
+    ({"1": "a"}, dict[int, str]),
+    ({"a": [{"sku": "x"}]}, dict[str, list[Item]]),
+    ({"a": [{"sku": "x"}, {"sku": "y", "qty": "no"}]}, dict[str, list[Item]]),
+    ("blue", Color),
+    ("green", Color),
+    (2, Level),
+    ("12:30:00", datetime.time),
+    ("2026-01-01", datetime.date),
+    (90.5, datetime.timedelta),
+    ("x", datetime.timedelta),
+    ("1.5e3", decimal.Decimal),
+    ("abc", decimal.Decimal),
+    ("text", bytes),
+    ([104, 105], bytes),
+    ([300], bytes),
+    ([1.5], bytes),
+    ("a", Literal["a", "b"]),
+    (True, Literal[1, True]),
+    ([1, "x"], int | list[int] | None),
+]
+
+json_values = st.recursive(
+    st.none() | st.booleans() | st.integers() | st.floats(allow_nan=False) | st.text(max_size=8),
+    lambda children: st.lists(children, max_size=4) | st.dictionaries(st.text(max_size=6), children, max_size=4),
+    max_leaves=10,
+)
+
+
+def outcome(function: Callable[..., Any], value: Any, target: Any, path: str = "$") -> tuple[Any, ...]:
+    try:
+        return ("value", function(value, target, path))
+    except DecodeError as error:
+        return ("decode error", str(error))
+    except Exception as error:  # other exceptions must be the same too
+        return ("raised", type(error), str(error))
+
+
+@pytest.mark.parametrize(("value", "target"), KNOWN)
+def test_known_values_convert_as_before(value: Any, target: Any) -> None:
+    assert outcome(convert, value, target) == outcome(reference_convert, value, target)
+    assert outcome(convert, value, target, "body") == outcome(reference_convert, value, target, "body")
+
+
+@settings(max_examples=1000)
+@given(json_values, st.sampled_from(TARGETS))
+def test_any_value_converts_as_before(value: Any, target: Any) -> None:
+    assert outcome(convert, value, target) == outcome(reference_convert, value, target)
+
+
+def test_errors_name_the_json_path() -> None:
+    with pytest.raises(DecodeError, match=r"^body\.a\[1\]\.qty: expected an integer, got str$"):
+        convert({"a": [{"sku": "x"}, {"sku": "y", "qty": "no"}]}, dict[str, list[Item]], "body")
+
+
+def test_equal_targets_keep_their_spelling() -> None:
+    # Equal typing constructs can be spelled differently; errors name the target as it was written
+    # and list the members in its order, whichever spelling was converted first.
+    spellings = [
+        (int | str, str | int, typing.Union[str, int]),  # noqa: UP007
+        (typing.Optional[int], int | None),  # noqa: UP045
+        (Literal[1, 2], Literal[2, 1]),
+        (list[typing.Optional[str]], list[str | None]),  # noqa: UP045
+    ]
+    for targets in spellings:
+        for target in [*targets, *reversed(targets)]:
+            assert outcome(convert, [[]], target) == outcome(reference_convert, [[]], target), target
+
+
+# The converter of fanferro 0.3, kept as the reference.
+
+
+def reference_convert(value: Any, target: Any, path: str = "$") -> Any:
+    if target is Any or target is object:
+        return value
+    origin = typing.get_origin(target)
+    args = typing.get_args(target)
+    if origin is typing.Annotated:
+        return reference_convert(value, args[0], path)
+    if origin in (typing.Union, types.UnionType):
+        if value is None and type(None) in args:
+            return None
+        errors = []
+        for arg in args:
+            if arg is type(None):
+                continue
+            try:
+                return reference_convert(value, arg, path)
+            except DecodeError as error:
+                errors.append(str(error))
+        raise DecodeError(f"{path}: value matches no member of {target}: {'; '.join(errors)}")
+    if origin is typing.Literal:
+        if value in args:
+            return value
+        raise DecodeError(f"{path}: expected one of {args!r}, got {value!r}")
+    if origin in (list, Sequence, set, frozenset, tuple):
+        if not isinstance(value, list):
+            raise DecodeError(f"{path}: expected an array, got {type(value).__name__}")
+        if origin is tuple and args and args[-1] is not Ellipsis:
+            if len(args) != len(value):
+                raise DecodeError(f"{path}: expected {len(args)} items, got {len(value)}")
+            return tuple(
+                reference_convert(item, arg, f"{path}[{i}]")
+                for i, (item, arg) in enumerate(zip(value, args, strict=True))
+            )
+        item_type = args[0] if args else Any
+        items = [reference_convert(item, item_type, f"{path}[{i}]") for i, item in enumerate(value)]
+        if origin in (set, frozenset):
+            return origin(items)
+        return tuple(items) if origin is tuple else items
+    if origin in (dict, Mapping):
+        if not isinstance(value, dict):
+            raise DecodeError(f"{path}: expected an object, got {type(value).__name__}")
+        key_type, value_type = args or (Any, Any)
+        return {
+            reference_convert(k, key_type, f"{path}.{k}"): reference_convert(v, value_type, f"{path}.{k}")
+            for k, v in value.items()
+        }
+    if isinstance(target, type):
+        return _reference_convert_class(value, target, path)
+    return value
+
+
+def _reference_convert_class(value: Any, target: type, path: str) -> Any:
+    if dataclasses.is_dataclass(target):
+        if not isinstance(value, dict):
+            raise DecodeError(f"{path}: expected an object for {target.__name__}, got {type(value).__name__}")
+        hints = typing.get_type_hints(target)
+        kwargs = {}
+        for f in dataclasses.fields(target):
+            if not f.init:
+                continue
+            if f.name in value:
+                kwargs[f.name] = reference_convert(value[f.name], hints.get(f.name, Any), f"{path}.{f.name}")
+            elif f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING:
+                raise DecodeError(f"{path}: missing required field {f.name!r} for {target.__name__}")
+        return target(**kwargs)
+    if issubclass(target, enum.Enum):
+        try:
+            return target(value)
+        except ValueError as error:
+            raise DecodeError(f"{path}: {error}") from error
+    if target is bool:
+        if isinstance(value, bool):
+            return value
+        raise DecodeError(f"{path}: expected a boolean, got {type(value).__name__}")
+    if target is int:
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        raise DecodeError(f"{path}: expected an integer, got {type(value).__name__}")
+    if target is float:
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            return float(value)
+        raise DecodeError(f"{path}: expected a number, got {type(value).__name__}")
+    if target is str:
+        if isinstance(value, str):
+            return value
+        raise DecodeError(f"{path}: expected a string, got {type(value).__name__}")
+    try:
+        if target is datetime.datetime:
+            return datetime.datetime.fromisoformat(value)
+        if target is datetime.date:
+            return datetime.date.fromisoformat(value)
+        if target is datetime.time:
+            return datetime.time.fromisoformat(value)
+        if target is datetime.timedelta:
+            return datetime.timedelta(seconds=float(value))
+        if target is uuid.UUID:
+            return uuid.UUID(str(value))
+        if target is decimal.Decimal:
+            return decimal.Decimal(str(value))
+    except (TypeError, ValueError, decimal.InvalidOperation) as error:
+        raise DecodeError(f"{path}: cannot convert {value!r} to {target.__name__}: {error}") from error
+    if target is bytes:
+        if isinstance(value, str):
+            return value.encode()
+        if isinstance(value, list):
+            return bytes(value)
+    expected: Any = target
+    if isinstance(value, expected):
+        return value
+    raise DecodeError(f"{path}: cannot convert {type(value).__name__} to {target.__name__}")

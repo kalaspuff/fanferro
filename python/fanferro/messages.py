@@ -16,6 +16,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from fanferro._core import AttributeValue, Delivery, Payload, WireMessage, new_message_id
+from fanferro.codecs._base import loads_json
 from fanferro.errors import DecodeError
 
 if TYPE_CHECKING:
@@ -235,7 +236,7 @@ class Message[T]:
         """
         if self._json is _UNSET:
             try:
-                self._json = json.loads(self.payload.data)
+                self._json = loads_json(self.data)
             except ValueError as error:
                 raise DecodeError(f"message body is not valid JSON: {error}") from error
         return self._json

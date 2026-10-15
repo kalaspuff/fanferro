@@ -6,6 +6,7 @@ import dataclasses
 import datetime
 import decimal
 import enum
+import json
 import uuid
 from typing import Any, NamedTuple, Protocol, runtime_checkable
 
@@ -17,6 +18,7 @@ __all__ = [
     "Codec",
     "EncodedBody",
     "is_json_content_type",
+    "loads_json",
     "media_type",
     "to_jsonable",
 ]
@@ -84,6 +86,27 @@ def is_json_content_type(content_type: str | None) -> bool:
     return essence is not None and (essence in {"application/json", "text/json"} or essence.endswith("+json"))
 
 
+# First bytes for which `json.loads` detects an encoding other than UTF-8 (BOMs, UTF-16/32).
+_NOT_UTF8_LEADS = frozenset({0x00, 0xEF, 0xFE, 0xFF})
+
+
+def loads_json(data: bytes | bytearray | str) -> Any:
+    """``json.loads(data)``, without its encoding detection when that would choose UTF-8 anyway.
+
+    Same results and errors as ``json.loads`` for every input.
+    """
+    if type(data) is bytes and len(data) > 1 and data[0] not in _NOT_UTF8_LEADS and data[1]:
+        return json.loads(data.decode("utf-8", "surrogatepass"))
+    return json.loads(data)
+
+
+# Type checks of `to_jsonable`, built once (a `X | Y` union would be built anew for every value).
+_JSON_SCALARS = (bool, int, float, str)
+_EXACT_JSON_SCALARS = frozenset({str, int, float, bool, type(None)})
+_DATE_TIMES = (datetime.datetime, datetime.date, datetime.time)
+_SEQUENCES = (list, tuple, set, frozenset)
+
+
 def to_jsonable(value: Any) -> Any:
     """Converts common Python values into JSON-compatible structures.
 
@@ -91,11 +114,11 @@ def to_jsonable(value: Any) -> Any:
     preserve precision), bytes (UTF-8 or a list of ints), sets, tuples, mappings and objects with
     ``model_dump()`` (pydantic) or ``_asdict()`` (named tuples).
     """
-    if value is None or isinstance(value, bool | int | float | str):
+    if type(value) in _EXACT_JSON_SCALARS or isinstance(value, _JSON_SCALARS):
         return value
     if isinstance(value, enum.Enum):
         return to_jsonable(value.value)
-    if isinstance(value, datetime.datetime | datetime.date | datetime.time):
+    if isinstance(value, _DATE_TIMES):
         return value.isoformat()
     if isinstance(value, datetime.timedelta):
         return value.total_seconds()
@@ -109,7 +132,7 @@ def to_jsonable(value: Any) -> Any:
         return {str(to_jsonable(key)): to_jsonable(item) for key, item in value.items()}
     if hasattr(value, "_asdict"):
         return to_jsonable(value._asdict())
-    if isinstance(value, list | tuple | set | frozenset):
+    if isinstance(value, _SEQUENCES):
         return [to_jsonable(item) for item in value]
     if isinstance(value, bytes):
         try:

@@ -4,13 +4,17 @@ import dataclasses
 import datetime
 import decimal
 import enum
+import json
 import uuid
-from typing import Annotated, Any, Literal
+from collections.abc import Callable
+from typing import Annotated, Any, Literal, NamedTuple
 
 import msgspec
 import pydantic
 import pytest
 from google.protobuf import struct_pb2, timestamp_pb2
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 import fanferro
 from fanferro.codecs import (
@@ -25,6 +29,7 @@ from fanferro.codecs import (
     is_json_content_type,
     to_jsonable,
 )
+from fanferro.codecs._base import loads_json
 
 
 class Color(enum.Enum):
@@ -232,3 +237,134 @@ def test_registry_order_and_helpers() -> None:
     assert isinstance(
         CodecRegistry([TextCodec(), BytesCodec(), DataclassCodec()]).decoder_for(Item, None), DataclassCodec
     )
+
+
+_JSON_VALUES = st.recursive(
+    st.none() | st.booleans() | st.integers() | st.floats(allow_nan=False) | st.text(),
+    lambda children: st.lists(children, max_size=4) | st.dictionaries(st.text(), children, max_size=4),
+    max_leaves=8,
+)
+
+
+def _parsed(loads: Callable[[bytes], Any], data: bytes) -> tuple[Any, ...]:
+    try:
+        return ("value", loads(data))
+    except ValueError as error:  # JSONDecodeError, UnicodeDecodeError
+        return (type(error), str(error))
+
+
+@given(
+    _JSON_VALUES,
+    st.sampled_from(["utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le", "utf-32-be"]),
+)
+def test_json_bodies_parse_like_json_loads(value: Any, encoding: str) -> None:
+    data = json.dumps(value, ensure_ascii=False).encode(encoding, "surrogatepass")
+    assert _parsed(loads_json, data) == _parsed(json.loads, data)
+
+
+@given(st.binary(max_size=24))
+def test_any_body_parses_like_json_loads(data: bytes) -> None:
+    assert _parsed(loads_json, data) == _parsed(json.loads, data)
+
+
+class Shade(enum.IntEnum):
+    DARK = 1
+
+
+class Mood(enum.StrEnum):
+    CALM = "calm"
+
+
+class Pair(NamedTuple):
+    left: int
+    right: str
+
+
+@dataclasses.dataclass
+class Wrapper:
+    color: Color
+    when: datetime.date
+    amount: decimal.Decimal
+    tags: frozenset[str]
+
+
+_JSONABLE_LEAVES = (
+    st.none()
+    | st.booleans()
+    | st.integers()
+    | st.floats(allow_nan=False)
+    | st.text(max_size=6)
+    | st.sampled_from([Color.RED, Shade.DARK, Mood.CALM])
+    | st.datetimes()
+    | st.dates()
+    | st.times()
+    | st.timedeltas()
+    | st.uuids()
+    | st.decimals(allow_nan=False)
+    | st.binary(max_size=6)
+    | st.builds(Pair, st.integers(), st.text(max_size=4))
+    | st.builds(
+        Wrapper, st.just(Color.RED), st.dates(), st.decimals(allow_nan=False), st.frozensets(st.text(max_size=3))
+    )
+)
+_JSONABLE_VALUES = st.recursive(
+    _JSONABLE_LEAVES,
+    lambda children: (
+        st.lists(children, max_size=3)
+        | st.tuples(children, children)
+        | st.frozensets(st.integers() | st.text(max_size=3), max_size=3)
+        | st.dictionaries(
+            st.text(max_size=4) | st.integers() | st.sampled_from([Color.RED, Mood.CALM]), children, max_size=3
+        )
+    ),
+    max_leaves=8,
+)
+
+
+def _jsonable(function: Callable[[Any], Any], value: Any) -> tuple[Any, ...]:
+    try:
+        return ("value", function(value))
+    except TypeError as error:
+        return ("error", str(error))
+
+
+@settings(max_examples=500)
+@given(_JSONABLE_VALUES)
+def test_to_jsonable_converts_as_before(value: Any) -> None:
+    assert _jsonable(to_jsonable, value) == _jsonable(reference_to_jsonable, value)
+    assert _jsonable(to_jsonable, [value, object()]) == _jsonable(reference_to_jsonable, [value, object()])
+
+
+# The to_jsonable of fanferro 0.3, kept as the reference.
+
+
+def reference_to_jsonable(value: Any) -> Any:
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+    if isinstance(value, enum.Enum):
+        return reference_to_jsonable(value.value)
+    if isinstance(value, datetime.datetime | datetime.date | datetime.time):
+        return value.isoformat()
+    if isinstance(value, datetime.timedelta):
+        return value.total_seconds()
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, decimal.Decimal):
+        return str(value)
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {f.name: reference_to_jsonable(getattr(value, f.name)) for f in dataclasses.fields(value)}
+    if isinstance(value, dict):
+        return {str(reference_to_jsonable(key)): reference_to_jsonable(item) for key, item in value.items()}
+    if hasattr(value, "_asdict"):
+        return reference_to_jsonable(value._asdict())
+    if isinstance(value, list | tuple | set | frozenset):
+        return [reference_to_jsonable(item) for item in value]
+    if isinstance(value, bytes):
+        try:
+            return value.decode()
+        except UnicodeDecodeError:
+            return list(value)
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return model_dump(mode="json")
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
