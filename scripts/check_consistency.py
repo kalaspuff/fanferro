@@ -132,6 +132,7 @@ def configuration_reference() -> Iterator[str]:
         fanferro.RetryPolicy,
         fanferro.Backoff,
         fanferro.DeadLetterPolicy,
+        fanferro.DeadLetterQueue,
         fanferro.ShutdownPolicy,
         fanferro.Heartbeat,
         fanferro.RateLimit,

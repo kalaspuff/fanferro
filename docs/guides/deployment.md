@@ -74,6 +74,99 @@ Use `Provisioning.assume()` (or `existing()` with read permissions) in productio
 manage infrastructure with IaC; reserve `ensure()` for development, tests and services that own
 their queues. See [Provisioning → IAM permissions](provisioning.md#iam-permissions).
 
+## Several environments in one AWS account
+
+When environments share an account (a dev environment per developer, several dev stacks,
+staging), give the client the environment's prefixes. fanferro prepends them to the name of every
+queue and topic the application declares, dead-letter queues included, and to every name passed
+as a string (`client.subscription`, `client.consumer`, `topic.subscribe`, `queue.subscribe_to`,
+`dead_letter_queue=`, `DeadLetterPolicy(queue=...)`):
+
+```python
+env = os.environ["APP_ENV"]
+client = fanferro.Client(queue_prefix=f"{env}-", topic_prefix=f"{env}-")
+
+orders = client.topic("orders")  # AWS: staging-orders
+worker = client.queue(
+    "orders-worker",  # AWS: staging-orders-worker
+    dead_letter=fanferro.DeadLetterQueue("orders-worker-dlq"),  # AWS: staging-orders-worker-dlq
+)
+client.subscription("orders", "orders-worker")  # the same handles as above
+consumer = client.consumer("orders-worker", handle)  # the same queue
+events = client.queue("events.fifo")  # AWS: staging-events.fifo
+audit = client.topic("shared-audit", prefixed=False)  # shared by all environments
+```
+
+* The prefix is prepended as is (no separator is added) and may only contain letters, digits,
+  `-` and `_`. Write names without it everywhere: fanferro never checks whether a name already
+  starts with the prefix, so `client.queue("staging-orders")` becomes `staging-staging-orders`.
+* `prefixed=False` on `client.queue`, `client.topic` or `DeadLetterQueue` opts a resource out:
+  one that all environments share, or one named by someone else (another account's queue, for
+  example). A name passed as a string always gets the prefix, so pass such resources as
+  handles: `client.subscription(audit, worker)`. `DeadLetterPolicy(queue=...)` takes a name, so
+  a shared dead-letter queue is declared on its queue instead.
+* Every environment that declares a shared resource provisions it with its own spec. Declare
+  it the same way everywhere, or let one environment own it. A shared queue's dead-letter queue
+  is usually shared too, so opt both out; otherwise each environment points the queue's
+  redrive policy at its own dead-letter queue:
+  ```python
+  archive = client.queue(
+      "shared-archive",
+      prefixed=False,
+      dead_letter=fanferro.DeadLetterQueue("shared-archive-dlq", prefixed=False),
+  )
+  ```
+* A queue given by `url=` or a topic given by `arn=` is never prefixed: the URL or ARN already
+  names the resource.
+* Everything after the declaration uses the AWS name, prefix included: `queue.name`,
+  `client.queues` and `client.topics`, events and logs, provisioning reports, OpenTelemetry spans
+  and metrics (`messaging.destination.name`, so dashboards show one series per environment), the
+  default consumer name, dead-letter metadata, and the `destination_name` of prepared (outbox)
+  messages. Matchers compare AWS names as well: `m.topic() == orders.name`.
+* An outbox record holds the ARN or URL of its destination, so a relay publishes to the
+  environment the message was prepared in. It finds the destination's settings (such as
+  `large_payloads`) by the prefixed name, though, so give the relay's client the same prefixes as
+  the publisher's.
+* The prefix counts toward the AWS limits: at most 80 characters for a queue name and 256 for a
+  topic name, a `.fifo` suffix included. fanferro checks every name when it is declared, before
+  any network call, and the error says what to shorten:
+  `queue name '...' (prefix 'staging-' + '...') is 83 characters; SQS allows 80 - shorten the prefix or the name`.
+* The prefixes apply to queues and topics only. For large payloads, give each environment its own
+  bucket or key prefix (`LargePayloads("my-bucket", prefix=f"{env}/fanferro/")`).
+
+The prefix also scopes IAM permissions to one environment. A role for staging (account
+`123456789012`) that publishes, consumes and looks resources up:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "sqs:GetQueueUrl", "sqs:GetQueueAttributes", "sqs:ListQueueTags", "sqs:SendMessage",
+        "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility"
+      ],
+      "Resource": "arn:aws:sqs:*:123456789012:staging-*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "sns:Publish", "sns:GetTopicAttributes", "sns:ListTagsForResource",
+        "sns:ListSubscriptionsByTopic", "sns:GetSubscriptionAttributes"
+      ],
+      "Resource": "arn:aws:sns:*:123456789012:staging-*"
+    }
+  ]
+}
+```
+
+Where an environment provisions its own resources, add the create and update actions from
+[Provisioning → IAM permissions](provisioning.md#iam-permissions). Unless the client has
+`account_id=`, it also needs `sts:GetCallerIdentity`, which cannot be scoped to resources.
+Choose prefixes that do not start with another environment's prefix: `dev-*` also matches the
+resources of `dev-eu-`.
+
 ## Lambda
 
 fanferro is designed for long-running consumers. In Lambda with an SQS event source mapping,

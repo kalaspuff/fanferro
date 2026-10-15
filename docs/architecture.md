@@ -90,8 +90,9 @@ These are relied upon across layers; tests cover each of them.
 5. **Transport details are invisible to handlers.** Base64, claim checks and SNS wrapping are
    undone before envelopes see the message; `fanferro.*` attributes are hidden from
    `message.attributes` (still in `message.raw_attributes`).
-6. **Fail fast before the network.** Attribute limits (10, names, empty values), reserved names,
-   FIFO group ids and size limits are validated locally with actionable messages.
+6. **Fail fast before the network.** Queue and topic names (AWS naming rules, environment prefix
+   included), attribute limits (10, names, empty values), reserved names, FIFO group ids and size
+   limits are validated locally with actionable messages.
 7. **No hidden I/O on import.** Importing fanferro does nothing; the client connects lazily or
    on `async with`. Optional libraries (pydantic, protobuf, msgspec, OpenTelemetry) are never
    imported by fanferro unless the application uses them.

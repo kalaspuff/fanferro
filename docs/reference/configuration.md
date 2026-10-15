@@ -12,6 +12,8 @@ each parameter and field listed here exists in the code and that every one in th
 | `profile` | `None` | Named AWS profile |
 | `credentials` | provider chain | `Credentials(access_key_id, secret_access_key, session_token)`; see [Deployment → Credentials and regions](../guides/deployment.md#credentials-and-regions) |
 | `account_id` | STS lookup | Account id used to derive topic ARNs and assumed queue URLs |
+| `queue_prefix` | `""` | Prepended to every queue name, dead-letter queues included (e.g. `"staging-"`); see [Deployment → Several environments in one AWS account](../guides/deployment.md#several-environments-in-one-aws-account) |
+| `topic_prefix` | `""` | Prepended to every topic name |
 | `source` | `"fanferro"` | CloudEvents `source` of published messages (e.g. `urn:service:orders`) |
 | `envelope` | `Raw()` | Envelope for publishing (`CloudEvents()` for CloudEvents) |
 | `accept_envelopes` | CloudEvents, CloudEventsProtobuf, Raw | Envelopes consumers try, in order |
@@ -37,8 +39,9 @@ each parameter and field listed here exists in the code and that every one in th
 
 | Parameter | Default | Description |
 | --- | --- | --- |
-| `name` | - | Topic name (`.fifo` suffix for FIFO) |
-| `arn` | derived | Topic ARN |
+| `name` | - | Topic name without the prefix (`.fifo` suffix for FIFO) |
+| `arn` | derived | Topic ARN (never prefixed) |
+| `prefixed` | `True` | Prepend the client's `topic_prefix`; `False` for a topic shared by environments |
 | `attributes` | `None` | `TopicAttributes(...)` or raw AWS attributes |
 | `tags` | `None` | Tags |
 | `provisioning` | client default | Provisioning policy |
@@ -51,12 +54,13 @@ each parameter and field listed here exists in the code and that every one in th
 
 | Parameter | Default | Description |
 | --- | --- | --- |
-| `name` | - | Queue name (`.fifo` suffix for FIFO) |
-| `url` | looked up | Queue URL |
+| `name` | - | Queue name without the prefix (`.fifo` suffix for FIFO) |
+| `url` | looked up | Queue URL (never prefixed) |
 | `owner_account_id` | own account | Owner of a cross-account queue |
+| `prefixed` | `True` | Prepend the client's `queue_prefix`; `False` for a queue shared by environments |
 | `attributes` | `None` | `QueueAttributes(...)` or raw AWS attributes |
 | `tags` | `None` | Tags |
-| `dead_letter` | `None` | `DeadLetterQueue(name, max_receive_count, attributes, tags, provisioning)` |
+| `dead_letter` | `None` | `DeadLetterQueue(name, max_receive_count, attributes, tags, provisioning, prefixed)` |
 | `provisioning` | client default | Provisioning policy |
 | `envelope` | client default | Envelope for messages sent to this queue |
 | `large_payloads` | client default | Claim-check settings (`None` disables) |
@@ -110,9 +114,13 @@ each parameter and field listed here exists in the code and that every one in th
 `Backoff`: `initial` (1.0), `maximum` (300.0), `multiplier` (2.0), `jitter` (`True`);
 constructors `exponential()`, `constant()`, `immediate()`.
 
-`DeadLetterPolicy`: `queue` (`None`), `on_exhausted` / `on_decode_error` / `on_unroutable`
-(`"dead_letter"`; or `"retry"`, `"discard"`, `"leave"`), `on_missing_queue` (`"leave"`),
-`include_error` (`True`).
+`DeadLetterPolicy`: `queue` (`None`; a queue name, prefixed like the others), `on_exhausted` /
+`on_decode_error` / `on_unroutable` (`"dead_letter"`; or `"retry"`, `"discard"`, `"leave"`),
+`on_missing_queue` (`"leave"`), `include_error` (`True`).
+
+`DeadLetterQueue`: `name` (without the prefix), `max_receive_count` (5), `attributes` (14 days of
+retention), `tags` (`{}`), `provisioning` (the queue's), `prefixed` (`True`: the client's
+`queue_prefix` applies).
 
 `ShutdownPolicy`: `drain_timeout` (30.0; `None` = wait forever), `cancel_timeout` (10.0),
 `progress_interval` (5.0), `release_unfinished` (`True`), `release_prefetched` (`True`),

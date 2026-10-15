@@ -28,6 +28,10 @@ It is authoritative for the installed version (this skill only summarizes it). A
    `Client(envelope=fanferro.envelopes.CloudEvents())`.
 9. Tests: `fanferro.testing.memory_client()` + `consumer.run_until_idle()`; handler unit tests with
    `fanferro.testing.build_message(obj)`; end-to-end against MiniStack (`endpoint_url=http://localhost:4566`).
+10. Environments sharing an AWS account: `fanferro.Client(queue_prefix=f"{env}-", topic_prefix=f"{env}-")`,
+    never hand-built `f"{env}-..."` names. Write names without the prefix everywhere (strings passed to
+    `subscription`/`consumer`/`DeadLetterQueue` get it too); `prefixed=False` for shared resources, passed
+    as handles; `queue.name` and events carry the prefixed name.
 
 ## Skeleton
 
