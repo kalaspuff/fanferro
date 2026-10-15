@@ -19,6 +19,9 @@ dist/
 build/
 wheelhouse/
 
+# Publish kits of agents that cannot push (.claude/skills/fanferro-pull-requests)
+/.stacks/
+
 # Editors / OS
 .idea/
 .vscode/
