@@ -1,6 +1,8 @@
 //! Built-in envelopes exposed to Python. They implement the same protocol as custom
 //! Python envelopes: `name`, `wrap(payload) -> WireMessage`, `unwrap(wire) -> Payload | None`.
 
+use std::sync::Arc;
+
 use fanferro_core::envelope::{CloudEventsJson, CloudEventsProtobuf, Envelope, IMPLICIT_CONTENT_TYPE, RawEnvelope};
 use pyo3::prelude::*;
 
@@ -13,6 +15,20 @@ fn wrap(envelope: &dyn Envelope, payload: &Bound<'_, PyPayload>) -> PyResult<PyW
 
 fn unwrap(envelope: &dyn Envelope, wire: &Bound<'_, PyWireMessage>) -> PyResult<Option<PyPayload>> {
     envelope.unwrap(&wire.get().inner).map(|payload| payload.map(|inner| PyPayload { inner })).map_err(to_py_err)
+}
+
+/// The Rust envelope behind a built-in envelope object (`None` for envelopes implemented in Python).
+pub fn builtin(envelope: &Bound<'_, PyAny>) -> Option<Arc<dyn Envelope>> {
+    if let Ok(envelope) = envelope.cast::<PyCloudEvents>() {
+        return Some(Arc::new(envelope.get().inner.clone()));
+    }
+    if let Ok(envelope) = envelope.cast::<PyCloudEventsProtobuf>() {
+        return Some(Arc::new(envelope.get().inner.clone()));
+    }
+    if let Ok(envelope) = envelope.cast::<PyRaw>() {
+        return Some(Arc::new(envelope.get().inner.clone()));
+    }
+    None
 }
 
 /// CloudEvents 1.0 structured JSON envelope.

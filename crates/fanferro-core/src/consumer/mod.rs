@@ -47,6 +47,7 @@ pub use lease::{Lease, LeaseStatus};
 
 use crate::backend::ReceivedMessage;
 use crate::client::Client;
+use crate::envelope::EnvelopeSet;
 use crate::error::{Error, Result};
 use crate::events::{Event, EventKind};
 use crate::metrics::ConsumerMetrics;
@@ -54,7 +55,7 @@ use crate::retry::RateLimiter;
 use crate::transport::DecodedBody;
 use crate::transport::sns_notification::{self, SnsInfo, SnsMessageKind};
 use crate::types::attributes::{md5_of_attributes, md5_of_body};
-use crate::types::reserved;
+use crate::types::{Payload, reserved};
 use config::Settings;
 use lease::LeaseEntry;
 use settle::{Reply, SettleCommand, SettleKind, SettleQueue};
@@ -68,8 +69,32 @@ pub struct Delivery {
     pub sns: Option<SnsInfo>,
     /// The transport-decoded message, or why decoding failed.
     pub decoded: std::result::Result<DecodedBody, Error>,
+    /// What the engine's envelopes made of the decoded message (see
+    /// [`ConsumerEngine::with_envelopes`]).
+    pub unwrapped: Unwrapped,
     /// When the message was received.
     pub received_at: OffsetDateTime,
+}
+
+/// The outcome of unwrapping a delivery with the engine's envelopes.
+#[derive(Debug)]
+pub enum Unwrapped {
+    /// The engine has no envelopes, or transport decoding failed.
+    NotAttempted,
+    /// The envelope at position `envelope` recognised the message.
+    Payload {
+        /// The payload.
+        payload: Payload,
+        /// Position of the envelope in the engine's set.
+        envelope: usize,
+    },
+    /// No envelope recognised the message.
+    Unrecognised {
+        /// The names of the envelopes that were tried, comma-separated.
+        tried: String,
+    },
+    /// The envelope that recognised the message could not parse it.
+    Failed(Error),
 }
 
 impl Delivery {
@@ -199,6 +224,8 @@ pub(crate) struct EngineInner {
     /// Until when an aborted long poll may still be served by the queue (see
     /// [`EngineInner::visibility_floor`]).
     orphaned_receives_until: Mutex<Option<Instant>>,
+    /// Envelopes applied while decoding (see [`ConsumerEngine::with_envelopes`]).
+    envelopes: Option<EnvelopeSet>,
 }
 
 /// The receiving end of the delivery channel plus deliveries a smaller `next_batch` left over.
@@ -319,6 +346,7 @@ impl EngineInner {
                     lease,
                     sns: None,
                     decoded: Err(Error::Checksum("MD5 of the received message does not match".into())),
+                    unwrapped: Unwrapped::NotAttempted,
                     received_at,
                 });
             }
@@ -334,7 +362,13 @@ impl EngineInner {
             Ok(None) => (Cow::Borrowed(message.body.as_str()), message.attributes.clone(), None),
             Err(error) => {
                 self.metrics.decode_failures.inc();
-                return Some(Delivery { lease, sns: None, decoded: Err(error), received_at });
+                return Some(Delivery {
+                    lease,
+                    sns: None,
+                    decoded: Err(error),
+                    unwrapped: Unwrapped::NotAttempted,
+                    received_at,
+                });
             }
         };
         if sns.is_some() {
@@ -362,7 +396,17 @@ impl EngineInner {
             Ok(_) => {}
             Err(_) => self.metrics.decode_failures.inc(),
         }
-        Some(Delivery { lease, sns, decoded, received_at })
+        let unwrapped = match (&self.envelopes, &decoded) {
+            (Some(envelopes), Ok(decoded)) => match envelopes.unwrap_indexed(&decoded.wire) {
+                Ok(Some((payload, envelope))) => Unwrapped::Payload { payload, envelope },
+                Ok(None) => Unwrapped::Unrecognised {
+                    tried: envelopes.envelopes().iter().map(|e| e.name()).collect::<Vec<_>>().join(", "),
+                },
+                Err(error) => Unwrapped::Failed(error),
+            },
+            _ => Unwrapped::NotAttempted,
+        };
+        Some(Delivery { lease, sns, decoded, unwrapped, received_at })
     }
 
     async fn handle_sns_control(&self, lease: Lease, info: SnsInfo) {
@@ -447,6 +491,12 @@ impl std::fmt::Debug for ConsumerEngine {
 impl ConsumerEngine {
     /// Creates an engine; must be called within a Tokio runtime.
     pub fn new(client: &Client, config: ConsumerConfig) -> Result<Self> {
+        Self::with_envelopes(client, config, None)
+    }
+
+    /// Creates an engine that also unwraps the envelopes of received messages while decoding them
+    /// (see [`Delivery::unwrapped`]), off the thread that handles the deliveries.
+    pub fn with_envelopes(client: &Client, config: ConsumerConfig, envelopes: Option<EnvelopeSet>) -> Result<Self> {
         let settings = config.validate()?;
         if config.min_receive_batch.is_some() && config.requested_min_receive_batch() > settings.max_in_flight {
             client.events().emit(EventKind::ConfigWarning, || {
@@ -495,6 +545,7 @@ impl ConsumerEngine {
                 rate_limiter,
                 runtime,
                 orphaned_receives_until: Mutex::new(None),
+                envelopes,
                 settings,
             }),
         })

@@ -157,6 +157,7 @@ class Message[T]:
 
     __slots__ = (
         "_body",
+        "_data",
         "_json",
         "_settled",
         "_settler",
@@ -204,7 +205,36 @@ class Message[T]:
         self._settled = False
         self._slot: Any = None  # the consumer's handler slot while the handler runs
         self._body: Any = body
+        self._data: tuple[Payload, bytes] | None = None  # (payload, its data): read once per payload
         self._json: Any = _UNSET
+
+    @classmethod
+    def _received(
+        cls,
+        payload: Payload,
+        raw_attributes: dict[str, AttributeValue],
+        attributes: dict[str, AttributeValue],
+        envelope: str,
+        delivery: Delivery,
+        queue: str,
+        settler: Settler,
+    ) -> Message[Any]:
+        """A received message from parts the consumer prepared (no conversions, no copies)."""
+        message = cls.__new__(cls)
+        message.payload = payload
+        message.raw_attributes = raw_attributes
+        message.attributes = attributes
+        message.envelope = envelope
+        message.delivery = delivery
+        message.queue = queue
+        message.outcome = None
+        message._settler = settler
+        message._settled = False
+        message._slot = None
+        message._body = _UNSET
+        message._data = None
+        message._json = _UNSET
+        return message
 
     # -- payload ---------------------------------------------------------------------------
 
@@ -226,7 +256,11 @@ class Message[T]:
     @property
     def data(self) -> bytes:
         """The encoded body bytes."""
-        return self.payload.data
+        cached = self._data
+        payload = self.payload
+        if cached is None or cached[0] is not payload:
+            cached = self._data = (payload, payload.data)
+        return cached[1]
 
     def json(self) -> Any:
         """Parses the body as JSON (cached).

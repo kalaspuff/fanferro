@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import signal
 import time
 from collections import deque
@@ -27,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Literal, Self
 from fanferro._core import Delivery, FanferroError, LeaseError, ShutdownError
 from fanferro.actions import Discard, HandlerAction, Reject, Requeue, Retry
 from fanferro.codecs import is_json_content_type, media_type
-from fanferro.envelopes import Envelope, default_envelopes, unwrap_first
+from fanferro.envelopes import CloudEvents, CloudEventsProtobuf, Envelope, Raw, default_envelopes, unwrap_first
 from fanferro.errors import ConsumerStateError, HandlerTimeoutError, error_details
 from fanferro.events import EventKind
 from fanferro.messages import Message, Outcome
@@ -48,6 +49,7 @@ type ConsumerState = Literal["created", "starting", "running", "stopping", "stop
 
 _MAX_VISIBILITY_DELAY = 12 * 3600 - 60
 _MAX_REQUEUE_DELAY = 900.0
+_BUILTIN_ENVELOPES = (CloudEvents, CloudEventsProtobuf, Raw)
 
 
 class Duplicate(Discard):
@@ -285,11 +287,14 @@ class _GroupSequencer:
                 outcome = await self._consumer._run(delivery, counted=was_counted)
                 if outcome not in ("acked", "discarded", "dead_lettered"):
                     self._poisoned.add(group)
+        except Exception as error:  # noqa: BLE001 - deliberate catch-all; the error is reported, never swallowed silently
+            self._consumer._task_failed(error)
         finally:
             if counted:
                 self._consumer._waiting -= 1
             self._pending.pop(group, None)
             self._poisoned.discard(group)
+            self._consumer._task_ended()
 
 
 class Consumer:
@@ -386,6 +391,7 @@ class Consumer:
         self._fifo = queue.fifo
         self._sequenced = False  # FIFO per-group sequencing (resolved on start)
         self._unwrap_with: tuple[Envelope, ...] = ()  # envelopes tried (resolved on start)
+        self._envelope_names: tuple[str, ...] = ()
         self._sequencer = _GroupSequencer(self)
         self._settler = _Settler(self)
         self._stats = _Stats()
@@ -511,8 +517,12 @@ class Consumer:
         self._check_configuration(info)
         self._sequenced = self.ordering == "fifo" or (self.ordering == "auto" and self._fifo)
         self._unwrap_with = self.envelopes
+        self._envelope_names = tuple(envelope.name for envelope in self._unwrap_with)
         core = await client._core()
-        self._engine = core.consumer(config)
+        # Built-in envelopes are unwrapped by the engine while it decodes messages (off the event
+        # loop); custom ones here, for each message.
+        builtin = [envelope for envelope in self._unwrap_with if isinstance(envelope, _BUILTIN_ENVELOPES)]
+        self._engine = core.consumer(config, builtin if len(builtin) == len(self._unwrap_with) else None)
         self._semaphore = asyncio.Semaphore(self.concurrency)
         self._stop_event = asyncio.Event()
         self._stopping = False
@@ -626,6 +636,7 @@ class Consumer:
         try:
             while True:
                 now = time.monotonic()
+                self._forget_finished_tasks()
                 engine_in_flight = 0
                 if self._engine is not None:
                     engine_in_flight = int(self._engine.stats().get("metrics", {}).get("in_flight", 0))
@@ -686,6 +697,7 @@ class Consumer:
                 for task in list(self._tasks):
                     task.cancel()
                 await asyncio.wait(list(self._tasks), timeout=policy.cancel_timeout)
+                self._forget_finished_tasks()
         finally:
             if not stop_receiving.done():
                 with contextlib.suppress(Exception):
@@ -706,6 +718,7 @@ class Consumer:
                 return
             wait = interval if remaining is None else min(interval, remaining)
             done, _pending = await asyncio.wait(list(self._tasks), timeout=wait)
+            self._tasks.difference_update(done)  # also tasks cancelled before they started
             if not done and self._tasks:
                 self._emit(
                     EventKind.CONSUMER_DRAINING,
@@ -741,45 +754,58 @@ class Consumer:
             self._sequencer.submit(group, delivery)
         else:
             self._waiting += 1
-            self._spawn(self._run(delivery, counted=True))
+            self._spawn(self._run(delivery, counted=True, task=True))
 
     def _spawn(self, coroutine: Any) -> None:
-        task = asyncio.get_running_loop().create_task(coroutine)
-        self._tasks.add(task)
-        task.add_done_callback(self._task_done)
+        """Runs ``coroutine`` as a task (it calls :meth:`_task_ended` when it ends: no done callback)."""
+        self._tasks.add(asyncio.get_running_loop().create_task(coroutine))
 
-    def _task_done(self, task: asyncio.Task[Any]) -> None:
-        self._tasks.discard(task)
+    def _task_ended(self) -> None:
+        """Forgets the running task (called by the task itself, at its very end)."""
+        self._tasks.discard(asyncio.current_task())  # type: ignore[arg-type]
         self._last_activity = time.monotonic()
-        if not task.cancelled() and task.exception() is not None:
-            self._emit(
-                EventKind.CONSUMER_ERROR, f"unexpected error in consumer {self.name}", exception=task.exception()
-            )
+
+    def _forget_finished_tasks(self) -> None:
+        """Forgets tasks that ended without :meth:`_task_ended` (cancelled before they ever ran)."""
+        self._tasks.difference_update([task for task in self._tasks if task.done()])
+
+    def _task_failed(self, error: Exception) -> None:
+        self._emit(EventKind.CONSUMER_ERROR, f"unexpected error in consumer {self.name}", exception=error)
 
     async def _release_quietly(self, delivery: Delivery) -> None:
         with contextlib.suppress(FanferroError):
             await delivery.release()
 
-    async def _run(self, delivery: Delivery, *, counted: bool = False) -> Outcome | None:
-        semaphore = self._semaphore
-        assert semaphore is not None
-        if not counted:
-            self._waiting += 1
+    async def _run(self, delivery: Delivery, *, counted: bool = False, task: bool = False) -> Outcome | None:
+        """Processes one delivery; ``task``: this call is the message's whole task (see :meth:`_spawn`)."""
         try:
-            await semaphore.acquire()
+            semaphore = self._semaphore
+            assert semaphore is not None
+            if not counted:
+                self._waiting += 1
+            try:
+                await semaphore.acquire()
+            finally:
+                self._waiting -= 1
+            if self._stopping and self.shutdown_policy.release_prefetched:
+                semaphore.release()
+                await self._release_quietly(delivery)
+                return "released"
+            delivery.mark_active()
+            self._active += 1
+            slot = _Slot(self, semaphore)
+            try:
+                return await self._process(delivery, slot)
+            finally:
+                slot.release()
+        except Exception as error:
+            if not task:
+                raise
+            self._task_failed(error)
+            return None
         finally:
-            self._waiting -= 1
-        if self._stopping and self.shutdown_policy.release_prefetched:
-            semaphore.release()
-            await self._release_quietly(delivery)
-            return "released"
-        delivery.mark_active()
-        self._active += 1
-        slot = _Slot(self, semaphore)
-        try:
-            return await self._process(delivery, slot)
-        finally:
-            slot.release()
+            if task:
+                self._task_ended()
 
     # -- processing ------------------------------------------------------------------------
 
@@ -808,33 +834,32 @@ class Consumer:
         events.emit(kind, text, exception=exception, **context)
 
     def _build_message(self, delivery: Delivery) -> Message[Any]:
-        error = delivery.decode_error
-        if error is not None:
-            raise error
-        wire = delivery.wire
-        assert wire is not None
-        payload, envelope = unwrap_first(self._unwrap_with or self.envelopes, wire)
-        return Message(
-            payload=payload,
-            attributes=wire.attributes,
-            envelope=envelope.name,
-            delivery=delivery,
-            queue=self.queue.name,
-            settler=self._settler,
-        )
+        # Raises decoding errors (transport, or the envelope that recognised the message).
+        payload, index, attributes, visible = delivery.parts()
+        if payload is None or index is None:  # custom envelopes: unwrapped here
+            wire = delivery.wire
+            assert wire is not None
+            payload, envelope = unwrap_first(self._unwrap_with or self.envelopes, wire)
+            name = envelope.name
+        else:
+            name = self._envelope_names[index]
+        return Message._received(payload, attributes, visible, name, delivery, self.queue.name, self._settler)
 
     def _decode_body(self, message: Message[Any], route: Route) -> Any:
         target = route.body_type
         content_type = message.content_type
-        codecs = self._client.codecs
         if target is Any or target is object:
-            if is_json_content_type(content_type) or (content_type is None and message.data[:1] in (b"{", b"[")):
+            if content_type is None:
+                if message.data[:1] in (b"{", b"["):
+                    return message.json()
+                return message.data
+            if _is_json(content_type):
                 return message.json()
             essence = media_type(content_type)
             if essence is not None and essence.startswith("text/"):
-                return codecs.decode(message.data, str, content_type)
+                return self._client.codecs.decode(message.data, str, content_type)
             return message.data
-        return codecs.decode(message.data, target, content_type)
+        return self._client.codecs.decode(message.data, target, content_type)
 
     async def _process(self, delivery: Delivery, slot: _Slot) -> Outcome | None:
         started = monotonic()
@@ -893,11 +918,10 @@ class Consumer:
             await self._apply_action(message, self.dead_letter_policy.on_decode_error, "decode failed", error)
             return
         handler_started = monotonic()
-
-        async def invoke(msg: Message[Any]) -> None:
-            await route.invoke(msg)
-
-        call = chain_consume((*self._client.consume_middleware, *self._middleware), invoke)
+        if self._client.consume_middleware or self._middleware:
+            call = chain_consume((*self._client.consume_middleware, *self._middleware), route.invoke)
+        else:
+            call = route.invoke
         try:
             if self.handler_timeout is not None:
                 try:
@@ -1092,6 +1116,12 @@ class Consumer:
 
     def __repr__(self) -> str:
         return f"Consumer({self.name!r}, queue={self.queue.name!r}, state={self._state!r})"
+
+
+@functools.lru_cache(maxsize=256)
+def _is_json(content_type: str) -> bool:
+    """:func:`is_json_content_type`, memoized for the few content types a consumer sees."""
+    return is_json_content_type(content_type)
 
 
 def _raw_payload(delivery: Delivery) -> Any:

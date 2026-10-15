@@ -267,3 +267,10 @@ def test_aws_config_objects() -> None:
     with pytest.raises(ValueError, match="max_attempts"):
         fanferro.AwsRetry(max_attempts=0).to_core()
     assert fanferro.Timeouts(read=30).to_core()["read"] == 30.0
+
+
+def test_message_data_follows_its_payload() -> None:
+    message = build_message({"a": 1})
+    assert message.data is message.data  # read once
+    message.payload = message.payload.replace(data=b'{"b":2}')  # e.g. by a decrypting middleware
+    assert message.data == b'{"b":2}'

@@ -5,16 +5,17 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use fanferro_core::consumer::{ConsumerEngine, Delivery};
+use fanferro_core::consumer::{ConsumerEngine, Delivery, Unwrapped};
+use fanferro_core::types::reserved;
 use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::client::pointer_to_py;
 use crate::convert::{attributes_to_py, seconds, time_to_py};
-use crate::errors::{ShutdownError, to_py_err, to_py_err_with};
+use crate::errors::{EnvelopeError, ShutdownError, to_py_err, to_py_err_with};
 use crate::runtime::{Convert, future_into_py, handle, pending_future};
-use crate::types::wire_to_py;
+use crate::types::{PyAttributeValue, PyPayload, wire_to_py};
 
 /// Receives messages from one queue.
 #[pyclass(name = "ConsumerEngine", module = "fanferro._core", frozen)]
@@ -258,6 +259,40 @@ impl PyDelivery {
             Ok(decoded) => wire_to_py(py, decoded.wire.clone()).map(Some),
             Err(_) => Ok(None),
         }
+    }
+
+    /// What a handler needs: `(payload, envelope, attributes, visible attributes)`. `payload` and
+    /// `envelope` (the position of the envelope that recognised the message) are `None` unless the
+    /// engine unwraps envelopes; the visible attributes leave out fanferro's internal ones.
+    ///
+    /// Raises the decoding error, or the error of the envelope that recognised the message.
+    fn parts<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let decoded = self.inner.decoded.as_ref().map_err(|error| to_py_err_with(py, error))?;
+        let (payload, envelope) = match &self.inner.unwrapped {
+            Unwrapped::Payload { payload, envelope } => (
+                Py::new(py, PyPayload { inner: payload.clone() })?.into_any(),
+                envelope.into_pyobject(py)?.into_any().unbind(),
+            ),
+            Unwrapped::NotAttempted => (py.None(), py.None()),
+            Unwrapped::Failed(error) => return Err(to_py_err_with(py, error)),
+            Unwrapped::Unrecognised { tried } => {
+                // Worded (and raised) as when Python unwraps the message.
+                return Err(EnvelopeError::new_err(format!(
+                    "no configured envelope recognised the message (tried {})",
+                    if tried.is_empty() { "none" } else { tried }
+                )));
+            }
+        };
+        let attributes = PyDict::new(py);
+        let visible = PyDict::new(py);
+        for (name, value) in &decoded.wire.attributes {
+            let value = Py::new(py, PyAttributeValue { inner: value.clone() })?;
+            if !reserved::is_internal(name) {
+                visible.set_item(name, &value)?;
+            }
+            attributes.set_item(name, value)?;
+        }
+        PyTuple::new(py, [payload, envelope, attributes.into_any().unbind(), visible.into_any().unbind()])
     }
 
     /// The decoding error, if decoding failed.

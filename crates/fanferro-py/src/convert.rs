@@ -42,14 +42,19 @@ fn is_decimal(value: &Bound<'_, PyAny>) -> PyResult<bool> {
     value.is_instance(decimal)
 }
 
-/// Converts a UTC timestamp to an aware `datetime`.
+/// Converts a UTC timestamp to an aware `datetime` (one constructor call).
 pub fn time_to_py<'py>(py: Python<'py>, time: OffsetDateTime) -> PyResult<Bound<'py, PyAny>> {
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("tz", utc(py)?)?;
-    let base = datetime_type(py)?.call_method("fromtimestamp", (time.unix_timestamp(),), Some(&kwargs))?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("microsecond", time.microsecond())?;
-    base.call_method("replace", (), Some(&kwargs))
+    let time = time.to_offset(time::UtcOffset::UTC);
+    datetime_type(py)?.call1((
+        time.year(),
+        u8::from(time.month()),
+        time.day(),
+        time.hour(),
+        time.minute(),
+        time.second(),
+        time.microsecond(),
+        utc(py)?,
+    ))
 }
 
 /// Converts a `datetime` (naive values are taken as UTC) or a POSIX timestamp.
