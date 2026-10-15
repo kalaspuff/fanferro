@@ -8,6 +8,8 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-15
+
 ### Queue and topic names are checked when they are declared
 
 Names must follow the rules of SQS and SNS: letters, digits, `-` and `_`, a `.fifo` suffix for
@@ -17,6 +19,15 @@ FIFO resources, and at most 80 characters for a queue or 256 for a topic, includ
 raise `ConfigurationError` before any network call. AWS and the in-memory broker never accepted
 them, but MiniStack does: a name such as `orders.v1` that worked against MiniStack is now
 rejected.
+
+### Features
+
+- Queue_prefix and topic_prefix for per-environment resource names (#12) (#12)
+
+### Documentation
+
+- Document AWS credential and region resolution (#10) (#10)
+- A skill for pull requests, stacks and publish kits (#11) (#11)
 
 ## [0.2.0] - 2026-10-14
 
