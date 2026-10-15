@@ -134,11 +134,16 @@ class TelemetryRuntime:
         self._tracer: Any = None
         self._meter: Any = None
         self._instruments: dict[str, Any] = {}
+        # Metric attributes of successful operations, by destination (built once, never mutated).
+        self._attributes: dict[tuple[str, str], dict[str, str]] = {}
         self._consumers: weakref.WeakSet[Any] = weakref.WeakSet()
         self._client_metrics: Callable[[], Mapping[str, int]] | None = None
+        self._proxy_provider: type | None = None
         if self._otel is None:
             return
         trace = self._otel["trace"]
+        # The API's provider until an SDK is configured: its spans record nothing (see _noop_tracing).
+        self._proxy_provider = getattr(trace, "ProxyTracerProvider", None)
         if self.config.tracing:
             self._tracer = trace.get_tracer(INSTRUMENTATION_NAME, version, tracer_provider=self.config.tracer_provider)
         if self.config.metrics:
@@ -148,6 +153,17 @@ class TelemetryRuntime:
     def available(self) -> bool:
         """Whether OpenTelemetry is installed."""
         return self._otel is not None
+
+    def _noop_tracing(self) -> bool:
+        """Whether spans record nothing: no OpenTelemetry SDK is configured (yet).
+
+        The API then creates non-recording spans that only re-activate the span of their parent
+        context, which :meth:`process_span` and :meth:`publish_span` do directly.
+        """
+        if self.config.tracer_provider is not None or self._proxy_provider is None:
+            return False
+        assert self._otel is not None
+        return isinstance(self._otel["trace"].get_tracer_provider(), self._proxy_provider)
 
     def _propagator(self) -> Any:
         if self.config.propagation.propagator is not None:
@@ -257,36 +273,44 @@ class TelemetryRuntime:
         """Records a publish operation."""
         if not self._instruments:
             return
-        attributes = {
-            "messaging.system": _system(kind),
-            "messaging.destination.name": destination,
-            "messaging.operation.name": "publish" if kind == "topic" else "send",
-        }
-        error_type = _error_type(error)
-        if error_type is not None:
-            attributes["error.type"] = error_type
+        attributes = self._attributes.get((kind, destination)) if error is None else None
+        if attributes is None:
+            attributes = {
+                "messaging.system": _system(kind),
+                "messaging.destination.name": destination,
+                "messaging.operation.name": "publish" if kind == "topic" else "send",
+            }
+            if error is None:
+                self._attributes[kind, destination] = attributes
+            else:
+                attributes["error.type"] = _error_type(error) or ""
         self._instruments["sent"].add(count, attributes)
         self._instruments["operation_duration"].record(duration, attributes)
 
     def record_consumed(self, queue: str, count: int) -> None:
         """Records received messages."""
         if self._instruments:
-            self._instruments["consumed"].add(
-                count, {"messaging.system": "aws_sqs", "messaging.destination.name": queue}
-            )
+            attributes = self._attributes.get(("consumed", queue))
+            if attributes is None:
+                attributes = {"messaging.system": "aws_sqs", "messaging.destination.name": queue}
+                self._attributes["consumed", queue] = attributes
+            self._instruments["consumed"].add(count, attributes)
 
     def record_process(self, queue: str, duration: float, error: BaseException | None) -> None:
         """Records message processing."""
         if not self._instruments:
             return
-        attributes = {
-            "messaging.system": "aws_sqs",
-            "messaging.destination.name": queue,
-            "messaging.operation.name": "process",
-        }
-        error_type = _error_type(error)
-        if error_type is not None:
-            attributes["error.type"] = error_type
+        attributes = self._attributes.get(("process", queue)) if error is None else None
+        if attributes is None:
+            attributes = {
+                "messaging.system": "aws_sqs",
+                "messaging.destination.name": queue,
+                "messaging.operation.name": "process",
+            }
+            if error is None:
+                self._attributes["process", queue] = attributes
+            else:
+                attributes["error.type"] = _error_type(error) or ""
         self._instruments["process_duration"].record(duration, attributes)
 
     # -- tracing ---------------------------------------------------------------------------
@@ -295,7 +319,8 @@ class TelemetryRuntime:
         self, destination: str, kind: str, message_id: str | None, batch_size: int | None = None
     ) -> AbstractContextManager[Any]:
         """A producer span (no-op without tracing)."""
-        if self._tracer is None or self._otel is None:
+        if self._tracer is None or self._otel is None or self._noop_tracing():
+            # Without an SDK the span would only re-activate the current span: nothing to do.
             return _NO_SPAN
         return self._publish_span(destination, kind, message_id, batch_size)
 
@@ -375,6 +400,13 @@ class TelemetryRuntime:
     def process_span(self, message: Message[Any], queue: str) -> AbstractContextManager[Any]:
         """A consumer span around processing ``message`` (no-op without tracing)."""
         if self._tracer is None or self._otel is None:
+            return _NO_SPAN
+        if self._noop_tracing():
+            # Without an SDK the span records nothing and only makes the span of the extracted
+            # producer context the current one (propagation continues through the handler).
+            if self.config.consumer_span_parent == "child" and (parent := self.extract(message)) is not None:
+                trace = self._otel["trace"]
+                return trace.use_span(trace.get_current_span(parent))
             return _NO_SPAN
         return self._process_span(message, queue)
 

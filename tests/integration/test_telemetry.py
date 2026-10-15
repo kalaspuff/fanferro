@@ -15,7 +15,7 @@ from opentelemetry.trace import SpanKind, StatusCode
 import fanferro
 from fanferro import testing
 from fanferro.telemetry import Carrier, Propagation
-from tests.helpers import OrderCreated, consume_until
+from tests.helpers import OrderCreated, consume_until, drain_queue
 
 
 @pytest.fixture
@@ -144,3 +144,29 @@ async def test_disabled_telemetry(name: Any) -> None:
         provider.shutdown()
     assert "traceparent" not in prepared.wire.attributes
     assert prepared.trace_header is None
+
+
+async def test_trace_context_passes_through_without_an_sdk(name: Any) -> None:
+    # Without an SDK, spans record nothing, but a handler still runs in the producer's trace
+    # context, so messages it publishes carry that context on.
+    if not isinstance(trace.get_tracer_provider(), getattr(trace, "ProxyTracerProvider", ())):
+        pytest.skip("a global tracer provider is configured in this process")
+    client = testing.memory_client()
+    queue = client.queue(name("no-sdk"))
+    forward = client.queue(name("no-sdk-forward"))
+    contexts: list[trace.SpanContext] = []
+    consumer = client.consumer(queue, wait_time=1)
+
+    @consumer.route(OrderCreated)
+    async def handle(message: fanferro.Message[OrderCreated]) -> None:
+        contexts.append(trace.get_current_span().get_span_context())
+        await forward.send(message.body)
+
+    traceparent = "00-5759e988bd862e3fe1be46a994272793-53995c3f42cd8ad8-01"
+    async with client:
+        await queue.send(OrderCreated(order_id=1), attributes={"traceparent": traceparent})
+        await consume_until(consumer, lambda: len(contexts) == 1)
+        forwarded = await drain_queue(client, forward)
+    assert trace.format_trace_id(contexts[0].trace_id) == "5759e988bd862e3fe1be46a994272793"
+    assert trace.format_span_id(contexts[0].span_id) == "53995c3f42cd8ad8"
+    assert [message.raw_attributes["traceparent"].value for message in forwarded] == [traceparent]
