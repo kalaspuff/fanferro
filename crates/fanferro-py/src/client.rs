@@ -22,7 +22,7 @@ use pythonize::depythonize;
 use crate::consumer::PyConsumerEngine;
 use crate::convert::{attributes_to_py, seconds, string_map_to_py, time_to_py};
 use crate::errors::{ConfigurationError, ShutdownError, ValidationError, to_py_err, to_py_err_with};
-use crate::runtime::{future_into_py, handle};
+use crate::runtime::{convert, future_into_py, handle};
 use crate::types::PyWireMessage;
 
 fn config_error(what: &str, err: impl std::fmt::Display) -> PyErr {
@@ -311,8 +311,7 @@ impl PyCoreClient {
         let config: ClientConfig =
             depythonize(client_config).map_err(|err| config_error("client configuration", err))?;
         future_into_py(py, async move {
-            let client = Client::connect(&aws, config).await.map_err(to_py_err)?;
-            Ok(PyCoreClient { client, pid: std::process::id() })
+            Client::connect(&aws, config).await.map(|client| PyCoreClient { client, pid: std::process::id() })
         })
     }
 
@@ -349,7 +348,7 @@ impl PyCoreClient {
     /// Account id of the caller (awaitable).
     fn account_id<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client()?;
-        future_into_py(py, async move { client.account_id().await.map_err(to_py_err) })
+        future_into_py(py, async move { client.account_id().await })
     }
 
     /// Builds a transport with destination-specific offload settings (`None` disables).
@@ -385,8 +384,8 @@ impl PyCoreClient {
         let message = message_from_kwargs(wire, message_id, group_id, deduplication_id, delay, subject, trace_header)?;
         let transport = transport.map_or_else(|| client.transport().clone(), |t| t.get().inner.clone());
         future_into_py(py, async move {
-            let receipt = client.publish_with(&transport, &destination, message).await.map_err(to_py_err)?;
-            Python::attach(|py| receipt_to_py(py, &receipt))
+            let receipt = client.publish_with(&transport, &destination, message).await;
+            convert(receipt, |py, receipt| receipt_to_py(py, &receipt))
         })
     }
 
@@ -404,8 +403,8 @@ impl PyCoreClient {
         let messages = messages.try_iter()?.map(|item| message_from_dict(&item?)).collect::<PyResult<Vec<_>>>()?;
         let transport = transport.map_or_else(|| client.transport().clone(), |t| t.get().inner.clone());
         future_into_py(py, async move {
-            let results = client.publish_batch_with(&transport, &destination, messages).await.map_err(to_py_err)?;
-            Python::attach(|py| -> PyResult<Py<PyAny>> {
+            let results = client.publish_batch_with(&transport, &destination, messages).await;
+            convert(results, |py, results| {
                 let list = PyList::empty(py);
                 for result in &results {
                     match result {
@@ -423,8 +422,8 @@ impl PyCoreClient {
         let client = self.client()?;
         let spec: QueueSpec = depythonize(spec).map_err(|err| config_error("queue spec", err))?;
         future_into_py(py, async move {
-            let report = client.ensure_queue(&spec).await.map_err(to_py_err)?;
-            Python::attach(|py| report_to_py(py, &report, queue_info_to_py))
+            let report = client.ensure_queue(&spec).await;
+            convert(report, |py, report| report_to_py(py, &report, queue_info_to_py))
         })
     }
 
@@ -433,8 +432,8 @@ impl PyCoreClient {
         let client = self.client()?;
         let spec: TopicSpec = depythonize(spec).map_err(|err| config_error("topic spec", err))?;
         future_into_py(py, async move {
-            let report = client.ensure_topic(&spec).await.map_err(to_py_err)?;
-            Python::attach(|py| report_to_py(py, &report, topic_info_to_py))
+            let report = client.ensure_topic(&spec).await;
+            convert(report, |py, report| report_to_py(py, &report, topic_info_to_py))
         })
     }
 
@@ -443,8 +442,8 @@ impl PyCoreClient {
         let client = self.client()?;
         let spec: SubscriptionSpec = depythonize(spec).map_err(|err| config_error("subscription spec", err))?;
         future_into_py(py, async move {
-            let report = client.ensure_subscription(&spec).await.map_err(to_py_err)?;
-            Python::attach(|py| report_to_py(py, &report, subscription_info_to_py))
+            let report = client.ensure_subscription(&spec).await;
+            convert(report, |py, report| report_to_py(py, &report, subscription_info_to_py))
         })
     }
 
@@ -452,54 +451,51 @@ impl PyCoreClient {
     fn ensure_bucket<'py>(&self, py: Python<'py>, bucket: String, create: bool) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client()?;
         future_into_py(py, async move {
-            let report = client.ensure_bucket(&bucket, create).await.map_err(to_py_err)?;
-            Python::attach(|py| report_to_py(py, &report, |py, name| name.into_py_any(py)))
+            let report = client.ensure_bucket(&bucket, create).await;
+            convert(report, |py, report| report_to_py(py, &report, |py, name| name.into_py_any(py)))
         })
     }
 
     /// Deletes a queue.
     fn delete_queue<'py>(&self, py: Python<'py>, url: String) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client()?;
-        future_into_py(py, async move { client.delete_queue(&url).await.map_err(to_py_err) })
+        future_into_py(py, async move { client.delete_queue(&url).await })
     }
 
     /// Deletes a topic.
     fn delete_topic<'py>(&self, py: Python<'py>, arn: String) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client()?;
-        future_into_py(py, async move { client.delete_topic(&arn).await.map_err(to_py_err) })
+        future_into_py(py, async move { client.delete_topic(&arn).await })
     }
 
     /// Removes a subscription.
     fn unsubscribe<'py>(&self, py: Python<'py>, arn: String) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client()?;
-        future_into_py(py, async move { client.unsubscribe(&arn).await.map_err(to_py_err) })
+        future_into_py(py, async move { client.unsubscribe(&arn).await })
     }
 
     /// Deletes all messages of a queue.
     fn purge_queue<'py>(&self, py: Python<'py>, url: String) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client()?;
-        future_into_py(py, async move { client.purge_queue(&url).await.map_err(to_py_err) })
+        future_into_py(py, async move { client.purge_queue(&url).await })
     }
 
     /// Reads queue attributes (awaitable dict).
     fn queue_attributes<'py>(&self, py: Python<'py>, url: String) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client()?;
-        future_into_py(py, async move { client.queue_attributes(&url).await.map_err(to_py_err) })
+        future_into_py(py, async move { client.queue_attributes(&url).await })
     }
 
     /// Reads topic attributes (awaitable dict).
     fn topic_attributes<'py>(&self, py: Python<'py>, arn: String) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client()?;
-        future_into_py(py, async move { client.topic_attributes(&arn).await.map_err(to_py_err) })
+        future_into_py(py, async move { client.topic_attributes(&arn).await })
     }
 
     /// Deletes an offloaded payload object.
     fn delete_payload<'py>(&self, py: Python<'py>, bucket: String, key: String) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client()?;
-        future_into_py(
-            py,
-            async move { client.backend().objects.delete_object(&bucket, &key).await.map_err(to_py_err) },
-        )
+        future_into_py(py, async move { client.backend().objects.delete_object(&bucket, &key).await })
     }
 
     /// Creates a consumer engine for a queue (call `start()` on it).
@@ -530,7 +526,7 @@ impl PyCoreClient {
         let timeout = seconds(Some(timeout), "timeout")?.unwrap_or(Duration::from_secs(1));
         future_into_py(py, async move {
             let events = client.events().next_batch(max, timeout).await;
-            Python::attach(|py| -> PyResult<Py<PyAny>> {
+            convert(Ok(events), |py, events| {
                 let list = PyList::empty(py);
                 for event in &events {
                     list.append(event_to_py(py, event)?)?;

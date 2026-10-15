@@ -8,6 +8,15 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 
 ## [Unreleased]
 
+### Faster publishing and consuming
+
+Awaitables, publishing and consuming cost much less per message (`scripts/benchmark.py` measures
+it). Behaviour is unchanged, except:
+
+- Each event loop that awaits fanferro operations holds a socket pair (two file descriptors) until
+  the loop is closed; delivering results no longer starts threads.
+- A panic in the Rust core raises `FanferroError` instead of `pyo3_async_runtimes.RustPanic`.
+
 ## [0.3.0] - 2026-10-15
 
 ### Queue and topic names are checked when they are declared

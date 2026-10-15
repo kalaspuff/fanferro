@@ -107,18 +107,24 @@ These are relied upon across layers; tests cover each of them.
     work in the child instead of corrupting connections.
 11. **Clean interpreter exit.** An `atexit` hook stops the runtime (GIL released, bounded wait)
     before the interpreter finalizes, so no Rust thread touches Python during finalization
-    (CPython 3.12 kills such threads, which crashes the process). Afterwards awaitables raise
-    `ShutdownError`. Tests: `tests/unit/test_interpreter_lifecycle.py`.
+    (CPython 3.12 kills such threads, which crashes the process). Runtime threads hand results to
+    the event loop without attaching to the interpreter at all, except on loops that cannot watch
+    file descriptors (see below). Afterwards awaitables raise `ShutdownError`. Tests:
+    `tests/unit/test_interpreter_lifecycle.py`.
 
 ## Concurrency model
 
 * One Tokio runtime per process (`crates/fanferro-py/src/runtime.rs`), 2-4 worker threads by
-  default (`FANFERRO_WORKER_THREADS`). Rust futures become asyncio futures through
-  `pyo3-async-runtimes`; cancelling the asyncio future drops the Rust future. Settlements
-  (`delivery.ack()`, `nack()`...) are the exception: they run as tasks the engine tracks
-  (`close()` waits for them; cancelling the awaitable does not stop a started delete), and their
-  asyncio futures are resolved in batches (`runtime::Completions`: one interpreter attach and one
-  `call_soon_threadsafe` for everything that completed meanwhile).
+  default (`FANFERRO_WORKER_THREADS`). An awaitable is an asyncio future (`RustFuture`) driven by
+  one Tokio task; cancelling it aborts the task, which drops the Rust future at its next await
+  point. Outcomes are converted into Python objects on the event loop's thread, in batches: a
+  finished task queues its outcome on the bridge of its loop, and the first outcome of a batch
+  wakes the loop by writing a byte to a socket the loop watches (`loop.add_reader`), so runtime
+  threads never wait for the GIL. Loops that cannot watch file descriptors (the proactor loop on
+  Windows) get one `call_soon_threadsafe` per batch from a blocking task instead
+  ([ADR 0009](adr/0009-results-reach-asyncio-in-batches.md)). Settlements (`delivery.ack()`,
+  `nack()`...) run as tasks the engine tracks (`close()` waits for them; cancelling their
+  awaitable does not stop a started delete).
 * Per consumer engine: `pollers` receive loops, one heartbeat loop, one settle loop and one
   decode task per received batch (decoded concurrently, handed out together and in order). Lease
   state is in a `parking_lot` mutex that is never held across an `.await`. An ack queues its delete

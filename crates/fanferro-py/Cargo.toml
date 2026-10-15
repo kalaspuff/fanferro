@@ -19,8 +19,8 @@ doctest = false
 
 [dependencies]
 fanferro-core.workspace = true
+futures.workspace = true
 pyo3.workspace = true
-pyo3-async-runtimes.workspace = true
 pythonize.workspace = true
 bytes.workspace = true
 parking_lot.workspace = true
