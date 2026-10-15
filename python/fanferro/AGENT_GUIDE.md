@@ -105,6 +105,24 @@ Consumer options: `concurrency`, `prefetch`, `batch_size`, `min_receive_batch`,
 `auto_ack`, `settle_linger`, `sns_unwrap`, `auto_confirm_subscriptions`,
 `delete_offloaded_payloads`, `name`.
 
+## Credentials and region
+
+Leave `credentials=` unset in production: fanferro then uses the AWS SDK default provider chain,
+which reads the same environment variables and files as boto3 and the AWS CLI. First match wins:
+
+1. `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` environment variables
+2. `~/.aws/config` and `~/.aws/credentials`: profile from `profile=`, else `AWS_PROFILE`, else
+   `default` (SSO, `credential_process` and role profiles work)
+3. Web identity: `AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN` (EKS IRSA)
+4. Container credentials: ECS task role, EKS Pod Identity
+5. EC2 instance metadata (instance profile)
+
+Temporary credentials are cached and refreshed automatically. Environment credentials win over
+`profile=`. Region: `region=`, else `AWS_REGION` / `AWS_DEFAULT_REGION`, else the profile, else
+instance metadata; a missing region fails when the client connects (`async with client:` or the
+first operation), not in `Client(...)`. `account_id` is looked up with STS when unset. Use
+`credentials=fanferro.Credentials("test", "test")` only for emulators and tests.
+
 ## Handler signatures
 
 ```python

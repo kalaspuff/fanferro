@@ -38,8 +38,34 @@ one tolerates longer stalls (GC, network partitions) before redelivery.
 
 ## Credentials and regions
 
-fanferro uses the standard AWS provider chain (environment, profile, SSO, web identity / IRSA,
-ECS task role, EC2 instance profile). Set `region=` explicitly in multi-region code. For
+Without `credentials=`, fanferro uses the default credential provider chain of the AWS SDK for
+Rust. It reads the same environment variables and files as boto3 and the AWS CLI, so a setup that
+works for them works for fanferro. The first source that provides credentials wins:
+
+1. **Environment variables**: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and optionally
+   `AWS_SESSION_TOKEN`.
+2. **Shared config and credentials files** (`~/.aws/config`, `~/.aws/credentials`): the profile
+   passed as `profile=`, else `AWS_PROFILE`, else `default`. SSO profiles, `credential_process`
+   and role profiles (`role_arn` + `source_profile`) are supported.
+3. **Web identity token**: `AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN` (EKS IRSA).
+4. **Container credentials**: the ECS task role, EKS Pod Identity (`AWS_CONTAINER_CREDENTIALS_*`).
+5. **EC2 instance metadata (IMDS)**: the instance profile role.
+
+The SDK caches the credentials and refreshes temporary ones before they expire; long-running
+consumers need no special handling.
+
+Watch out: environment variables come before the files, so `AWS_ACCESS_KEY_ID` in the environment
+wins over `profile=`. Pass `credentials=fanferro.Credentials(...)` to bypass the chain entirely
+(emulators and tests; prefer the chain in production).
+
+Without `region=`, the region comes from `AWS_REGION` (or `AWS_DEFAULT_REGION`), then the
+profile, then instance metadata. If none provides one, connecting fails with
+`no AWS region configured; pass region=... or set AWS_REGION`. The client connects lazily, on
+`async with client:`, `await client.connect()` or the first operation, so this error appears
+there, not when `Client(...)` is constructed. Set `region=` explicitly in multi-region code.
+
+Without `account_id=`, fanferro looks the account id up once with STS `GetCallerIdentity` when it
+needs it (topic ARNs, assumed queue URLs). Pass `account_id=` to skip that call. For
 cross-account queues pass `owner_account_id=` to `client.queue`.
 
 ## Least privilege
