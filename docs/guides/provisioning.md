@@ -89,4 +89,7 @@ does not modify key policies.
 | Create / update | `sqs:CreateQueue`, `sqs:SetQueueAttributes`, `sqs:TagQueue`, `sns:CreateTopic`, `sns:SetTopicAttributes`, `sns:TagResource`, `sns:Subscribe`, `sns:SetSubscriptionAttributes` |
 | Large payloads | `s3:PutObject` (publisher), `s3:GetObject` (consumer, unless presigned URLs), `s3:DeleteObject` (if deleting), `kms:*` as required by SSE-KMS |
 
-With `Provisioning.assume()` only the data-plane actions are needed.
+With `Provisioning.assume()` only the data-plane actions are needed. When several environments
+share an account, `Client(queue_prefix=..., topic_prefix=...)` names their resources apart and
+lets a policy grant one environment's resources only: see
+[Deployment → Several environments in one AWS account](deployment.md#several-environments-in-one-aws-account).

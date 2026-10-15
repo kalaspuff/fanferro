@@ -421,11 +421,14 @@ class DeadLetterQueue:
     """The dead-letter queue of a queue (provisioned first and wired up with a ``RedrivePolicy``).
 
     Attributes:
-        name: Dead-letter queue name (FIFO queues need a FIFO dead-letter queue).
+        name: Dead-letter queue name without the client's ``queue_prefix`` (FIFO queues need a
+            FIFO dead-letter queue).
         max_receive_count: Receives after which SQS moves a message to the dead-letter queue.
         attributes: Attributes of the dead-letter queue (e.g. a long ``message_retention``).
         tags: Tags of the dead-letter queue.
         provisioning: Policy for the dead-letter queue (defaults to the queue's policy).
+        prefixed: Prepend the client's ``queue_prefix`` to ``name`` (``False`` for a dead-letter
+            queue shared by several environments).
     """
 
     name: str
@@ -435,6 +438,7 @@ class DeadLetterQueue:
     )
     tags: Mapping[str, str] = field(default_factory=dict)
     provisioning: Provisioning | None = None
+    prefixed: bool = True
 
     def __post_init__(self) -> None:
         if not 1 <= self.max_receive_count <= 1000:

@@ -123,6 +123,27 @@ instance metadata; a missing region fails when the client connects (`async with 
 first operation), not in `Client(...)`. `account_id` is looked up with STS when unset. Use
 `credentials=fanferro.Credentials("test", "test")` only for emulators and tests.
 
+## Several environments in one AWS account
+
+```python
+env = os.environ["APP_ENV"]  # e.g. "staging"
+client = fanferro.Client(queue_prefix=f"{env}-", topic_prefix=f"{env}-")
+orders = client.topic("orders")  # AWS name: staging-orders
+worker = client.queue("orders-worker", dead_letter=fanferro.DeadLetterQueue("orders-worker-dlq"))
+client.subscription("orders", "orders-worker")  # names given as strings get the prefix too
+audit = client.topic("shared-audit", prefixed=False)  # shared by all environments
+```
+
+Write every name without the prefix: fanferro adds it to every queue and topic name, dead-letter
+queues and names passed as strings included, and never checks whether a name already has it.
+Queues given by `url=` and topics given by `arn=` are never prefixed. Pass `prefixed=False`
+resources as handles, and give a shared queue's `DeadLetterQueue` `prefixed=False` too (otherwise
+every environment rewires the queue's redrive policy). `queue.name`, `client.queues`, events,
+metrics and outbox records carry the prefixed name: compare with `topic.name` in matchers
+(`m.topic() == orders.name`) and give an outbox relay the same prefixes. Names are checked when
+declared: letters, digits, `-`, `_`, a `.fifo` suffix, at most 80 characters for queues and 256
+for topics, prefix included.
+
 ## Handler signatures
 
 ```python
@@ -243,6 +264,9 @@ async def test_flow() -> None:
   fanferro's retries finish (fanferro logs a `config.warning`).
 * Using more than 10 attributes, empty attribute values, or names starting with `fanferro.`.
 * Combining matchers without parentheses: `(m.topic() == "a") | (m.topic() == "b")`.
+* Building environment names by hand (`f"{env}-orders"`) instead of `Client(queue_prefix=...,
+  topic_prefix=...)`: one forgotten prefix silently declares (and may create) an unprefixed
+  resource. With the client prefixes set, a hand-built name gets the prefix twice.
 * Expecting exactly-once delivery: design for at-least-once.
 * Long `wait_time` in tests: stopping aborts the long poll in flight, but SQS keeps serving it for
   up to `wait_time` and may hide a message sent meanwhile for a visibility timeout; use

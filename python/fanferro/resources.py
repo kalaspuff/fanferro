@@ -403,7 +403,7 @@ class _Destination(_Resource):
 
 
 class Topic(_Destination):
-    """An SNS topic."""
+    """An SNS topic. Its ``name`` is the AWS name, including the client's ``topic_prefix``."""
 
     @property
     def kind(self) -> Literal["topic"]:
@@ -496,7 +496,7 @@ class Topic(_Destination):
 
 
 class Queue(_Destination):
-    """An SQS queue."""
+    """An SQS queue. Its ``name`` is the AWS name, including the client's ``queue_prefix``."""
 
     @property
     def kind(self) -> Literal["queue"]:
@@ -541,6 +541,7 @@ class Queue(_Destination):
                 )
             self._dead_letter_queue = client.queue(
                 dead_letter.name,
+                prefixed=dead_letter.prefixed,
                 attributes=dead_letter.attributes,
                 tags=dead_letter.tags,
                 provisioning=dead_letter.provisioning or provisioning,

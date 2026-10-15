@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import re
 import signal
 from typing import TYPE_CHECKING, Any, Literal, Self, overload
 
@@ -43,12 +44,50 @@ __all__ = ["Client"]
 
 _FORK_HOOK_REGISTERED = False
 
+_NAME_LIMITS = {"queue": ("SQS", 80), "topic": ("SNS", 256)}
+"""Service and maximum length (``.fifo`` suffix included) of queue and topic names."""
+_VALID_NAME = re.compile(r"[A-Za-z0-9_-]+(?:\.fifo)?")
+_VALID_PREFIX = re.compile(r"[A-Za-z0-9_-]*")
+
 
 def _register_fork_hook() -> None:
     global _FORK_HOOK_REGISTERED
     if not _FORK_HOOK_REGISTERED and hasattr(os, "register_at_fork"):
         os.register_at_fork(after_in_child=_core._reset_after_fork)
         _FORK_HOOK_REGISTERED = True
+
+
+def _checked_prefix(argument: str, kind: Literal["queue", "topic"], prefix: str) -> str:
+    """Validates ``queue_prefix``/``topic_prefix``: characters AWS allows in names, no ``.fifo``."""
+    if ".fifo" in prefix:
+        raise ConfigurationError(f"{argument} {prefix!r} must not contain '.fifo' (the suffix of FIFO {kind} names)")
+    if not _VALID_PREFIX.fullmatch(prefix):
+        raise ConfigurationError(
+            f"{argument} {prefix!r} may only contain letters, digits, '-' and '_', "
+            f"like the {kind} names it is prepended to"
+        )
+    return prefix
+
+
+def _resource_name(kind: Literal["queue", "topic"], name: str, prefix: str = "") -> str:
+    """The AWS name of a queue or topic, ``prefix + name``, checked against the AWS naming rules.
+
+    The prefix is never guessed: ``name`` is taken as given, so a name that already starts with
+    the prefix gets it twice.
+    """
+    if not name:
+        raise ConfigurationError(f"{kind} name must not be empty")
+    full = prefix + name
+    described = f"{kind} name {full!r}" + (f" (prefix {prefix!r} + {name!r})" if prefix else "")
+    if not _VALID_NAME.fullmatch(full):
+        raise ConfigurationError(
+            f"{described} may only contain letters, digits, '-' and '_' (FIFO {kind}s end in '.fifo')"
+        )
+    service, limit = _NAME_LIMITS[kind]
+    if len(full) > limit:
+        shorten = "the prefix or the name" if prefix else "the name"
+        raise ConfigurationError(f"{described} is {len(full)} characters; {service} allows {limit} - shorten {shorten}")
+    return full
 
 
 class Client:
@@ -73,6 +112,13 @@ class Client:
         profile: Named AWS profile.
         credentials: Static credentials (default: the AWS provider chain).
         account_id: AWS account id (avoids an STS call when deriving topic ARNs).
+        queue_prefix: Prepended as is to every queue name, dead-letter queues included, e.g.
+            ``"staging-"`` when several environments share an AWS account (letters, digits, ``-``
+            and ``_``). Queues are always declared and referred to without it, while
+            ``queue.name``, events and metrics carry the prefixed name. Opt a queue out with
+            ``prefixed=False``; a queue given by ``url`` is never prefixed.
+        topic_prefix: Prepended as is to every topic name, like ``queue_prefix``; a topic given by
+            ``arn`` is never prefixed.
         source: CloudEvents ``source`` of published messages, e.g. ``"urn:service:orders"`` (only
             carried by CloudEvents envelopes).
         envelope: Envelope for publishing (default: :class:`~fanferro.envelopes.Raw`: the payload
@@ -109,6 +155,8 @@ class Client:
         profile: str | None = None,
         credentials: Credentials | None = None,
         account_id: str | None = None,
+        queue_prefix: str = "",
+        topic_prefix: str = "",
         source: str = "fanferro",
         envelope: Envelope | None = None,
         accept_envelopes: Sequence[Envelope] | None = None,
@@ -130,6 +178,8 @@ class Client:
         app_name: str | None = None,
         auto_provision: bool = True,
     ) -> None:
+        self.queue_prefix = _checked_prefix("queue_prefix", "queue", queue_prefix)
+        self.topic_prefix = _checked_prefix("topic_prefix", "topic", topic_prefix)
         _register_fork_hook()
         self.region = region
         self.endpoint_url = endpoint_url
@@ -335,6 +385,7 @@ class Client:
         name: str | None = None,
         *,
         arn: str | None = None,
+        prefixed: bool = True,
         attributes: TopicAttributes | Mapping[str, str] | None = None,
         tags: Mapping[str, str] | None = None,
         provisioning: Provisioning | None = None,
@@ -346,8 +397,12 @@ class Client:
         """Declares (or returns the already declared) SNS topic.
 
         Args:
-            name: Topic name (``.fifo`` suffix for FIFO topics). Optional when ``arn`` is given.
-            arn: Topic ARN (skips deriving it from the account id).
+            name: Topic name without the client's ``topic_prefix`` (``.fifo`` suffix for FIFO
+                topics). Optional when ``arn`` is given.
+            arn: Topic ARN (skips deriving it from the account id). The topic is then named as in
+                the ARN (or by ``name``), without the prefix.
+            prefixed: Prepend the client's ``topic_prefix`` to ``name`` (``False`` for a topic
+                shared by several environments).
             attributes: Desired attributes (:class:`~fanferro.TopicAttributes` or raw AWS names).
             tags: Desired tags.
             provisioning: Provisioning policy (default: the client's).
@@ -356,10 +411,13 @@ class Client:
             group_id: Default FIFO group id or a function computing it from the message.
             codec: Codec (or codec name) for this topic.
         """
-        if name is None:
-            if arn is None:
-                raise ConfigurationError("topic() needs a name or an arn")
-            name = arn.rsplit(":", 1)[-1]
+        if arn is not None:
+            # The ARN identifies the topic itself, so its name is used as is.
+            name = _resource_name("topic", arn.rsplit(":", 1)[-1] if name is None else name)
+        elif name is not None:
+            name = _resource_name("topic", name, self.topic_prefix if prefixed else "")
+        else:
+            raise ConfigurationError("topic() needs a name or an arn")
         existing = self._topics.get(name)
         if existing is not None:
             if any(
@@ -389,6 +447,7 @@ class Client:
         *,
         url: str | None = None,
         owner_account_id: str | None = None,
+        prefixed: bool = True,
         attributes: QueueAttributes | Mapping[str, str] | None = None,
         tags: Mapping[str, str] | None = None,
         dead_letter: DeadLetterQueue | None = None,
@@ -401,9 +460,13 @@ class Client:
         """Declares (or returns the already declared) SQS queue.
 
         Args:
-            name: Queue name (``.fifo`` suffix for FIFO queues). Optional when ``url`` is given.
-            url: Queue URL (skips ``GetQueueUrl``).
+            name: Queue name without the client's ``queue_prefix`` (``.fifo`` suffix for FIFO
+                queues). Optional when ``url`` is given.
+            url: Queue URL (skips ``GetQueueUrl``). The queue is then named as in the URL (or by
+                ``name``), without the prefix.
             owner_account_id: Owner account for cross-account queues.
+            prefixed: Prepend the client's ``queue_prefix`` to ``name`` (``False`` for a queue
+                shared by several environments).
             attributes: Desired attributes (:class:`~fanferro.QueueAttributes` or raw AWS names).
             tags: Desired tags.
             dead_letter: Dead-letter queue to provision and wire up with a redrive policy.
@@ -413,10 +476,13 @@ class Client:
             group_id: Default FIFO group id or a function computing it from the message.
             codec: Codec (or codec name) for this queue.
         """
-        if name is None:
-            if url is None:
-                raise ConfigurationError("queue() needs a name or a url")
-            name = url.rstrip("/").rsplit("/", 1)[-1]
+        if url is not None:
+            # The URL identifies the queue itself, so its name is used as is.
+            name = _resource_name("queue", url.rstrip("/").rsplit("/", 1)[-1] if name is None else name)
+        elif name is not None:
+            name = _resource_name("queue", name, self.queue_prefix if prefixed else "")
+        else:
+            raise ConfigurationError("queue() needs a name or a url")
         existing = self._queues.get(name)
         if existing is not None:
             configured = (url, owner_account_id, attributes, tags, dead_letter, provisioning, envelope, group_id, codec)
@@ -455,13 +521,13 @@ class Client:
         """Declares a subscription of ``queue`` to ``topic`` (SNS fan-out to SQS).
 
         Args:
-            topic: Topic handle or name.
-            queue: Queue handle or name.
+            topic: Topic handle, or a topic name (the client's ``topic_prefix`` is prepended).
+            queue: Queue handle, or a queue name (the client's ``queue_prefix`` is prepended).
             raw_message_delivery: Deliver messages unwrapped (recommended; attributes become SQS
                 message attributes). fanferro also understands wrapped SNS notifications.
             filter_policy: SNS filter policy, e.g. ``{"fanferro.type": ["orders.created"]}``.
             filter_policy_scope: ``"MessageAttributes"`` (default) or ``"MessageBody"``.
-            dead_letter_queue: Queue receiving messages SNS fails to deliver.
+            dead_letter_queue: Queue (handle or name) receiving messages SNS fails to deliver.
             manage_queue_policy: Allow the topic to send to the queue (and the dead-letter queue).
             provisioning: Provisioning policy (default: the client's).
         """
@@ -491,12 +557,12 @@ class Client:
 
     @property
     def topics(self) -> dict[str, Topic]:
-        """Declared topics by name."""
+        """Declared topics by AWS name (with the ``topic_prefix``)."""
         return dict(self._topics)
 
     @property
     def queues(self) -> dict[str, Queue]:
-        """Declared queues by name."""
+        """Declared queues by AWS name (with the ``queue_prefix``)."""
         return dict(self._queues)
 
     @property
@@ -611,7 +677,7 @@ class Client:
         """Creates a consumer for ``queue``.
 
         Args:
-            queue: Queue handle or name.
+            queue: Queue handle, or a queue name (the client's ``queue_prefix`` is prepended).
             handler: A handler (receives every message), a :class:`~fanferro.Router`, or ``None``
                 to add routes later with ``@consumer.route(...)``.
             **options: :class:`~fanferro.Consumer` options: ``concurrency``, ``prefetch``,

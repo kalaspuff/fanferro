@@ -10,7 +10,8 @@
 * [Observability](guides/observability.md) - events, logging, hooks, OpenTelemetry, metrics
 * [Patterns](guides/patterns.md) - transactional outbox, inbox, fan-out, versioning, ordering
 * [Testing](guides/testing.md) - in-memory broker, handler unit tests, MiniStack
-* [Deployment](guides/deployment.md) - permissions, graceful shutdown, processes, tuning
+* [Deployment](guides/deployment.md) - permissions, environments sharing an account, graceful
+  shutdown, processes, tuning
 
 Reference: [configuration](reference/configuration.md) · [events](reference/events.md) ·
 [attributes](reference/attributes.md) · [errors](reference/errors.md)

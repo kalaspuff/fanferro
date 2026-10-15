@@ -308,7 +308,11 @@ class _TopicField(Field):
 
 
 def topic() -> Field:
-    """The SNS topic ARN the message was published to (``== "name"`` matches the topic name too)."""
+    """The SNS topic ARN the message was published to.
+
+    ``== "name"`` matches the topic's AWS name too, which includes a ``topic_prefix``: compare with
+    ``topic.name`` of the declared topic.
+    """
     return _TopicField(lambda message: message.topic_arn if message.topic_arn is not None else MISSING, "topic()")
 
 
