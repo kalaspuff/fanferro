@@ -1,16 +1,23 @@
 //! Batched settlement: deletes and visibility changes grouped into batch calls.
 //!
-//! The first pending settlement opens a batch that stays open for at most `linger`. It is sent
-//! as soon as one call's worth (ten deletes or ten visibility changes) is pending, when nothing
-//! else can join it (every handler waits for a settlement of this batch, see
-//! [`SettleCommand::waiting_handlers`]), when a settlement is urgent (shutdown), or when the
-//! linger expires. Settlements already queued at that point go along.
+//! Every ten deletes (or ten visibility changes) are sent at once, also while earlier calls are
+//! still in flight. Fewer wait for more, at most `linger` after the oldest of them was queued; they
+//! are sent earlier when nothing else can join them (every handler waits for one of these
+//! settlements, see [`SettleCommand::waiting_handlers`]) or when a settlement is urgent
+//! (shutdown).
+//!
+//! Leases queue settlements in a [`SettleQueue`] shared with the settle loop. Queueing wakes the
+//! loop only when it can then send something sooner than planned: for the first pending settlement
+//! (which starts the linger), a full batch, or an urgent or awaited settlement. Most settlements
+//! (background acks, many at a time) therefore cost no task wake-up of their own.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::future::join_all;
-use tokio::sync::{mpsc, oneshot};
+use futures::StreamExt as _;
+use futures::stream::FuturesUnordered;
+use parking_lot::Mutex;
+use tokio::sync::{Notify, oneshot};
 use tokio::time::Instant;
 
 use crate::backend::{BatchEntryError, VisibilityChange};
@@ -79,38 +86,92 @@ impl SettleCommand {
     }
 }
 
-/// Settlements collected for the next round of batch calls.
+/// Settlements waiting to be sent, shared by the leases that queue them and the settle loop.
+#[derive(Default)]
+pub(crate) struct SettleQueue {
+    pending: Mutex<Pending>,
+    wake: Notify,
+}
+
+impl SettleQueue {
+    /// Queues a settlement (hands it back when the consumer is closed).
+    pub(crate) fn push(&self, command: SettleCommand) -> std::result::Result<(), SettleCommand> {
+        let wake = {
+            let mut pending = self.pending.lock();
+            if pending.closed {
+                return Err(command);
+            }
+            let first = pending.is_empty();
+            let hurry = command.urgent || command.awaited || command.waiting_handlers.is_some();
+            let full = pending.push(command);
+            first || hurry || full
+        };
+        if wake {
+            self.wake.notify_one();
+        }
+        Ok(())
+    }
+
+    /// Stops accepting settlements: the loop sends what is pending, waits for its calls and returns.
+    pub(crate) fn close(&self) {
+        self.pending.lock().closed = true;
+        self.wake.notify_one();
+    }
+}
+
+/// Settlements waiting to be sent (each kind becomes its own batch calls).
+#[derive(Default)]
 struct Pending {
-    commands: Vec<SettleCommand>,
-    deletes: usize,
-    urgent: bool,
-    awaited: usize,
+    deletes: Vec<SettleCommand>,
+    changes: Vec<SettleCommand>,
+    /// Send the partial batches now (an urgent settlement arrived).
+    send_now: bool,
+    /// See [`SettleCommand::waiting_handlers`] (the latest value since partial batches were sent).
     waiting_handlers: Option<usize>,
+    closed: bool,
 }
 
 impl Pending {
-    fn new(first: SettleCommand) -> Self {
-        let mut pending = Self { commands: Vec::new(), deletes: 0, urgent: false, awaited: 0, waiting_handlers: None };
-        pending.push(first);
-        pending
-    }
-
-    fn push(&mut self, command: SettleCommand) {
-        self.deletes += usize::from(command.kind == SettleKind::Delete);
-        self.urgent |= command.urgent;
-        self.awaited += usize::from(command.awaited);
+    /// Adds a settlement; returns whether it completed a batch.
+    fn push(&mut self, command: SettleCommand) -> bool {
+        self.send_now |= command.urgent;
         if command.waiting_handlers.is_some() {
             self.waiting_handlers = command.waiting_handlers;
         }
-        self.commands.push(command);
+        let commands = if command.kind == SettleKind::Delete { &mut self.deletes } else { &mut self.changes };
+        commands.push(command);
+        commands.len() % MAX_BATCH_ENTRIES == 0
     }
 
-    /// Whether waiting longer cannot make the next call fuller (or a caller cannot wait).
-    fn ready(&self) -> bool {
-        self.urgent
-            || self.deletes >= MAX_BATCH_ENTRIES
-            || self.commands.len() - self.deletes >= MAX_BATCH_ENTRIES
-            || self.waiting_handlers.is_some_and(|waiting| self.awaited >= waiting)
+    fn is_empty(&self) -> bool {
+        self.deletes.is_empty() && self.changes.is_empty()
+    }
+
+    /// When the oldest pending settlement was queued.
+    fn oldest(&self) -> Option<Instant> {
+        self.deletes.iter().chain(&self.changes).map(|command| command.queued_at).min()
+    }
+
+    /// Whether waiting longer cannot make the partial batches fuller (or a caller cannot wait).
+    fn complete(&self) -> bool {
+        let awaited = || self.deletes.iter().chain(&self.changes).filter(|command| command.awaited).count();
+        self.send_now || self.waiting_handlers.is_some_and(|waiting| awaited() >= waiting)
+    }
+
+    /// Full batches, and the partial ones too when `partial` is set.
+    fn take(&mut self, partial: bool) -> Vec<Vec<SettleCommand>> {
+        let mut batches = Vec::new();
+        for commands in [&mut self.deletes, &mut self.changes] {
+            while commands.len() >= MAX_BATCH_ENTRIES || (partial && !commands.is_empty()) {
+                let rest = commands.split_off(commands.len().min(MAX_BATCH_ENTRIES));
+                batches.push(std::mem::replace(commands, rest));
+            }
+        }
+        if partial {
+            self.send_now = false;
+            self.waiting_handlers = None;
+        }
+        batches
     }
 }
 
@@ -140,46 +201,37 @@ pub(crate) struct SettleContext {
     pub backoff: Backoff,
 }
 
-/// Runs until every sender is dropped, then flushes what is left and returns.
-pub(crate) async fn settle_loop(context: SettleContext, mut receiver: mpsc::UnboundedReceiver<SettleCommand>) {
-    while let Some(first) = receiver.recv().await {
-        let deadline = first.queued_at + context.linger;
-        let mut pending = Pending::new(first);
-        while !pending.ready() {
-            // Already queued settlements join without waiting for the deadline.
-            let command = match receiver.try_recv() {
-                Ok(command) => Some(command),
-                Err(mpsc::error::TryRecvError::Disconnected) => None,
-                Err(mpsc::error::TryRecvError::Empty) => tokio::select! {
-                    command = receiver.recv() => command,
-                    () = tokio::time::sleep_until(deadline) => None,
-                },
-            };
-            match command {
-                Some(command) => pending.push(command),
-                None => break,
-            }
+/// Sends what `queue` collects until it is closed, then sends what is left, waits for the calls in
+/// flight and returns.
+pub(crate) async fn settle_loop(context: SettleContext, queue: Arc<SettleQueue>) {
+    let mut in_flight = FuturesUnordered::new();
+    loop {
+        let (batches, deadline, done) = {
+            let mut pending = queue.pending.lock();
+            let lingered = pending.oldest().is_some_and(|oldest| oldest + context.linger <= Instant::now());
+            let partial = pending.closed || lingered || pending.complete();
+            let batches = pending.take(partial);
+            let deadline = pending.oldest().map(|oldest| oldest + context.linger);
+            (batches, deadline, pending.closed && pending.is_empty())
+        };
+        for batch in batches {
+            in_flight.push(flush(&context, batch));
         }
-        while pending.commands.len() < MAX_BATCH_ENTRIES * 10 {
-            match receiver.try_recv() {
-                Ok(command) => pending.push(command),
-                Err(_) => break,
-            }
+        if done {
+            while in_flight.next().await.is_some() {}
+            return;
         }
-        let (deletes, changes): (Vec<_>, Vec<_>) =
-            pending.commands.into_iter().partition(|c| c.kind == SettleKind::Delete);
-        let mut flushes = Vec::new();
-        let mut deletes = deletes;
-        while !deletes.is_empty() {
-            let rest = deletes.split_off(deletes.len().min(MAX_BATCH_ENTRIES));
-            flushes.push(flush(&context, std::mem::replace(&mut deletes, rest)));
+        tokio::select! {
+            () = queue.wake.notified() => {}
+            Some(()) = in_flight.next(), if !in_flight.is_empty() => {}
+            () = sleep_until_some(deadline), if deadline.is_some() => {}
         }
-        let mut changes = changes;
-        while !changes.is_empty() {
-            let rest = changes.split_off(changes.len().min(MAX_BATCH_ENTRIES));
-            flushes.push(flush(&context, std::mem::replace(&mut changes, rest)));
-        }
-        join_all(flushes).await;
+    }
+}
+
+async fn sleep_until_some(deadline: Option<Instant>) {
+    if let Some(deadline) = deadline {
+        tokio::time::sleep_until(deadline).await;
     }
 }
 

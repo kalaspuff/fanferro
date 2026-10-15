@@ -5,6 +5,7 @@ use bytes::Bytes;
 
 use super::*;
 use crate::backend::memory::MemoryBroker;
+use crate::backend::testing::SlowBatches;
 use crate::backend::{SendRequest, StringMap};
 use crate::client::ClientConfig;
 use crate::events::EventKind;
@@ -315,6 +316,57 @@ async fn a_burst_of_acks_is_sent_in_full_batches() {
     let deliveries = collect(&engine, 25).await;
     ack_all(deliveries).await;
     assert_eq!(engine.stats().metrics["delete_requests"], 3);
+    engine.close(true).await;
+    assert!(fx.stored().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn full_batches_do_not_wait_for_calls_in_flight() {
+    let broker = MemoryBroker::new("us-east-1", "000000000000");
+    let mut backend = broker.backend();
+    let slow = Arc::new(SlowBatches::new(backend.sqs.clone(), Duration::from_millis(100)));
+    backend.sqs = slow.clone();
+    let client = Client::with_backend(backend, ClientConfig::default()).unwrap();
+    let url = client.backend().sqs.create_queue("work", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let fx = Fixture { broker, client, url };
+    for i in 0..20 {
+        fx.send(&format!("m{i}")).await;
+    }
+    let engine = fx.engine(|c| c.max_in_flight = 20);
+    let mut first = collect(&engine, 20).await;
+    let second = first.split_off(10);
+    let first = tokio::spawn(ack_all(first));
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    // The second batch is sent while the first call is still in flight.
+    let elapsed = ack_all(second).await;
+    assert!(elapsed < Duration::from_millis(150), "{elapsed:?}");
+    first.await.unwrap();
+    assert_eq!(slow.deletes.take_peak(), 2);
+    assert_eq!(engine.stats().metrics["delete_requests"], 2);
+    engine.close(true).await;
+    assert!(fx.stored().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_partial_batch_waits_for_more_instead_of_going_with_a_full_one() {
+    let fx = fixture(ClientConfig::default()).await;
+    for i in 0..20 {
+        fx.send(&format!("m{i}")).await;
+    }
+    let engine = fx.engine(|c| {
+        c.max_in_flight = 20;
+        c.settle.linger = 1.0;
+    });
+    let mut deliveries = collect(&engine, 20).await;
+    let rest = deliveries.split_off(13);
+    let started = tokio::time::Instant::now();
+    let first = tokio::spawn(ack_all(deliveries));
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(engine.stats().metrics["delete_requests"], 1, "ten went at once, three wait for more");
+    ack_all(rest).await;
+    first.await.unwrap();
+    assert!(started.elapsed() < Duration::from_millis(100), "no batch waited for the linger");
+    assert_eq!(engine.stats().metrics["delete_requests"], 2);
     engine.close(true).await;
     assert!(fx.stored().is_empty());
 }

@@ -110,9 +110,10 @@ slot to the next message right away; the automatic ack completes in the backgrou
 | `settle_linger` | 0.005 | seconds a batch of acks or retries waits for more before it is sent |
 
 Acks and retries are sent in batch calls (`DeleteMessageBatch`, `ChangeMessageVisibilityBatch`)
-of up to ten messages: a batch goes out as soon as it is full, or `settle_linger` after its first
-settlement. When every running handler awaits an explicit settlement (`await message.ack()`) and
-the batch holds all of them, nothing else can join it, so it is sent right away.
+of up to ten messages: a batch goes out as soon as it is full, also while earlier calls are still in
+flight, or `settle_linger` after its first settlement. When every running handler awaits an
+explicit settlement (`await message.ack()`) and the batch holds all of them, nothing else can join
+it, so it is sent right away.
 `consumer.stats()["engine"]` counts the calls (`delete_requests`, `visibility_requests`).
 
 Receives are full by default: a poller waits until `min_receive_batch` handler slots are free

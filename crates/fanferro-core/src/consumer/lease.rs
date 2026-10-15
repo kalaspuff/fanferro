@@ -16,7 +16,7 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use tokio::sync::{OwnedSemaphorePermit, mpsc, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, oneshot};
 use tokio::time::Instant;
 
 use super::EngineInner;
@@ -62,8 +62,8 @@ impl LeaseStatus {
 /// Bookkeeping for one lease (owned by the engine's lease table).
 #[derive(Debug)]
 pub(crate) struct LeaseEntry {
-    pub receipt_handle: String,
-    pub message_id: String,
+    /// The message (shared with its [`Lease`]: its receipt handle and id are not copied).
+    pub message: Arc<ReceivedMessage>,
     pub received_at: Instant,
     pub visible_until: Instant,
     pub next_heartbeat: Instant,
@@ -218,8 +218,8 @@ impl Lease {
         self.permit.lock().take();
         self.end_settling();
         let metrics = &self.inner.metrics;
-        let message_id = self.message.message_id.clone();
-        let queue = self.inner.settings.queue_url.clone();
+        let queue = self.inner.settings.queue_url.as_str();
+        let message_id = self.message.message_id.as_str();
         match (outcome, result) {
             (Outcome::Acked, Ok(())) => {
                 metrics.messages_acked.inc();
@@ -256,14 +256,14 @@ impl Lease {
     /// Hands a settlement command to the settle loop, which sends the outcome to `reply` (right
     /// away if the consumer is closed).
     pub(crate) fn queue(&self, kind: SettleKind, reply: Reply) {
-        let Some(sender) = self.inner.settle_sender() else {
+        let Some(queue) = self.inner.settle_queue() else {
             reply.send(Err(Error::Shutdown("the consumer is closed".into())));
             return;
         };
         let mut command = SettleCommand::new(self.message.receipt_handle.clone(), kind, Some(reply));
         command.awaited = self.awaited.swap(false, Ordering::SeqCst);
         command.waiting_handlers = Some(self.waiting_handlers.swap(0, Ordering::SeqCst)).filter(|&n| n > 0);
-        if let Err(mpsc::error::SendError(command)) = sender.send(command)
+        if let Err(command) = queue.push(command)
             && let Some(reply) = command.reply
         {
             reply.send(Err(Error::Shutdown("the consumer is closed".into())));
@@ -326,18 +326,15 @@ impl Lease {
         let result = self.settle(SettleKind::Visibility(delay)).await;
         self.finish(Outcome::Retried, &result);
         if result.is_ok() {
-            let message_id = self.message.message_id.clone();
-            let queue = self.inner.settings.queue_url.clone();
-            let receive_count = self.message.system.approximate_receive_count;
             self.inner.client.events().emit(EventKind::MessageRetryScheduled, || {
                 Event::new(
                     EventKind::MessageRetryScheduled,
                     format!("message will be retried in {:.1}s", delay.as_secs_f64()),
                 )
-                .field("queue", queue)
-                .field("sqs_message_id", message_id)
+                .field("queue", &self.inner.settings.queue_url)
+                .field("sqs_message_id", &self.message.message_id)
                 .field("delay_seconds", delay.as_secs_f64())
-                .field("receive_count", receive_count)
+                .field("receive_count", self.message.system.approximate_receive_count)
             });
         }
         result
@@ -349,12 +346,10 @@ impl Lease {
         let result = self.settle(SettleKind::Visibility(self.inner.visibility_floor(Duration::ZERO))).await;
         self.finish(Outcome::Released, &result);
         if result.is_ok() {
-            let message_id = self.message.message_id.clone();
-            let queue = self.inner.settings.queue_url.clone();
             self.inner.client.events().emit(EventKind::MessageReleased, || {
                 Event::new(EventKind::MessageReleased, "message released")
-                    .field("queue", queue)
-                    .field("sqs_message_id", message_id)
+                    .field("queue", &self.inner.settings.queue_url)
+                    .field("sqs_message_id", &self.message.message_id)
             });
         }
         result
@@ -395,8 +390,8 @@ impl Lease {
             Err(error) => Err(error),
         };
         self.finish(Outcome::DeadLettered, &result);
-        let message_id = self.message.message_id.clone();
-        let queue = self.inner.settings.queue_url.clone();
+        let message_id = self.message.message_id.as_str();
+        let queue = self.inner.settings.queue_url.as_str();
         match &result {
             Ok(()) => self.inner.client.events().emit(EventKind::MessageDeadLettered, || {
                 Event::new(EventKind::MessageDeadLettered, format!("message dead-lettered: {reason}"))
@@ -487,12 +482,10 @@ impl Lease {
         };
         self.finish(Outcome::Requeued, &result);
         if result.is_ok() {
-            let message_id = message.message_id.clone();
-            let queue = self.inner.settings.queue_url.clone();
             self.inner.client.events().emit(EventKind::MessageRequeued, || {
                 Event::new(EventKind::MessageRequeued, "message requeued")
-                    .field("queue", queue)
-                    .field("sqs_message_id", message_id)
+                    .field("queue", &self.inner.settings.queue_url)
+                    .field("sqs_message_id", &message.message_id)
                     .field("attempt", attempt)
                     .field("delay_seconds", delay.unwrap_or_default().as_secs_f64())
             });
@@ -516,8 +509,8 @@ impl Drop for Lease {
             return;
         }
         // Dropped without settlement: stop heartbeating and make the message visible again.
-        if let Some(sender) = self.inner.settle_sender() {
-            let _ = sender.send(SettleCommand::new(
+        if let Some(queue) = self.inner.settle_queue() {
+            let _ = queue.push(SettleCommand::new(
                 self.message.receipt_handle.clone(),
                 SettleKind::Visibility(self.inner.visibility_floor(Duration::ZERO)),
                 None,

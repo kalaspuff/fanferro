@@ -64,9 +64,10 @@ Python  dispatcher: next_batch() ─▶ per-message task (FIFO: sequenced per gr
         envelope unwrap (configured order) ─▶ Message ─▶ attempts check (max_attempts)
         router.resolve ─▶ codec decode into the route's type ─▶ middleware ─▶ handler
         success → ack (batched delete)   failure → RetryPolicy/DeadLetterPolicy
-Rust    settle loop batches DeleteMessage / ChangeMessageVisibility (sent when ten are pending,
-        after the linger, or at once when every handler awaits its settlement); DLQ forward /
-        requeue send a copy (original body + attributes + fanferro.dead-letter / fanferro.attempt)
+Rust    settle loop batches DeleteMessage / ChangeMessageVisibility (ten at once, also while
+        earlier calls are in flight; fewer after the linger, or at once when every handler awaits a
+        settlement of the batch); DLQ forward / requeue send a copy (original body + attributes +
+        fanferro.dead-letter / fanferro.attempt)
 ```
 
 ## Invariants
@@ -122,7 +123,9 @@ These are relied upon across layers; tests cover each of them.
   decode task per received batch (decoded concurrently, handed out together and in order). Lease
   state is in a `parking_lot` mutex that is never held across an `.await`. An ack queues its delete
   synchronously when a settling permit is free, so acks reach the settle loop in the order they
-  were requested; the settle loop finishes the lease when the batch call returns.
+  were requested; queueing wakes the loop only when it can then send something sooner (the first
+  pending settlement, a full batch, an urgent or awaited settlement). The loop sends full batches
+  while earlier calls are in flight and finishes each lease when its batch call returns.
 * Per Python consumer: one dispatcher task, one task per message (or per FIFO group), a
   semaphore of `concurrency` permits held while decoding, middleware and the handler run; the
   task settles the message after giving its permit back. Automatic acks are not awaited: the
