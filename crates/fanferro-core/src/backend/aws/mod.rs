@@ -168,12 +168,6 @@ pub async fn connect(config: &AwsConfig) -> Result<Backend> {
     let s3_config = aws_sdk_s3::config::Builder::from(&sdk_config).force_path_style(force_path_style).build();
     let s3_client = aws_sdk_s3::Client::from_conf(s3_config);
     let sts_client = aws_sdk_sts::Client::new(&sdk_config);
-    let http = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(300))
-        .user_agent(concat!("fanferro/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|err| Error::config(format!("cannot build HTTP client: {err}")))?;
 
     let identity = AwsIdentity { client: sts_client, account_id: OnceCell::new() };
     if let Some(account_id) = &config.account_id {
@@ -186,7 +180,7 @@ pub async fn connect(config: &AwsConfig) -> Result<Backend> {
         sqs: Arc::new(AwsSqs::new(sqs_client)),
         sns: Arc::new(AwsSns::new(sns_client)),
         objects: Arc::new(AwsObjectStore::new(s3_client)),
-        http: Arc::new(ReqwestFetch { client: http }),
+        http: Arc::new(ReqwestFetch::default()),
         identity: Arc::new(identity),
     })
 }
@@ -247,16 +241,33 @@ impl IdentityApi for AwsIdentity {
     }
 }
 
-/// `reqwest`-based fetcher for presigned URLs.
-#[derive(Debug)]
+/// `reqwest`-based fetcher for presigned URLs. Its client is built on first use: building it loads
+/// the system's root certificates (milliseconds), which most applications never need.
+#[derive(Debug, Default)]
 struct ReqwestFetch {
-    client: reqwest::Client,
+    client: OnceCell<reqwest::Client>,
+}
+
+impl ReqwestFetch {
+    async fn client(&self) -> Result<&reqwest::Client> {
+        self.client
+            .get_or_try_init(|| async {
+                reqwest::Client::builder()
+                    .connect_timeout(Duration::from_secs(10))
+                    .timeout(Duration::from_secs(300))
+                    .user_agent(concat!("fanferro/", env!("CARGO_PKG_VERSION")))
+                    .build()
+                    .map_err(|err| Error::config(format!("cannot build HTTP client: {err}")))
+            })
+            .await
+    }
 }
 
 #[async_trait]
 impl HttpFetch for ReqwestFetch {
     async fn get(&self, url: &str, max_bytes: usize) -> Result<Bytes> {
-        let mut response = self.client.get(url).send().await.map_err(|err| Error::Http(redact_url_error(&err)))?;
+        let mut response =
+            self.client().await?.get(url).send().await.map_err(|err| Error::Http(redact_url_error(&err)))?;
         let status = response.status();
         if !status.is_success() {
             let error = Error::Http(format!("GET returned HTTP {status}"));
