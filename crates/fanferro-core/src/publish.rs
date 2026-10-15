@@ -7,6 +7,7 @@
 
 use std::time::Duration;
 
+use futures::StreamExt as _;
 use futures::future::join_all;
 use serde::Deserialize;
 
@@ -21,6 +22,9 @@ use crate::types::attributes::{md5_of_attributes, md5_of_body};
 
 /// Maximum entries per batch call.
 pub const MAX_BATCH_ENTRIES: usize = 10;
+/// Batch calls of one `publish_batch` in flight at once (standard destinations; FIFO destinations
+/// send their batches one after another, so that message groups keep their order).
+pub const MAX_CONCURRENT_BATCH_CALLS: usize = 8;
 /// Maximum per-message delay for SQS standard queues.
 pub const MAX_DELAY: Duration = Duration::from_secs(900);
 
@@ -283,6 +287,40 @@ impl Client {
         }
     }
 
+    /// Sends `prepared` once, moving its body and attributes into the request (no copies): for
+    /// sends that are never retried.
+    async fn send_owned(&self, destination: &Destination, prepared: Prepared) -> Result<Receipt> {
+        let Prepared { body, group_id, deduplication_id, delay, subject, trace_header, message_id } = prepared;
+        let size = body.encoded_len();
+        let (transport_message_id, sequence_number) = match destination {
+            Destination::Queue { url, .. } => {
+                let request = SendRequest {
+                    body: body.body,
+                    attributes: body.attributes,
+                    delay,
+                    group_id,
+                    deduplication_id,
+                    trace_header,
+                };
+                let output = self.inner.backend.sqs.send_message(url, request).await?;
+                (output.message_id, output.sequence_number)
+            }
+            Destination::Topic { arn, .. } => {
+                let request = PublishRequest {
+                    message: body.body,
+                    attributes: body.attributes,
+                    subject,
+                    group_id,
+                    deduplication_id,
+                    trace_header,
+                };
+                let output = self.inner.backend.sns.publish(arn, request).await?;
+                (output.message_id, output.sequence_number)
+            }
+        };
+        Ok(Receipt { message_id, transport_message_id, sequence_number, offloaded: body.offloaded, size })
+    }
+
     async fn send_once(&self, destination: &Destination, prepared: &Prepared) -> Result<Receipt> {
         match destination {
             Destination::Queue { url, .. } => {
@@ -300,8 +338,7 @@ impl Client {
 
     /// Sends one message, using the client-wide transport settings.
     pub async fn publish(&self, destination: &Destination, message: OutgoingMessage) -> Result<Receipt> {
-        let transport = self.inner.transport.clone();
-        self.publish_with(&transport, destination, message).await
+        self.publish_with(&self.inner.transport, destination, message).await
     }
 
     /// Sends one message using a specific transport (per-destination offload settings).
@@ -313,6 +350,12 @@ impl Client {
     ) -> Result<Receipt> {
         let result = async {
             let prepared = self.prepare(transport, destination, message).await?;
+            // Only a checksum mismatch is retried here (individual calls are retried by the SDK),
+            // and only standard queues are checked: other sends need no copy of the message.
+            let checked = self.inner.config.verify_md5 && matches!(destination, Destination::Queue { fifo: false, .. });
+            if !checked {
+                return self.send_owned(destination, prepared).await;
+            }
             let backoff = self.inner.config.publish_retry.backoff()?;
             let max_attempts = self.inner.config.publish_retry.max_attempts.max(1);
             let mut attempt = 0;
@@ -345,15 +388,15 @@ impl Client {
         result
     }
 
-    /// Sends many messages with batch calls (10 per call, split by size), retrying failed
+    /// Sends many messages with batch calls (10 per call, split by size; up to
+    /// [`MAX_CONCURRENT_BATCH_CALLS`] at once unless the destination is FIFO), retrying failed
     /// entries that are retryable. Results are returned in input order.
     pub async fn publish_batch(
         &self,
         destination: &Destination,
         messages: Vec<OutgoingMessage>,
     ) -> Result<Vec<Result<Receipt>>> {
-        let transport = self.inner.transport.clone();
-        self.publish_batch_with(&transport, destination, messages).await
+        self.publish_batch_with(&self.inner.transport, destination, messages).await
     }
 
     /// Batch variant of [`Client::publish_with`].
@@ -377,10 +420,14 @@ impl Client {
         let backoff = self.inner.config.publish_retry.backoff()?;
         let max_attempts = self.inner.config.publish_retry.max_attempts.max(1);
         let mut attempt = 0;
+        let concurrency = if destination.is_fifo() { 1 } else { MAX_CONCURRENT_BATCH_CALLS };
         while !pending.is_empty() {
             let mut retry: Vec<(usize, Prepared, Error)> = Vec::new();
-            for chunk in chunk_by_size(pending, destination.max_message_size()) {
-                for (index, prepared, outcome) in self.send_chunk(destination, chunk).await {
+            let chunks = chunk_by_size(pending, destination.max_message_size());
+            let mut calls = futures::stream::iter(chunks.into_iter().map(|chunk| self.send_chunk(destination, chunk)))
+                .buffered(concurrency);
+            while let Some(sent) = calls.next().await {
+                for (index, prepared, outcome) in sent {
                     match outcome {
                         Ok(receipt) => results[index] = Some(Ok(receipt)),
                         Err(err) if err.is_retryable() && attempt + 1 < max_attempts => {
@@ -390,6 +437,7 @@ impl Client {
                     }
                 }
             }
+            drop(calls);
             if retry.is_empty() {
                 break;
             }

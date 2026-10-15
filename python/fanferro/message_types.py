@@ -62,6 +62,8 @@ class MessageTypes:
         self._classes: dict[str, type] = {}
         self._accepted: dict[type, tuple[str, ...]] = {}  # names_of cache (routing, per message)
         self._accepted_codecs = -1
+        self._derived: dict[type, str] = {}  # name_of cache of codec-provided names ("": none)
+        self._derived_codecs = -1
 
     def register(self, cls: type, name: str, *aliases: str) -> None:
         """Registers ``cls`` under ``name`` (and ``aliases`` for decoding)."""
@@ -78,11 +80,16 @@ class MessageTypes:
         explicit = cls.__dict__.get(_ATTRIBUTE)
         if isinstance(explicit, str):
             return explicit
-        if self._codecs is not None:
-            name = self._codecs.type_name(cls)
-            if name:
-                return name
-        return self._naming(cls)
+        if self._codecs is None:
+            return self._naming(cls)
+        generation = self._codecs.generation
+        if generation != self._derived_codecs:  # codec-provided names may have changed
+            self._derived.clear()
+            self._derived_codecs = generation
+        derived = self._derived.get(cls)
+        if derived is None:
+            derived = self._derived[cls] = self._codecs.type_name(cls) or ""
+        return derived or self._naming(cls)
 
     def names_of(self, cls: type) -> tuple[str, ...]:
         """The primary name and every alias accepted for ``cls``."""

@@ -52,9 +52,11 @@ At most **10 attributes** per message, including fanferro's (`content-type`, `fa
 result = await queue.send_batch([ResizeImage(id=i) for i in range(100)], attributes={"source": "import"})
 ```
 
-Batches are split into calls of up to 10 entries (and by size). Entries that fail with retryable
-errors are retried; if some still fail, `BatchPublishError` is raised after the others were sent
-(`error.result.failed` lists them). Pass `raise_on_failure=False` to inspect `result.failed`.
+Batches are split into calls of up to 10 entries (and by size). Up to eight calls are in flight at
+once for standard queues and topics; FIFO destinations get one call after another, so that each
+message group keeps its order. Entries that fail with retryable errors are retried; if some still
+fail, `BatchPublishError` is raised after the others were sent (`error.result.failed` lists them).
+Pass `raise_on_failure=False` to inspect `result.failed`.
 
 ## FIFO
 

@@ -120,10 +120,47 @@ fn payload_from_kwargs(base: Payload, kwargs: Option<&Bound<'_, PyDict>>) -> PyR
 #[pymethods]
 impl PyPayload {
     #[new]
-    #[pyo3(signature = (data, **kwargs))]
-    fn new(data: &Bound<'_, PyAny>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        let base = Payload { data: bytes_from_py(data)?, ..Payload::default() };
-        Ok(Self { inner: payload_from_kwargs(base, kwargs)? })
+    #[pyo3(signature = (
+        data,
+        *,
+        content_type=None,
+        message_type=None,
+        id=None,
+        time=None,
+        source=None,
+        subject=None,
+        data_schema=None,
+        headers=None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        data: &Bound<'_, PyAny>,
+        content_type: Option<String>,
+        message_type: Option<String>,
+        id: Option<String>,
+        time: Option<&Bound<'_, PyAny>>,
+        source: Option<String>,
+        subject: Option<String>,
+        data_schema: Option<String>,
+        headers: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let time = match time {
+            Some(time) if !time.is_none() => Some(time_from_py(time)?),
+            _ => None,
+        };
+        Ok(Self {
+            inner: Payload {
+                data: bytes_from_py(data)?,
+                content_type,
+                message_type,
+                id,
+                time,
+                source,
+                subject,
+                data_schema,
+                headers: headers_from_py(headers)?,
+            },
+        })
     }
 
     /// Encoded message bytes.

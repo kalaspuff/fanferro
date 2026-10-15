@@ -38,20 +38,22 @@ fn duration_secs_i32(duration: Duration) -> i32 {
     i32::try_from(duration.as_secs()).unwrap_or(i32::MAX)
 }
 
-pub(super) fn to_sdk_attribute(value: &AttributeValue) -> Result<MessageAttributeValue> {
-    let builder = MessageAttributeValue::builder().data_type(value.data_type());
-    let builder = match value.data() {
+/// Converts an attribute for a request (moving its strings, without copying them).
+fn to_sdk_attribute(value: AttributeValue) -> Result<MessageAttributeValue> {
+    let (data_type, data) = value.into_parts();
+    let builder = MessageAttributeValue::builder().data_type(data_type);
+    let builder = match data {
         AttributeData::Text(text) => builder.string_value(text),
-        AttributeData::Binary(bytes) => builder.binary_value(Blob::new(bytes.to_vec())),
+        AttributeData::Binary(bytes) => builder.binary_value(Blob::new(Vec::from(bytes))),
     };
     builder.build().map_err(|err| Error::validation(format!("invalid message attribute: {err}")))
 }
 
-fn to_sdk_attributes(attributes: &MessageAttributes) -> Result<Option<HashMap<String, MessageAttributeValue>>> {
+fn to_sdk_attributes(attributes: MessageAttributes) -> Result<Option<HashMap<String, MessageAttributeValue>>> {
     if attributes.is_empty() {
         return Ok(None);
     }
-    attributes.iter().map(|(name, value)| Ok((name.clone(), to_sdk_attribute(value)?))).collect::<Result<_>>().map(Some)
+    attributes.into_iter().map(|(name, value)| Ok((name, to_sdk_attribute(value)?))).collect::<Result<_>>().map(Some)
 }
 
 /// Converts a received attribute (moving its strings, without copying them).
@@ -168,7 +170,7 @@ impl SqsApi for AwsSqs {
             .send_message()
             .queue_url(queue_url)
             .message_body(request.body)
-            .set_message_attributes(to_sdk_attributes(&request.attributes)?)
+            .set_message_attributes(to_sdk_attributes(request.attributes)?)
             .set_delay_seconds(request.delay.map(duration_secs_i32))
             .set_message_group_id(request.group_id)
             .set_message_deduplication_id(request.deduplication_id);
@@ -194,7 +196,7 @@ impl SqsApi for AwsSqs {
             let mut builder = SendMessageBatchRequestEntry::builder()
                 .id(index.to_string())
                 .message_body(entry.body)
-                .set_message_attributes(to_sdk_attributes(&entry.attributes)?)
+                .set_message_attributes(to_sdk_attributes(entry.attributes)?)
                 .set_delay_seconds(entry.delay.map(duration_secs_i32))
                 .set_message_group_id(entry.group_id)
                 .set_message_deduplication_id(entry.deduplication_id);

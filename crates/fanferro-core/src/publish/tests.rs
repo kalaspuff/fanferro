@@ -3,6 +3,7 @@ use bytes::Bytes;
 use super::*;
 use crate::backend::StringMap;
 use crate::backend::memory::MemoryBroker;
+use crate::backend::testing::SlowBatches;
 use crate::client::ClientConfig;
 use crate::transport::OffloadSettings;
 use crate::transport::claim_check::{EncryptionSettings, PointerFormat, ReferenceMode};
@@ -193,4 +194,48 @@ fn chunking_respects_count_and_size() {
     let entries: Vec<(usize, Prepared)> = (0..4).map(|i| (i, prepared(400))).collect();
     let chunks = chunk_by_size(entries, 1000);
     assert_eq!(chunks.iter().map(Vec::len).collect::<Vec<_>>(), vec![2, 2]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn batch_calls_overlap_except_for_fifo_destinations() {
+    let broker = MemoryBroker::new("us-east-1", "000000000000");
+    let mut backend = broker.backend();
+    let slow = std::sync::Arc::new(SlowBatches::new(backend.sqs.clone(), Duration::from_millis(100)));
+    backend.sqs = slow.clone();
+    let client = Client::with_backend(backend, ClientConfig::default()).unwrap();
+
+    // Ten batch calls, at most eight at once: two rounds instead of ten.
+    let url = client.backend().sqs.create_queue("q", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let messages = (0..95).map(|i| message(&format!("m{i}"), &format!("body {i}"))).collect();
+    let started = tokio::time::Instant::now();
+    let results = client.publish_batch(&queue(&url), messages).await.unwrap();
+    assert!(results.iter().all(Result::is_ok));
+    assert_eq!(results[94].as_ref().unwrap().message_id, "m94");
+    assert_eq!(slow.sends.take_peak(), MAX_CONCURRENT_BATCH_CALLS);
+    assert_eq!(started.elapsed(), Duration::from_millis(200));
+    assert_eq!(broker.queue_messages(&url).unwrap().len(), 95);
+
+    // FIFO: one call after another, so that the group keeps its order.
+    let fifo = client
+        .backend()
+        .sqs
+        .create_queue("q.fifo", &StringMap::from([("FifoQueue".to_string(), "true".to_string())]), &StringMap::new())
+        .await
+        .unwrap();
+    let destination = Destination::Queue {
+        url: fifo.clone(),
+        fifo: true,
+        content_based_deduplication: false,
+        max_message_size: None,
+    };
+    let messages = (0..25)
+        .map(|i| OutgoingMessage { group_id: Some("g".into()), ..message(&format!("f{i}"), &format!("{i}")) })
+        .collect();
+    let started = tokio::time::Instant::now();
+    let results = client.publish_batch(&destination, messages).await.unwrap();
+    assert!(results.iter().all(Result::is_ok));
+    assert_eq!(slow.sends.take_peak(), 1);
+    assert_eq!(started.elapsed(), Duration::from_millis(300));
+    let bodies: Vec<String> = broker.queue_messages(&fifo).unwrap().into_iter().map(|m| m.body).collect();
+    assert_eq!(bodies, (0..25).map(|i| i.to_string()).collect::<Vec<_>>());
 }

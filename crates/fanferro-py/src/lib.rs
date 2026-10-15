@@ -80,6 +80,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<envelopes::PyRaw>()?;
     m.add_class::<client::PyCoreClient>()?;
     m.add_class::<client::PyTransport>()?;
+    m.add_class::<client::PyDestination>()?;
     m.add_class::<client::PyMemoryBroker>()?;
     m.add_class::<consumer::PyConsumerEngine>()?;
     m.add_class::<consumer::PyDelivery>()?;
