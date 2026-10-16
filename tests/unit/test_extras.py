@@ -55,6 +55,38 @@ async def test_idempotency_middleware() -> None:
     assert calls == ["same", "other"]
 
 
+async def test_idempotency_middleware_releases_messages_handed_back() -> None:
+    """A handler that settles the message for another attempt must run again on the next delivery."""
+    middleware = idempotent()
+    handed_back = {
+        "retry": lambda msg: msg.retry(delay=0),
+        "requeue": lambda msg: msg.requeue(delay=0),
+        "release": lambda msg: msg.release(),
+        "dead_letter": lambda msg: msg.dead_letter("later"),
+    }
+    for name, settle in handed_back.items():
+        calls: list[str] = []
+
+        async def handler(msg: fanferro.Message[object], settle=settle, calls=calls) -> None:
+            calls.append(msg.id)
+            if len(calls) == 1:
+                await settle(msg)
+
+        await middleware(build_message({}, id=name), handler)
+        await middleware(build_message({}, id=name), handler)
+        assert calls == [name, name], name
+
+    finished = {"ack": lambda msg: msg.ack(), "discard": lambda msg: msg.discard("irrelevant")}
+    for name, settle in finished.items():
+
+        async def settling(msg: fanferro.Message[object], settle=settle) -> None:
+            await settle(msg)
+
+        await middleware(build_message({}, id=name), settling)
+        with pytest.raises(Duplicate):
+            await middleware(build_message({}, id=name), settling)
+
+
 async def test_concurrent_claims_retry() -> None:
     middleware = idempotent(retry_delay=7)
     started = asyncio.Event()
