@@ -18,7 +18,6 @@ single-process workers.
 
 from __future__ import annotations
 
-import asyncio
 import time
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol
@@ -63,32 +62,43 @@ class IdempotencyStore(Protocol):
 
 
 class InMemoryIdempotencyStore:
-    """Process-local store (tests, single-process workers)."""
+    """Process-local store (tests, single-process workers).
 
-    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+    Expired keys are forgotten (checked at most once per ``sweep_interval`` seconds), so a long-running
+    worker keeps only the keys of its last ``ttl`` seconds in memory.
+    """
+
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic, sweep_interval: float = 60.0) -> None:
         self._clock = clock
         self._entries: dict[str, tuple[Claim, float]] = {}
-        self._lock = asyncio.Lock()
+        self._sweep_interval = sweep_interval
+        self._next_sweep = clock() + sweep_interval
+
+    def _forget_expired(self, now: float) -> None:
+        if now < self._next_sweep:
+            return
+        self._next_sweep = now + self._sweep_interval
+        expired = [key for key, (_, until) in self._entries.items() if until <= now]
+        for key in expired:
+            del self._entries[key]
 
     async def claim(self, key: str, *, lock_ttl: float) -> Claim:
         """Claims ``key`` unless it is completed or claimed by someone else."""
-        async with self._lock:
-            now = self._clock()
-            entry = self._entries.get(key)
-            if entry is not None and entry[1] > now:
-                return entry[0] if entry[0] is Claim.COMPLETED else Claim.IN_PROGRESS
-            self._entries[key] = (Claim.IN_PROGRESS, now + lock_ttl)
-            return Claim.ACQUIRED
+        now = self._clock()
+        self._forget_expired(now)
+        entry = self._entries.get(key)
+        if entry is not None and entry[1] > now:
+            return entry[0] if entry[0] is Claim.COMPLETED else Claim.IN_PROGRESS
+        self._entries[key] = (Claim.IN_PROGRESS, now + lock_ttl)
+        return Claim.ACQUIRED
 
     async def complete(self, key: str, *, ttl: float) -> None:
         """Marks ``key`` as processed for ``ttl`` seconds."""
-        async with self._lock:
-            self._entries[key] = (Claim.COMPLETED, self._clock() + ttl)
+        self._entries[key] = (Claim.COMPLETED, self._clock() + ttl)
 
     async def release(self, key: str) -> None:
         """Drops the claim on ``key``."""
-        async with self._lock:
-            self._entries.pop(key, None)
+        self._entries.pop(key, None)
 
     def __len__(self) -> int:
         return len(self._entries)
