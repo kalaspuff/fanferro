@@ -15,6 +15,7 @@ Failure handling, in order of precedence for a handler error:
 
 from __future__ import annotations
 
+import math
 import random
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -72,7 +73,12 @@ class Backoff:
 
     def delay(self, attempt: int) -> float:
         """The delay before retrying after attempt number ``attempt`` (1-based)."""
-        base = min(self.maximum, self.initial * self.multiplier ** max(0, attempt - 1))
+        try:
+            # Float powers: an integer multiplier would build ever larger integers instead.
+            growth = float(self.multiplier) ** max(0, attempt - 1)
+        except OverflowError:  # beyond ~1.8e308, far past any maximum
+            growth = math.inf
+        base = min(self.maximum, self.initial * growth) if self.initial else 0.0
         if self.jitter and base > 0:
             return base * (0.5 + random.random() / 2)
         return base

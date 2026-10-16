@@ -8,7 +8,6 @@
 use std::time::Duration;
 
 use futures::StreamExt as _;
-use futures::future::join_all;
 use serde::Deserialize;
 
 use crate::backend::aws::classify;
@@ -16,6 +15,7 @@ use crate::backend::{BatchEntryError, PublishOutput, PublishRequest, SendOutput,
 use crate::client::Client;
 use crate::error::{AwsError, Error, Result};
 use crate::events::{Event, EventKind};
+use crate::retry::Backoff;
 use crate::transport::{OutgoingBody, PayloadPointer, SNS_DEFAULT_MAX_MESSAGE_SIZE, SQS_MAX_MESSAGE_SIZE, Transport};
 use crate::types::WireMessage;
 use crate::types::attributes::{md5_of_attributes, md5_of_body};
@@ -23,8 +23,12 @@ use crate::types::attributes::{md5_of_attributes, md5_of_body};
 /// Maximum entries per batch call.
 pub const MAX_BATCH_ENTRIES: usize = 10;
 /// Batch calls of one `publish_batch` in flight at once (standard destinations; FIFO destinations
-/// send their batches one after another, so that message groups keep their order).
+/// send their batches one after another, and retry a batch's failed entries before the next batch, so
+/// that message groups keep their order).
 pub const MAX_CONCURRENT_BATCH_CALLS: usize = 8;
+/// Messages of one `publish_batch` prepared at once: each may upload its payload to S3, and a large
+/// batch must not open a connection per message.
+pub const MAX_CONCURRENT_UPLOADS: usize = 16;
 /// Maximum per-message delay for SQS standard queues.
 pub const MAX_DELAY: Duration = Duration::from_secs(900);
 
@@ -139,6 +143,12 @@ pub struct Receipt {
 /// One batch entry's raw outcome: `(transport message id, sequence number, SQS send output)`.
 type EntryOutcome = std::result::Result<(String, Option<String>, Option<SendOutput>), BatchEntryError>;
 
+/// How failed batch entries are retried.
+struct BatchRetry {
+    backoff: Backoff,
+    max_attempts: u32,
+}
+
 struct Prepared {
     body: OutgoingBody,
     group_id: Option<String>,
@@ -152,6 +162,13 @@ struct Prepared {
 fn validate(destination: &Destination, message: &OutgoingMessage) -> Result<()> {
     if message.message_id.is_empty() {
         return Err(Error::validation("message_id must not be empty"));
+    }
+    if let Some(header) = &message.trace_header
+        && (header.is_empty() || !header.bytes().all(|byte| matches!(byte, b' '..=b'~')))
+    {
+        return Err(Error::validation(format!(
+            "trace_header must be an AWS X-Ray trace header (printable ASCII), got {header:?}"
+        )));
     }
     match destination {
         Destination::Queue { fifo, .. } => {
@@ -390,7 +407,8 @@ impl Client {
 
     /// Sends many messages with batch calls (10 per call, split by size; up to
     /// [`MAX_CONCURRENT_BATCH_CALLS`] at once unless the destination is FIFO), retrying failed
-    /// entries that are retryable. Results are returned in input order.
+    /// entries that are retryable (on FIFO destinations before the next batch call, so that no
+    /// message overtakes an earlier one). Results are returned in input order.
     pub async fn publish_batch(
         &self,
         destination: &Destination,
@@ -408,7 +426,10 @@ impl Client {
     ) -> Result<Vec<Result<Receipt>>> {
         let count = messages.len();
         let prepared: Vec<Result<Prepared>> =
-            join_all(messages.into_iter().map(|message| self.prepare(transport, destination, message))).await;
+            futures::stream::iter(messages.into_iter().map(|message| self.prepare(transport, destination, message)))
+                .buffered(MAX_CONCURRENT_UPLOADS)
+                .collect()
+                .await;
         let mut results: Vec<Option<Result<Receipt>>> = (0..count).map(|_| None).collect();
         let mut pending: Vec<(usize, Prepared)> = Vec::new();
         for (index, entry) in prepared.into_iter().enumerate() {
@@ -417,41 +438,19 @@ impl Client {
                 Err(err) => results[index] = Some(Err(err)),
             }
         }
-        let backoff = self.inner.config.publish_retry.backoff()?;
-        let max_attempts = self.inner.config.publish_retry.max_attempts.max(1);
-        let mut attempt = 0;
-        let concurrency = if destination.is_fifo() { 1 } else { MAX_CONCURRENT_BATCH_CALLS };
-        while !pending.is_empty() {
-            let mut retry: Vec<(usize, Prepared, Error)> = Vec::new();
+        let retry = BatchRetry {
+            backoff: self.inner.config.publish_retry.backoff()?,
+            max_attempts: self.inner.config.publish_retry.max_attempts.max(1),
+        };
+        if destination.is_fifo() {
+            // One batch call at a time, and the retries of a batch before the next batch: entries
+            // sent later must not overtake earlier ones of their message group.
+            for chunk in chunk_by_size(pending, destination.max_message_size()) {
+                self.send_with_retries(destination, vec![chunk], 1, &retry, &mut results).await;
+            }
+        } else {
             let chunks = chunk_by_size(pending, destination.max_message_size());
-            let mut calls = futures::stream::iter(chunks.into_iter().map(|chunk| self.send_chunk(destination, chunk)))
-                .buffered(concurrency);
-            while let Some(sent) = calls.next().await {
-                for (index, prepared, outcome) in sent {
-                    match outcome {
-                        Ok(receipt) => results[index] = Some(Ok(receipt)),
-                        Err(err) if err.is_retryable() && attempt + 1 < max_attempts => {
-                            retry.push((index, prepared, err))
-                        }
-                        Err(err) => results[index] = Some(Err(err)),
-                    }
-                }
-            }
-            drop(calls);
-            if retry.is_empty() {
-                break;
-            }
-            self.inner.metrics.publish_retries.add(retry.len() as u64);
-            self.inner.events.emit(EventKind::PublishRetried, || {
-                Event::new(EventKind::PublishRetried, "retrying failed batch entries")
-                    .field("destination", destination.address())
-                    .field("entries", retry.len())
-                    .field("attempt", u64::from(attempt + 1))
-                    .error(&retry[0].2)
-            });
-            tokio::time::sleep(backoff.delay(attempt)).await;
-            attempt += 1;
-            pending = retry.into_iter().map(|(index, prepared, _)| (index, prepared)).collect();
+            self.send_with_retries(destination, chunks, MAX_CONCURRENT_BATCH_CALLS, &retry, &mut results).await;
         }
         let results: Vec<Result<Receipt>> = results
             .into_iter()
@@ -467,6 +466,51 @@ impl Client {
             }
         }
         Ok(results)
+    }
+
+    /// Sends `chunks` (up to `concurrency` batch calls at once), then retries the entries that
+    /// failed with retryable errors, all of them together, until they succeed or run out of attempts.
+    async fn send_with_retries(
+        &self,
+        destination: &Destination,
+        mut chunks: Vec<Vec<(usize, Prepared)>>,
+        concurrency: usize,
+        retry: &BatchRetry,
+        results: &mut [Option<Result<Receipt>>],
+    ) {
+        let mut attempt = 0;
+        loop {
+            let mut failed: Vec<(usize, Prepared, Error)> = Vec::new();
+            let mut calls = futures::stream::iter(chunks.into_iter().map(|chunk| self.send_chunk(destination, chunk)))
+                .buffered(concurrency);
+            while let Some(sent) = calls.next().await {
+                for (index, prepared, outcome) in sent {
+                    match outcome {
+                        Ok(receipt) => results[index] = Some(Ok(receipt)),
+                        Err(err) if err.is_retryable() && attempt + 1 < retry.max_attempts => {
+                            failed.push((index, prepared, err));
+                        }
+                        Err(err) => results[index] = Some(Err(err)),
+                    }
+                }
+            }
+            drop(calls);
+            if failed.is_empty() {
+                return;
+            }
+            self.inner.metrics.publish_retries.add(failed.len() as u64);
+            self.inner.events.emit(EventKind::PublishRetried, || {
+                Event::new(EventKind::PublishRetried, "retrying failed batch entries")
+                    .field("destination", destination.address())
+                    .field("entries", failed.len())
+                    .field("attempt", u64::from(attempt + 1))
+                    .error(&failed[0].2)
+            });
+            tokio::time::sleep(retry.backoff.delay(attempt)).await;
+            attempt += 1;
+            let pending = failed.into_iter().map(|(index, prepared, _)| (index, prepared)).collect();
+            chunks = chunk_by_size(pending, destination.max_message_size());
+        }
     }
 
     async fn send_chunk(

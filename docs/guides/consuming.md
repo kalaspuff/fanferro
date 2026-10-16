@@ -136,7 +136,8 @@ While a message is buffered or processed, the engine extends its visibility befo
 timeout), batching ten messages per call. Heartbeats run on Rust threads, so a handler blocking the
 event loop does not lose its lease. If a receipt handle becomes invalid, a `lease.lost` event is
 emitted (the message may be processed twice; make handlers idempotent). Pass `heartbeat=False` to
-disable heartbeats.
+disable heartbeats. SQS counts visibility timeouts and delays in whole seconds: fanferro rounds
+fractions up (0.5 s becomes 1 s, never 0), and so does the in-memory broker.
 
 ## FIFO queues
 
@@ -168,14 +169,18 @@ Shutdown follows `ShutdownPolicy`:
    still hand that poll up to `batch_size` new messages; they are redelivered after their
    visibility timeout). With `abort_receives=False` the poll may finish instead (≤ `wait_time`) and
    its messages are released right away - slower to stop, nothing delayed (ADR 0007, ADR 0008);
-2. prefetched messages are released (`release_prefetched`), in-flight handlers get `drain_timeout`
-   seconds (`None` = forever) with `consumer.draining` progress events every `progress_interval`;
+2. prefetched messages are released at once (`release_prefetched`), also those that wait for a
+   handler slot; in-flight handlers get `drain_timeout` seconds (`None` = forever) with
+   `consumer.draining` progress events every `progress_interval`;
 3. remaining handlers are cancelled and get `cancel_timeout` seconds to unwind;
 4. unfinished messages are released (`release_unfinished`) or left to time out;
 5. pending acks are flushed: automatic acks run in the background and complete, and so does a
    settlement that started (`await message.ack()`...) even if its handler was cancelled.
 
-A second SIGINT/SIGTERM skips the drain.
+A second SIGINT/SIGTERM (or a second `request_stop()`/`client.stop()`) skips the drain: handlers
+are cancelled at once and the long poll in flight is aborted. `stop()` called while a stop is in
+progress waits for it (and `stop(drain_timeout=0)` cuts it short); called while the consumer is
+starting, it stops the consumer once it started. `client.close()` stops all consumers at once.
 
 ## Consume middleware
 

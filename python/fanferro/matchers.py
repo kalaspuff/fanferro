@@ -131,7 +131,7 @@ def _compare(op: Callable[[Any, Any], bool]) -> Callable[[Any, Any], bool]:
             return False
         try:
             return bool(op(_number(left), _number(right)))
-        except TypeError:
+        except (TypeError, ArithmeticError):  # incomparable types, NaN (decimal.InvalidOperation)
             return False
 
     return compare

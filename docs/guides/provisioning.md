@@ -17,6 +17,11 @@ worker = client.queue(
 client.subscription(orders, worker, filter_policy={"fanferro.type": ["orders.created.v1"]})
 ```
 
+Declaring a resource again returns the same handle; settings that differ from the first declaration
+raise `ConfigurationError` (configure each resource in one place). Several queues can share a
+dead-letter queue: the first declaration of it sets its attributes, and later `DeadLetterQueue`s of
+the same name may only repeat them.
+
 ## What happens
 
 For every resource: **lookup** (`GetQueueUrl`, `GetTopicAttributes` by ARN derived from the account
@@ -24,7 +29,9 @@ id, `ListSubscriptionsByTopic`) → **verify** (read attributes and tags, comput
 **update** drifted mutable attributes and tags (if `update`) → **create** when missing (if
 `create`). Queues provision their dead-letter queue first and set `RedrivePolicy`. Subscriptions
 also make sure the queue policy lets the topic send (`manage_queue_policy`, a statement with
-`aws:SourceArn`), including the subscription's own dead-letter queue.
+`aws:SourceArn`), including the subscription's own dead-letter queue. A queue `policy` in
+`QueueAttributes` is compared and updated together with those statements, so provisioning the
+queue never revokes a subscription's permission.
 
 ## Policies
 

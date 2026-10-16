@@ -86,7 +86,9 @@ These are relied upon across layers; tests cover each of them.
    too.
 3. **Leases are protected until settled.** Heartbeats extend visibility (batched by ten) while a
    message is buffered, processing or waiting for a settling permit, capped at 12 hours after
-   receipt and `max_duration`. The lease stays tracked until its settlement completed.
+   receipt and `max_duration`. An extension call that gets no answer within half the heartbeat
+   interval (0.5-10 s) is retried at the next tick, so a stuck connection cannot stall the others.
+   The lease stays tracked until its settlement completed.
 4. **Stable message ids.** The fanferro message id is generated once per message and reused on
    retries; FIFO destinations use it as the deduplication id; idempotency keys default to it.
 5. **Transport details are invisible to handlers.** Base64, claim checks and SNS wrapping are

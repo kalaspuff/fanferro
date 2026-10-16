@@ -74,3 +74,14 @@ def test_body_on_non_json() -> None:
 def test_invalid_matcher() -> None:
     with pytest.raises(TypeError):
         m.as_matcher(42)  # type: ignore[arg-type]
+
+
+def test_comparisons_with_nan_values_do_not_match() -> None:
+    # Values from other producers can be "NaN": comparisons must not match rather than raise
+    # (an exception while routing would fail the message).
+    msg = build_message({"score": "NaN", "ratio": float("nan")}, attributes={"score": "nan"})
+    for field in (m.attribute("score"), m.body("score"), m.body("ratio")):
+        assert not (field > 1)(msg)
+        assert not (field <= 1)(msg)
+        assert not (field == 1)(msg)
+    assert (m.attribute("score") == "nan")(msg)

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
 
 import fanferro
 from tests.conftest import ClientFactory
-from tests.helpers import OrderCreated, drain_queue
+from tests.helpers import OrderCreated, drain_queue, wait_for
 
 EXISTING = fanferro.Provisioning.existing()
 
@@ -196,3 +197,31 @@ async def test_topic_by_arn_and_duplicates(client_factory: ClientFactory, name: 
     assert client.topic(topic.name) is topic
     with pytest.raises(fanferro.ConfigurationError, match="already declared"):
         client.topic(topic.name, tags={"x": "y"})
+
+
+async def test_queues_share_a_dead_letter_queue(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory()
+    shared = name("shared-dlq")
+    first = client.queue(name("first"), dead_letter=fanferro.DeadLetterQueue(shared, max_receive_count=50))
+    second = client.queue(name("second"), dead_letter=fanferro.DeadLetterQueue(shared, max_receive_count=50))
+
+    async def fail(order: OrderCreated) -> None:
+        raise ValueError("poison")
+
+    no_retries = fanferro.RetryPolicy(max_attempts=1)
+    consumers = [client.consumer(queue, fail, wait_time=1, retry=no_retries) for queue in (first, second)]
+    dead: list[fanferro.Event] = []
+    client.on("message.dead_lettered", dead.append)
+    async with client:
+        assert first.dead_letter_queue is not None
+        assert second.dead_letter_queue is first.dead_letter_queue
+        await first.send(OrderCreated(order_id=1))
+        await second.send(OrderCreated(order_id=2))
+        for consumer in consumers:
+            await consumer.start()
+        try:
+            await wait_for(lambda: len(dead) == 2)
+        finally:
+            await asyncio.gather(*(consumer.stop() for consumer in consumers))
+        messages = await drain_queue(client, first.dead_letter_queue)
+    assert sorted(message.json()["order_id"] for message in messages) == [1, 2]

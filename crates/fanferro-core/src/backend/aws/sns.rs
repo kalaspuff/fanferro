@@ -73,7 +73,8 @@ impl SnsApi for AwsSns {
             Some(header) => {
                 call.customize()
                     .mutate_request(move |http_request| {
-                        http_request.headers_mut().insert("x-amzn-trace-id", header.clone());
+                        // Best effort: a value that is not a valid header is left out (no panic).
+                        let _ = http_request.headers_mut().try_insert("x-amzn-trace-id", header.clone());
                     })
                     .send()
                     .await

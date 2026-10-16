@@ -399,6 +399,14 @@ class Consumer:
         self._waiting = 0  # messages scheduled for a handler that have no slot yet
         self._blocked = 0  # handlers waiting for a settlement they requested
         self._last_activity = 0.0
+        self._starting: asyncio.Future[None] | None = None  # resolved when a start ends
+        self._stopped: asyncio.Future[None] | None = None  # the stop in progress (or the last one)
+        self._drain_deadline: float | None = None  # when the stop in progress stops waiting for handlers
+        self._hurry: asyncio.Event | None = None  # set when a later stop request moved the deadline
+        self._aborting = False  # the stop in progress aborts the long poll in flight
+        self._abort_receiving: asyncio.Future[None] | None = None
+        self._slot_waiters: set[asyncio.Task[Any]] = set()  # tasks of messages waiting for a slot
+        self._releasing: set[asyncio.Task[Any]] = set()  # waiters cancelled to release their message
 
     # -- routing shortcuts -----------------------------------------------------------------
 
@@ -473,12 +481,19 @@ class Consumer:
         if not len(self.router):
             raise ConsumerStateError(f"consumer {self.name!r} has no routes; add a handler or routes")
         self._state = "starting"
+        starting = self._starting = asyncio.get_running_loop().create_future()
+        # Registered right away: closing the client meanwhile stops the consumer once it started.
+        self._client._register_consumer(self)
         self._emit(EventKind.CONSUMER_STARTING, f"consumer {self.name} starting")
         try:
             await self._start()
         except BaseException:
             self._state = "stopped"
+            self._client._unregister_consumer(self)
             raise
+        finally:
+            self._starting = None
+            starting.set_result(None)
 
     async def _start(self) -> None:
         client = self._client
@@ -529,7 +544,6 @@ class Consumer:
         self._force_stop = False
         self._active = self._waiting = self._blocked = 0
         client._acquire_pump()
-        client._register_consumer(self)
         try:
             self._engine.start()
         except BaseException:
@@ -563,6 +577,12 @@ class Consumer:
                 f"no dead-letter queue is configured for {self.queue.name}; messages that should be dead-lettered "
                 f"will be handled with on_missing_queue={self.dead_letter_policy.on_missing_queue!r}",
             )
+        if self.retry_policy.strategy == "requeue" and info.fifo:
+            self._emit(
+                EventKind.CONFIG_WARNING,
+                "RetryPolicy(strategy='requeue') on a FIFO queue sends a failed message behind the rest of its "
+                "message group, which then loses its order; strategy='visibility' keeps the group waiting instead",
+            )
         visibility = self.visibility_timeout or info.visibility_timeout
         if self.heartbeat is False and self.handler_timeout and visibility and self.handler_timeout > visibility:
             self._emit(
@@ -591,10 +611,15 @@ class Consumer:
         return None
 
     def request_stop(self) -> None:
-        """Asks :meth:`run` to stop (safe to call from signal handlers)."""
+        """Asks :meth:`run` to stop (safe to call from signal handlers).
+
+        A second request skips the drain: a stop in progress stops waiting for handlers (they are
+        cancelled) and aborts the long poll in flight.
+        """
         if self._stop_event is not None:
             if self._stop_event.is_set():
                 self._force_stop = True
+                self._hurry_stop(0, True)
             self._stop_event.set()
 
     async def run(self, *, install_signal_handlers: bool = True) -> None:
@@ -617,12 +642,15 @@ class Consumer:
             assert self._stop_event is not None
             await self._stop_event.wait()
         finally:
-            for sig in installed:
-                loop.remove_signal_handler(sig)
-            if self._force_stop:
-                await self.stop(drain_timeout=0, abort_receives=True)
-            else:
-                await self.stop()
+            # The handlers stay installed while the consumer drains: a second signal cuts it short.
+            try:
+                if self._force_stop:
+                    await self.stop(drain_timeout=0, abort_receives=True)
+                else:
+                    await self.stop()
+            finally:
+                for sig in installed:
+                    loop.remove_signal_handler(sig)
 
     async def run_until_idle(self, *, idle_for: float = 0.3, timeout: float = 30.0) -> None:
         """Processes messages until nothing has happened for ``idle_for`` seconds, then stops.
@@ -658,23 +686,59 @@ class Consumer:
     async def stop(self, *, drain_timeout: float | Any | None = ..., abort_receives: bool | None = None) -> None:
         """Gracefully stops the consumer (see :class:`~fanferro.ShutdownPolicy`).
 
+        A consumer that is starting is stopped as soon as its start completed. While a stop is in
+        progress, ``stop()`` waits for it; a shorter ``drain_timeout`` or ``abort_receives=True``
+        then cuts it short (``drain_timeout=0`` stops waiting for handlers at once).
+
         Args:
             drain_timeout: Overrides the policy's drain timeout (``None`` waits forever).
             abort_receives: Overrides the policy's ``abort_receives``.
         """
-        if self._state not in ("running", "starting"):
+        if self._state == "starting" and self._starting is not None:
+            await asyncio.shield(self._starting)
+        if self._state == "running":
+            self._begin_stop(drain_timeout, abort_receives)
+        elif self._state == "stopping":
+            self._hurry_stop(drain_timeout, abort_receives)
+        else:
             return
+        assert self._stopped is not None
+        # Shielded: a cancelled caller must not interrupt the shutdown (it releases messages).
+        await asyncio.shield(self._stopped)
+
+    def _begin_stop(self, drain_timeout: float | Any | None, abort_receives: bool | None) -> None:
+        """Moves to ``stopping`` at once (later requests see it) and runs the shutdown as a task."""
         policy = self.shutdown_policy
         timeout = policy.drain_timeout if drain_timeout is ... else drain_timeout
-        deadline = None if timeout is None else time.monotonic() + timeout
+        self._drain_deadline = None if timeout is None else time.monotonic() + timeout
+        self._hurry = asyncio.Event()
+        self._aborting = policy.abort_receives if abort_receives is None else abort_receives
+        self._abort_receiving = None
         self._state = "stopping"
         self._stopping = True
         if self._stop_event is not None:
             self._stop_event.set()
+        self._stopped = asyncio.ensure_future(self._stop())
+
+    def _hurry_stop(self, drain_timeout: float | Any | None, abort_receives: bool | None) -> None:
+        """Applies a later stop request to the stop in progress: an earlier deadline, an aborted poll."""
+        if self._state != "stopping":
+            return
+        if drain_timeout is not ... and drain_timeout is not None:
+            deadline = time.monotonic() + drain_timeout
+            if self._drain_deadline is None or deadline < self._drain_deadline:
+                self._drain_deadline = deadline
+                if self._hurry is not None:
+                    self._hurry.set()
+        if abort_receives and not self._aborting and self._engine is not None:
+            self._aborting = True
+            self._abort_receiving = asyncio.ensure_future(self._engine.stop_receiving(True))
+
+    async def _stop(self) -> None:
+        policy = self.shutdown_policy
         self._emit(EventKind.CONSUMER_STOPPING, f"consumer {self.name} stopping", in_flight=self._active)
         engine = self._engine
-        abort = policy.abort_receives if abort_receives is None else abort_receives
-        stop_receiving = asyncio.ensure_future(engine.stop_receiving(abort))
+        stop_receiving = asyncio.ensure_future(engine.stop_receiving(self._aborting))
         try:
             # The dispatcher exits on its own: `next_batch` returns as soon as receiving stops.
             if self._dispatcher is not None:
@@ -684,15 +748,18 @@ class Consumer:
                     self._dispatcher.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await self._dispatcher
+            if policy.release_prefetched:
+                self._release_waiting_messages()
             # Handlers keep running while a final long poll completes.
-            await self._drain(deadline)
+            await self._drain()
             await stop_receiving
-            for delivery in engine.drain_buffered():
-                if policy.release_prefetched:
-                    await self._release_quietly(delivery)
-                else:
+            buffered = engine.drain_buffered()
+            if policy.release_prefetched:
+                await asyncio.gather(*(self._release_quietly(delivery) for delivery in buffered))
+            else:
+                for delivery in buffered:
                     self._schedule(delivery)
-            await self._drain(deadline)
+            await self._drain()
             if self._tasks:
                 for task in list(self._tasks):
                     task.cancel()
@@ -702,29 +769,53 @@ class Consumer:
             if not stop_receiving.done():
                 with contextlib.suppress(Exception):
                     await stop_receiving
+            if self._abort_receiving is not None:
+                with contextlib.suppress(Exception):
+                    await self._abort_receiving
             await engine.close(policy.release_unfinished)
             self._client._unregister_consumer(self)
             self._client._release_pump()
             self._state = "stopped"
 
-    async def _drain(self, deadline: float | None) -> None:
+    def _release_waiting_messages(self) -> None:
+        """Releases the prefetched messages that wait for a handler slot (stopping: they never start)."""
+        for task in list(self._slot_waiters):
+            self._releasing.add(task)
+            task.cancel()
+
+    async def _drain(self) -> None:
+        """Waits for the message tasks until they end or the drain deadline passes."""
         if not self._tasks:
             return
-        started = time.monotonic()
+        started = reported = time.monotonic()
         interval = self.shutdown_policy.progress_interval
+        hurry = self._hurry
         while self._tasks:
-            remaining = None if deadline is None else deadline - time.monotonic()
-            if remaining is not None and remaining <= 0:
+            now = time.monotonic()
+            deadline = self._drain_deadline
+            if deadline is not None and now >= deadline:
                 return
-            wait = interval if remaining is None else min(interval, remaining)
-            done, _pending = await asyncio.wait(list(self._tasks), timeout=wait)
+            wait = interval - (now - reported) if deadline is None else min(interval - (now - reported), deadline - now)
+            waiters: set[asyncio.Future[Any]] = set(self._tasks)
+            hurried = asyncio.ensure_future(hurry.wait()) if hurry is not None else None
+            if hurried is not None:
+                waiters.add(hurried)
+            try:
+                done, _pending = await asyncio.wait(waiters, timeout=max(wait, 0), return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                if hurried is not None:
+                    hurried.cancel()
+            if hurry is not None:
+                hurry.clear()
             self._tasks.difference_update(done)  # also tasks cancelled before they started
-            if not done and self._tasks:
+            now = time.monotonic()
+            if self._tasks and now - reported >= interval:
+                reported = now
                 self._emit(
                     EventKind.CONSUMER_DRAINING,
                     f"waiting for {len(self._tasks)} in-flight messages",
                     in_flight=len(self._tasks),
-                    waited=round(time.monotonic() - started, 3),
+                    waited=round(now - started, 3),
                 )
 
     # -- dispatching -----------------------------------------------------------------------
@@ -769,6 +860,23 @@ class Consumer:
         """Forgets tasks that ended without :meth:`_task_ended` (cancelled before they ever ran)."""
         self._tasks.difference_update([task for task in self._tasks if task.done()])
 
+    async def _acquire_slot(self, semaphore: asyncio.Semaphore) -> bool:
+        """Waits for a handler slot; ``False`` when stopping released the message instead."""
+        task = asyncio.current_task()
+        assert task is not None
+        self._slot_waiters.add(task)
+        try:
+            await semaphore.acquire()
+        except asyncio.CancelledError:
+            if task not in self._releasing:
+                raise
+            self._releasing.discard(task)
+            task.uncancel()
+            return False
+        finally:
+            self._slot_waiters.discard(task)
+        return True
+
     def _task_failed(self, error: Exception) -> None:
         self._emit(EventKind.CONSUMER_ERROR, f"unexpected error in consumer {self.name}", exception=error)
 
@@ -781,14 +889,23 @@ class Consumer:
         try:
             semaphore = self._semaphore
             assert semaphore is not None
+            if self._stopping and self.shutdown_policy.release_prefetched:
+                if counted:
+                    self._waiting -= 1
+                await self._release_quietly(delivery)
+                return "released"
             if not counted:
                 self._waiting += 1
             try:
-                await semaphore.acquire()
+                if not semaphore.locked():
+                    await semaphore.acquire()  # a free slot: no wait
+                elif not await self._acquire_slot(semaphore):
+                    await self._release_quietly(delivery)
+                    return "released"
             finally:
                 self._waiting -= 1
             if self._stopping and self.shutdown_policy.release_prefetched:
-                semaphore.release()
+                semaphore.release()  # the slot came free while the consumer began to stop
                 await self._release_quietly(delivery)
                 return "released"
             delivery.mark_active()

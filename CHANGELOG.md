@@ -8,6 +8,18 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 
 ## [Unreleased]
 
+### Behaviour changes
+
+- Visibility timeouts and delays are rounded up to whole seconds, as SQS counts them: a visibility
+  timeout of 0.5 s is 1 s instead of 0, and a retry after 0.7 s waits 1 s instead of none. The
+  in-memory broker rounds them the same way, so sub-second timeouts behave in tests as in
+  production.
+- `consumer.stop()` called while a stop is in progress waits for it instead of returning at once,
+  and `client.close()` stops its consumers concurrently instead of one after another.
+- Declaring a queue or topic again with the same settings returns it instead of raising, and
+  declaring a subscription again with different settings raises `ConfigurationError` instead of
+  silently keeping the first declaration.
+
 ## [0.4.0] - 2026-10-16
 
 ### Faster publishing and consuming

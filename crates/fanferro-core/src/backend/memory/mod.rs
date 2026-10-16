@@ -4,9 +4,9 @@
 //! the behaviour that matters to message processing rather than every API detail:
 //!
 //! * SQS: visibility timeouts, receipt handles, receive counts, long polling, per-message
-//!   and queue delays, redrive to a dead-letter queue (`RedrivePolicy`), FIFO ordering per
-//!   message group, FIFO deduplication (explicit and content based), batch operations,
-//!   MD5 digests.
+//!   and queue delays (in whole seconds, rounded up as the AWS adapter rounds them), redrive to a
+//!   dead-letter queue (`RedrivePolicy`), FIFO ordering per message group, FIFO deduplication
+//!   (explicit and content based), batch operations, MD5 digests.
 //! * SNS: topics (standard and FIFO), SQS subscriptions with raw and notification (JSON)
 //!   delivery, filter policies (see [`filter_policy`]), FIFO deduplication.
 //! * S3: buckets and objects, presigned URLs (`memory://` scheme, resolvable only by the
@@ -43,6 +43,7 @@ use crate::error::{AwsError, AwsErrorKind, Error, Result};
 use crate::types::attributes::{attributes_encoded_len, md5_of_attributes, md5_of_body, validate_attributes};
 use crate::types::text::is_sqs_safe_text;
 use crate::types::{AttributeData, MessageAttributes, arn};
+use crate::util::whole_seconds;
 use filter_policy::FilterScope;
 use store::{Dedup, Messages, StoredMessage};
 
@@ -346,7 +347,8 @@ fn enqueue(state: &mut State, queue_url: &str, operation: &'static str, request:
             });
         }
     }
-    let delay = request.delay.unwrap_or_else(|| Duration::from_secs(queue.attribute_secs("DelaySeconds", 0)));
+    let delay =
+        request.delay.map_or_else(|| Duration::from_secs(queue.attribute_secs("DelaySeconds", 0)), whole_seconds);
     let message_id = request.message_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let sequence_number = queue.fifo.then_some(sequence);
     if let Some(id) = &deduplication_id
@@ -445,7 +447,7 @@ fn try_receive(state: &mut State, request: &ReceiveRequest, now: Instant) -> Res
     let queue = state.queues.get_mut(&request.queue_url).ok_or_else(|| queue_not_found("ReceiveMessage"))?;
     let visibility = request
         .visibility_timeout
-        .unwrap_or_else(|| Duration::from_secs(queue.attribute_secs("VisibilityTimeout", 30)));
+        .map_or_else(|| Duration::from_secs(queue.attribute_secs("VisibilityTimeout", 30)), whole_seconds);
     let max = usize::from(request.max_messages.clamp(1, 10));
     // FIFO: a group with a message in flight is blocked (messages received now block it afterwards).
     let fifo = queue.fifo;
@@ -630,7 +632,7 @@ impl SqsApi for MemorySqs {
         let results = entries
             .into_iter()
             .map(|entry| {
-                if entry.timeout > Duration::from_secs(43_200) {
+                if whole_seconds(entry.timeout) > Duration::from_secs(43_200) {
                     return Err(receipt_error(
                         "InvalidParameterValue",
                         "VisibilityTimeout must be at most 43200 seconds.",
@@ -642,8 +644,9 @@ impl SqsApi for MemorySqs {
                 if !queue.messages.get(sequence).is_some_and(|message| message.in_flight) {
                     return Err(receipt_error("MessageNotInflight", "The message referred to is not in flight."));
                 }
-                queue.messages.change_visibility(sequence, now, entry.timeout);
-                changed |= entry.timeout.is_zero();
+                let timeout = whole_seconds(entry.timeout);
+                queue.messages.change_visibility(sequence, now, timeout);
+                changed |= timeout.is_zero();
                 Ok(())
             })
             .collect();

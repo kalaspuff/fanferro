@@ -5,7 +5,7 @@ use bytes::Bytes;
 
 use super::*;
 use crate::backend::memory::MemoryBroker;
-use crate::backend::testing::SlowBatches;
+use crate::backend::testing::{SlowBatches, StuckVisibility};
 use crate::backend::{SendRequest, StringMap};
 use crate::client::ClientConfig;
 use crate::events::EventKind;
@@ -520,6 +520,33 @@ async fn heartbeats_keep_messages_invisible() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_stuck_extension_call_does_not_stall_heartbeats() {
+    // The first ChangeMessageVisibilityBatch never answers (the SDK has no read timeout by default):
+    // the heartbeat gives up on it and extends the lease again instead of waiting forever.
+    let broker = MemoryBroker::new("us-east-1", "000000000000");
+    let mut backend = broker.backend();
+    backend.sqs = std::sync::Arc::new(StuckVisibility::new(backend.sqs.clone(), 1));
+    let client = Client::with_backend(backend, ClientConfig::default()).unwrap();
+    let url = client.backend().sqs.create_queue("work", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let fx = Fixture { broker, client, url };
+    fx.send("slow").await;
+    let engine = fx.engine(|c| {
+        c.visibility_timeout = 3.0;
+        c.heartbeat.interval = Some(1.0);
+    });
+    let delivery = collect(&engine, 1).await.remove(0);
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    let stored = fx.stored();
+    assert!(stored[0].in_flight);
+    assert_eq!(stored[0].receive_count, 1, "the message became visible while its lease was held");
+    let metrics = engine.stats().metrics;
+    assert!(metrics["lease_extension_failures"] >= 1);
+    assert!(metrics["lease_extensions"] >= 10);
+    delivery.lease.ack().await.unwrap();
+    engine.close(true).await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn without_heartbeats_messages_reappear() {
     let fx = fixture(ClientConfig::default()).await;
     fx.send("slow").await;
@@ -653,6 +680,39 @@ async fn next_batch_returns_as_soon_as_receiving_stops() {
         stopping.await.unwrap();
         engine.close(true).await;
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_abort_during_a_graceful_stop_still_guards_against_the_orphaned_poll() {
+    // A second stop request (a second signal) aborts the long poll a graceful stop waits for: the
+    // queue keeps serving that poll, so messages released afterwards must stay invisible until it
+    // is over, as when the stop aborts right away.
+    let broker = MemoryBroker::new("us-east-1", "000000000000");
+    let mut backend = broker.backend();
+    backend.kind = crate::backend::BackendKind::Aws;
+    let client = Client::with_backend(backend, ClientConfig::default()).unwrap();
+    let url = client.backend().sqs.create_queue("work", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let fx = Fixture { broker, client, url };
+    fx.send("held").await;
+    let engine = fx.engine(|c| {
+        c.wait_time = 20.0;
+        c.min_receive_batch = Some(1);
+    });
+    let delivery = collect(&engine, 1).await.remove(0);
+    tokio::time::sleep(Duration::from_millis(100)).await; // the next long poll is in flight
+    let graceful = tokio::spawn({
+        let engine = engine.clone();
+        async move { engine.stop_receiving(false).await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    engine.stop_receiving(true).await;
+    graceful.await.unwrap();
+    delivery.lease.release().await.unwrap();
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    assert!(fx.stored()[0].in_flight, "released into the window of the aborted poll");
+    tokio::time::sleep(Duration::from_secs(15)).await;
+    assert!(!fx.stored()[0].in_flight);
+    engine.close(true).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -865,7 +925,23 @@ async fn subscription_confirmations_are_handled_internally() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(fx.stored().is_empty());
     let events = fx.client.events().drain(10);
-    assert!(events.iter().any(|e| e.kind == EventKind::ConfigWarning));
+    assert!(events.iter().any(|e| e.kind == EventKind::ConfigWarning && e.message.contains("auto_confirm")));
+    engine.close(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn unsubscribe_confirmations_are_reported_as_such() {
+    let fx = fixture(ClientConfig::default()).await;
+    fx.client.events().set_enabled(&[EventKind::ConfigWarning]);
+    fx.send(r#"{"Type":"UnsubscribeConfirmation","MessageId":"1","Token":"t","TopicArn":"arn:aws:sns:us-east-1:000000000000:x","Message":"unsubscribed"}"#)
+        .await;
+    let engine = fx.engine(|_| {});
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(fx.stored().is_empty(), "control messages are deleted");
+    let events = fx.client.events().drain(10);
+    let warning = events.iter().find(|e| e.kind == EventKind::ConfigWarning).unwrap();
+    assert!(warning.message.contains("unsubscribe confirmation"), "{}", warning.message);
+    assert!(!warning.message.contains("auto_confirm"));
     engine.close(true).await;
 }
 

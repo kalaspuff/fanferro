@@ -28,6 +28,7 @@ from fanferro.provisioning import (
     ProvisioningReport,
     QueueAttributes,
     TopicAttributes,
+    attributes_to_aws,
 )
 from fanferro.resources import _UNSET, GroupId, Queue, Subscription, Topic
 from fanferro.routing import Router
@@ -88,6 +89,20 @@ def _resource_name(kind: Literal["queue", "topic"], name: str, prefix: str = "")
         shorten = "the prefix or the name" if prefix else "the name"
         raise ConfigurationError(f"{described} is {len(full)} characters; {service} allows {limit} - shorten {shorten}")
     return full
+
+
+def _conflicts(kind: str, name: str, declared: Mapping[str, Any], given: Mapping[str, Any]) -> None:
+    """Raises unless every setting in ``given`` equals the one ``declared`` (redeclaring is allowed)."""
+    differ = [option for option, value in given.items() if value != declared[option]]
+    if differ:
+        raise ConfigurationError(
+            f"{kind} {name!r} is already declared with other settings ({', '.join(differ)}); configure it in one place"
+        )
+
+
+def _given(**options: Any) -> dict[str, Any]:
+    """The options a call actually sets (``None`` and unset ones are not settings)."""
+    return {option: value for option, value in options.items() if value is not None and value is not _UNSET}
 
 
 class Client:
@@ -278,15 +293,19 @@ class Client:
         await self.close()
 
     async def close(self) -> None:
-        """Stops running consumers, flushes events and waits for async hooks."""
-        for consumer in list(self._running_consumers):
-            await consumer.stop()
+        """Stops running consumers (concurrently), flushes events and waits for async hooks."""
+        stops = await asyncio.gather(
+            *(consumer.stop() for consumer in list(self._running_consumers)), return_exceptions=True
+        )
+        failure = next((result for result in stops if isinstance(result, BaseException)), None)
         if self._entered:
             self._entered = False
             self._release_pump()
         await self._stop_pump()
         self._drain_core_events()
         await self.events.flush()
+        if failure is not None:
+            raise failure
 
     # -- events ----------------------------------------------------------------------------
 
@@ -420,11 +439,18 @@ class Client:
             raise ConfigurationError("topic() needs a name or an arn")
         existing = self._topics.get(name)
         if existing is not None:
-            if any(
-                value not in (None, _UNSET)
-                for value in (arn, attributes, tags, provisioning, envelope, group_id, codec)
-            ) or (large_payloads is not _UNSET):
-                raise ConfigurationError(f"topic {name!r} is already declared; configure it in one place")
+            given = _given(
+                arn=arn,
+                attributes=attributes_to_aws(attributes) if attributes is not None else None,
+                tags=dict(tags) if tags is not None else None,
+                provisioning=provisioning,
+                envelope=envelope,
+                group_id=group_id,
+                codec=codec,
+            )
+            if large_payloads is not _UNSET:  # None (no offloading) is a setting too
+                given["large_payloads"] = large_payloads
+            _conflicts("topic", name, existing._settings(), given)
             return existing
         topic = Topic(
             self,
@@ -485,9 +511,20 @@ class Client:
             raise ConfigurationError("queue() needs a name or a url")
         existing = self._queues.get(name)
         if existing is not None:
-            configured = (url, owner_account_id, attributes, tags, dead_letter, provisioning, envelope, group_id, codec)
-            if any(value is not None for value in configured) or large_payloads is not _UNSET:
-                raise ConfigurationError(f"queue {name!r} is already declared; configure it in one place")
+            given = _given(
+                url=url,
+                owner_account_id=owner_account_id,
+                attributes=attributes_to_aws(attributes) if attributes is not None else None,
+                tags=dict(tags) if tags is not None else None,
+                dead_letter=dead_letter,
+                provisioning=provisioning,
+                envelope=envelope,
+                group_id=group_id,
+                codec=codec,
+            )
+            if large_payloads is not _UNSET:  # None (no offloading) is a setting too
+                given["large_payloads"] = large_payloads
+            _conflicts("queue", name, existing._settings(), given)
             return existing
         queue = Queue(
             self,
@@ -511,24 +548,28 @@ class Client:
         topic: Topic | str,
         queue: Queue | str,
         *,
-        raw_message_delivery: bool = True,
+        raw_message_delivery: bool | None = None,
         filter_policy: Mapping[str, Any] | None = None,
         filter_policy_scope: Literal["MessageAttributes", "MessageBody"] | None = None,
         dead_letter_queue: Queue | str | None = None,
-        manage_queue_policy: bool = True,
+        manage_queue_policy: bool | None = None,
         provisioning: Provisioning | None = None,
     ) -> Subscription:
-        """Declares a subscription of ``queue`` to ``topic`` (SNS fan-out to SQS).
+        """Declares (or returns the already declared) subscription of ``queue`` to ``topic``.
+
+        Declaring it again returns the same subscription; settings that differ from the first
+        declaration raise :class:`~fanferro.ConfigurationError`.
 
         Args:
             topic: Topic handle, or a topic name (the client's ``topic_prefix`` is prepended).
             queue: Queue handle, or a queue name (the client's ``queue_prefix`` is prepended).
-            raw_message_delivery: Deliver messages unwrapped (recommended; attributes become SQS
-                message attributes). fanferro also understands wrapped SNS notifications.
+            raw_message_delivery: Deliver messages unwrapped (default ``True``, recommended; attributes
+                become SQS message attributes). fanferro also understands wrapped SNS notifications.
             filter_policy: SNS filter policy, e.g. ``{"fanferro.type": ["orders.created"]}``.
             filter_policy_scope: ``"MessageAttributes"`` (default) or ``"MessageBody"``.
             dead_letter_queue: Queue (handle or name) receiving messages SNS fails to deliver.
-            manage_queue_policy: Allow the topic to send to the queue (and the dead-letter queue).
+            manage_queue_policy: Allow the topic to send to the queue (and the dead-letter queue;
+                default ``True``).
             provisioning: Provisioning policy (default: the client's).
         """
         topic_handle = topic if isinstance(topic, Topic) else self.topic(topic)
@@ -540,20 +581,33 @@ class Client:
         )
         for existing in self._subscriptions:
             if existing.topic is topic_handle and existing.queue is queue_handle:
+                given = _given(
+                    raw_message_delivery=raw_message_delivery,
+                    filter_policy=dict(filter_policy) if filter_policy is not None else None,
+                    filter_policy_scope=filter_policy_scope,
+                    dead_letter_queue=dead_letter_handle,
+                    manage_queue_policy=manage_queue_policy,
+                    provisioning=provisioning,
+                )
+                _conflicts("subscription", existing.name, existing._settings(), given)
                 return existing
         subscription = Subscription(
             self,
             topic_handle,
             queue_handle,
-            raw_message_delivery=raw_message_delivery,
+            raw_message_delivery=True if raw_message_delivery is None else raw_message_delivery,
             filter_policy=filter_policy,
             filter_policy_scope=filter_policy_scope,
             dead_letter_queue=dead_letter_handle,
-            manage_queue_policy=manage_queue_policy,
+            manage_queue_policy=True if manage_queue_policy is None else manage_queue_policy,
             provisioning=provisioning,
         )
         self._subscriptions.append(subscription)
         return subscription
+
+    def _declared_queue(self, name: str, *, prefixed: bool = True) -> Queue | None:
+        """The queue already declared under ``name`` (as :meth:`queue` would name it), if any."""
+        return self._queues.get(_resource_name("queue", name, self.queue_prefix if prefixed else ""))
 
     @property
     def topics(self) -> dict[str, Topic]:
@@ -715,19 +769,22 @@ class Client:
     async def run(self, *consumers: Consumer, install_signal_handlers: bool = True) -> None:
         """Runs consumers until SIGINT/SIGTERM or :meth:`stop`, then shuts them down gracefully.
 
-        Runs every consumer created by this client unless consumers are given. A second signal
-        skips the drain.
+        Runs every consumer created by this client unless consumers are given. A second signal (or
+        a second :meth:`stop`) skips the drain: handlers are cancelled and long polls aborted.
         """
         targets = list(consumers) or list(self._consumers)
         if not targets:
             raise ConfigurationError("no consumers to run")
         stop = asyncio.Event()
         force = False
+        started: list[Consumer] = []
 
         def request_stop() -> None:
             nonlocal force
             if stop.is_set():
                 force = True
+                for consumer in started:
+                    consumer._hurry_stop(0, True)
             stop.set()
 
         self._stop_request = request_stop
@@ -740,23 +797,25 @@ class Client:
                     installed.append(sig)
                 except (NotImplementedError, RuntimeError, ValueError):
                     break
-        started: list[Consumer] = []
         try:
             for consumer in targets:
                 await consumer.start()
                 started.append(consumer)
             await stop.wait()
         finally:
-            for sig in installed:
-                loop.remove_signal_handler(sig)
-            await asyncio.gather(
-                *(
-                    consumer.stop(drain_timeout=0, abort_receives=True) if force else consumer.stop()
-                    for consumer in started
-                ),
-                return_exceptions=True,
-            )
-            self._stop_request = None
+            # The handlers stay installed while consumers drain: a second signal cuts it short.
+            try:
+                await asyncio.gather(
+                    *(
+                        consumer.stop(drain_timeout=0, abort_receives=True) if force else consumer.stop()
+                        for consumer in started
+                    ),
+                    return_exceptions=True,
+                )
+            finally:
+                for sig in installed:
+                    loop.remove_signal_handler(sig)
+                self._stop_request = None
 
     _stop_request: Callable[[], None] | None = None
 

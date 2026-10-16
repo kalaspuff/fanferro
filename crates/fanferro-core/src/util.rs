@@ -12,6 +12,13 @@ pub fn duration_from_secs(secs: f64, what: &str) -> Result<Duration> {
     Duration::try_from_secs_f64(secs).map_err(|err| Error::config(format!("{what} is out of range: {err}")))
 }
 
+/// Rounds `duration` up to whole seconds: SQS takes visibility timeouts and delays in seconds, and
+/// a timeout rounded down could make a message visible again early (0.5 s would become 0).
+pub fn whole_seconds(duration: Duration) -> Duration {
+    let secs = duration.as_secs();
+    Duration::from_secs(if duration.subsec_nanos() > 0 { secs.saturating_add(1) } else { secs })
+}
+
 /// Converts an optional number of seconds into an optional [`Duration`].
 pub fn optional_duration(secs: Option<f64>, what: &str) -> Result<Option<Duration>> {
     secs.map(|secs| duration_from_secs(secs, what)).transpose()
@@ -54,5 +61,14 @@ mod tests {
         assert!(duration_from_secs(-1.0, "x").is_err());
         assert!(duration_from_secs(f64::NAN, "x").is_err());
         assert_eq!(optional_duration(None, "x").unwrap(), None);
+    }
+
+    #[test]
+    fn rounds_up_to_whole_seconds() {
+        assert_eq!(whole_seconds(Duration::ZERO), Duration::ZERO);
+        assert_eq!(whole_seconds(Duration::from_millis(1)), Duration::from_secs(1));
+        assert_eq!(whole_seconds(Duration::from_millis(1500)), Duration::from_secs(2));
+        assert_eq!(whole_seconds(Duration::from_secs(30)), Duration::from_secs(30));
+        assert_eq!(whole_seconds(Duration::MAX), Duration::from_secs(u64::MAX));
     }
 }

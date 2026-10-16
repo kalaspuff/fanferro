@@ -3,7 +3,7 @@ use bytes::Bytes;
 use super::*;
 use crate::backend::StringMap;
 use crate::backend::memory::MemoryBroker;
-use crate::backend::testing::SlowBatches;
+use crate::backend::testing::{SlowBatches, SlowUploads, ThrottledBatches};
 use crate::client::ClientConfig;
 use crate::transport::OffloadSettings;
 use crate::transport::claim_check::{EncryptionSettings, PointerFormat, ReferenceMode};
@@ -66,6 +66,12 @@ async fn validates_destination_options() {
     let mut subject = message("m", "x");
     subject.subject = Some("s".into());
     assert!(client.publish(&queue("u"), subject).await.is_err());
+    for header in ["", "Root=1-5759e988-bd862e3fe1be46a994272793\nParent=1", "Root=\u{e9}"] {
+        let mut traced = message("m", "x");
+        traced.trace_header = Some(header.into());
+        let err = client.publish(&topic, traced).await.unwrap_err();
+        assert!(err.to_string().contains("trace_header"), "{err}");
+    }
 }
 
 #[tokio::test]
@@ -238,4 +244,72 @@ async fn batch_calls_overlap_except_for_fifo_destinations() {
     assert_eq!(started.elapsed(), Duration::from_millis(300));
     let bodies: Vec<String> = broker.queue_messages(&fifo).unwrap().into_iter().map(|m| m.body).collect();
     assert_eq!(bodies, (0..25).map(|i| i.to_string()).collect::<Vec<_>>());
+}
+
+#[tokio::test(start_paused = true)]
+async fn fifo_batches_keep_their_order_when_a_batch_is_retried() {
+    let broker = MemoryBroker::new("us-east-1", "000000000000");
+    let mut backend = broker.backend();
+    // The first batch call is throttled (after the SDK's own retries): its entries are retried.
+    backend.sqs = std::sync::Arc::new(ThrottledBatches::new(backend.sqs.clone(), 1));
+    let client = Client::with_backend(backend, ClientConfig::default()).unwrap();
+    let url = client
+        .backend()
+        .sqs
+        .create_queue("q.fifo", &StringMap::from([("FifoQueue".to_string(), "true".to_string())]), &StringMap::new())
+        .await
+        .unwrap();
+    let destination =
+        Destination::Queue { url: url.clone(), fifo: true, content_based_deduplication: false, max_message_size: None };
+    let messages: Vec<OutgoingMessage> = (0..25)
+        .map(|i| OutgoingMessage { group_id: Some("g".into()), ..message(&format!("m{i}"), &i.to_string()) })
+        .collect();
+    let results = client.publish_batch(&destination, messages).await.unwrap();
+    assert!(results.iter().all(Result::is_ok));
+    assert_eq!(client.metrics().publish_retries.get(), 10);
+    let bodies: Vec<String> = broker.queue_messages(&url).unwrap().into_iter().map(|m| m.body).collect();
+    assert_eq!(bodies, (0..25).map(|i| i.to_string()).collect::<Vec<_>>(), "a later batch overtook a retried one");
+}
+
+#[tokio::test(start_paused = true)]
+async fn standard_batches_retry_throttled_entries() {
+    let broker = MemoryBroker::new("us-east-1", "000000000000");
+    let mut backend = broker.backend();
+    backend.sqs = std::sync::Arc::new(ThrottledBatches::new(backend.sqs.clone(), 2));
+    let client = Client::with_backend(backend, ClientConfig::default()).unwrap();
+    let url = client.backend().sqs.create_queue("q", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let messages: Vec<OutgoingMessage> = (0..25).map(|i| message(&format!("m{i}"), &i.to_string())).collect();
+    let results = client.publish_batch(&queue(&url), messages).await.unwrap();
+    assert!(results.iter().all(Result::is_ok));
+    assert_eq!(broker.queue_messages(&url).unwrap().len(), 25);
+}
+
+#[tokio::test(start_paused = true)]
+async fn batches_upload_a_bounded_number_of_payloads_at_once() {
+    let broker = MemoryBroker::new("us-east-1", "000000000000");
+    let mut backend = broker.backend();
+    let uploads = std::sync::Arc::new(SlowUploads::new(backend.objects.clone(), Duration::from_millis(50)));
+    backend.objects = uploads.clone();
+    let offload = OffloadSettings {
+        bucket: "payloads".into(),
+        key_prefix: "p/".into(),
+        threshold: 100,
+        always: false,
+        reference: ReferenceMode::S3,
+        presign_ttl: 60.0,
+        format: PointerFormat::Fanferro,
+        encryption: EncryptionSettings::BucketDefault,
+        storage_class: None,
+    };
+    let client =
+        Client::with_backend(backend, ClientConfig { offload: Some(offload), ..ClientConfig::default() }).unwrap();
+    client.backend().objects.create_bucket("payloads").await.unwrap();
+    let url = client.backend().sqs.create_queue("q", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let big = "x".repeat(500);
+    let messages: Vec<OutgoingMessage> = (0..100).map(|i| message(&format!("m{i}"), &big)).collect();
+    let results = client.publish_batch(&queue(&url), messages).await.unwrap();
+    assert!(results.iter().all(Result::is_ok));
+    assert_eq!(client.metrics().payloads_offloaded.get(), 100);
+    assert_eq!(uploads.puts.take_peak(), MAX_CONCURRENT_UPLOADS);
+    assert_eq!(broker.queue_messages(&url).unwrap().len(), 100);
 }

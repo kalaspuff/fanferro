@@ -87,6 +87,55 @@ def test_redeclaring_a_name_returns_the_same_handle() -> None:
         client.queue("orders-worker", tags={"team": "orders"})
 
 
+def test_redeclaring_with_the_same_settings_returns_the_handle() -> None:
+    client = memory_client()
+    attributes = fanferro.QueueAttributes(visibility_timeout=60)
+    queue = client.queue("worker", attributes=attributes, tags={"team": "orders"})
+    assert client.queue("worker", attributes=attributes, tags={"team": "orders"}) is queue
+    assert client.queue("worker", attributes={"VisibilityTimeout": "60"}) is queue, "raw AWS names are equal too"
+    with pytest.raises(fanferro.ConfigurationError, match=r"already declared with other settings \(attributes\)"):
+        client.queue("worker", attributes=fanferro.QueueAttributes(visibility_timeout=30))
+    topic = client.topic("orders", tags={"team": "orders"})
+    assert client.topic("orders", tags={"team": "orders"}) is topic
+    with pytest.raises(fanferro.ConfigurationError, match=r"\(tags\)"):
+        client.topic("orders", tags={"team": "billing"})
+
+
+def test_queues_can_share_a_dead_letter_queue() -> None:
+    client = memory_client()
+    first = client.queue("orders", dead_letter=fanferro.DeadLetterQueue("shared-dlq"))
+    second = client.queue("billing", dead_letter=fanferro.DeadLetterQueue("shared-dlq", max_receive_count=3))
+    assert first.dead_letter_queue is not None
+    assert second.dead_letter_queue is first.dead_letter_queue
+    assert first.dead_letter_queue.attributes == {"MessageRetentionPeriod": "1209600"}
+    # Declared on its own first (to consume it): queues using it as their dead-letter queue keep it.
+    parking = client.queue("parking-lot", attributes=fanferro.QueueAttributes(message_retention=3600))
+    assert client.queue("returns", dead_letter=fanferro.DeadLetterQueue("parking-lot")).dead_letter_queue is parking
+    assert parking.attributes == {"MessageRetentionPeriod": "3600"}
+    # Settings a dead-letter queue sets explicitly must agree with its declaration.
+    with pytest.raises(fanferro.ConfigurationError, match="'parking-lot' is already declared with other settings"):
+        client.queue(
+            "refunds",
+            dead_letter=fanferro.DeadLetterQueue(
+                "parking-lot", attributes=fanferro.QueueAttributes(message_retention=60)
+            ),
+        )
+
+
+def test_redeclaring_a_subscription_with_other_settings_raises() -> None:
+    client = memory_client()
+    topic = client.topic("orders")
+    queue = client.queue("worker")
+    subscription = client.subscription(topic, queue, filter_policy={"kind": ["a"]})
+    assert client.subscription(topic, queue) is subscription
+    assert client.subscription(topic, queue, filter_policy={"kind": ["a"]}) is subscription
+    assert topic.subscribe(queue, raw_message_delivery=True) is subscription
+    with pytest.raises(fanferro.ConfigurationError, match=r"already declared with other settings \(filter_policy\)"):
+        client.subscription(topic, queue, filter_policy={"kind": ["b"]})
+    with pytest.raises(fanferro.ConfigurationError, match="raw_message_delivery"):
+        queue.subscribe_to(topic, raw_message_delivery=False)
+
+
 def test_prefixed_false_opts_out() -> None:
     client = staging_client()
     audit = client.topic("shared-audit", prefixed=False)

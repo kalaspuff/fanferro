@@ -10,6 +10,7 @@ use aws_sdk_sqs::types::{
     SendMessageBatchRequestEntry,
 };
 use aws_smithy_types::Blob;
+use aws_smithy_types::timeout::TimeoutConfig;
 use bytes::Bytes;
 use time::OffsetDateTime;
 
@@ -20,6 +21,7 @@ use crate::backend::{
 };
 use crate::error::{Error, Result};
 use crate::types::{AttributeData, AttributeValue, MessageAttributes};
+use crate::util::whole_seconds;
 
 /// SQS backed by the AWS SDK.
 #[derive(Clone, Debug)]
@@ -36,6 +38,11 @@ impl AwsSqs {
 
 fn duration_secs_i32(duration: Duration) -> i32 {
     i32::try_from(duration.as_secs()).unwrap_or(i32::MAX)
+}
+
+/// A visibility timeout or delay in whole seconds, rounded up (never shorter than requested).
+fn timeout_secs_i32(duration: Duration) -> i32 {
+    duration_secs_i32(whole_seconds(duration))
 }
 
 /// Converts an attribute for a request (moving its strings, without copying them).
@@ -171,7 +178,7 @@ impl SqsApi for AwsSqs {
             .queue_url(queue_url)
             .message_body(request.body)
             .set_message_attributes(to_sdk_attributes(request.attributes)?)
-            .set_delay_seconds(request.delay.map(duration_secs_i32))
+            .set_delay_seconds(request.delay.map(timeout_secs_i32))
             .set_message_group_id(request.group_id)
             .set_message_deduplication_id(request.deduplication_id);
         if let Some(header) = &request.trace_header {
@@ -197,7 +204,7 @@ impl SqsApi for AwsSqs {
                 .id(index.to_string())
                 .message_body(entry.body)
                 .set_message_attributes(to_sdk_attributes(entry.attributes)?)
-                .set_delay_seconds(entry.delay.map(duration_secs_i32))
+                .set_delay_seconds(entry.delay.map(timeout_secs_i32))
                 .set_message_group_id(entry.group_id)
                 .set_message_deduplication_id(entry.deduplication_id);
             if let Some(header) = &entry.trace_header {
@@ -235,21 +242,22 @@ impl SqsApi for AwsSqs {
 
     async fn receive_messages(&self, request: ReceiveRequest) -> Result<Vec<ReceivedMessage>> {
         let wait = request.wait_time.min(Duration::from_secs(20));
-        // Long polls must not be cut short by user-configured read/attempt timeouts.
+        // Long polls must not be cut short by user-configured read, attempt or operation timeouts
+        // (unset fields of an override inherit the client's): a poll cut short stays open on the
+        // server, where it may still take messages that then stay invisible.
         let budget = wait + Duration::from_secs(15);
-        let override_config = aws_sdk_sqs::config::Builder::default().timeout_config(
-            aws_config::timeout::TimeoutConfig::builder()
-                .read_timeout(budget)
-                .operation_attempt_timeout(budget)
-                .build(),
-        );
+        let mut timeouts = TimeoutConfig::builder().read_timeout(budget).operation_attempt_timeout(budget);
+        if let Some(configured) = self.client.config().timeout_config().and_then(TimeoutConfig::operation_timeout) {
+            timeouts = timeouts.operation_timeout(configured.max(budget));
+        }
+        let override_config = aws_sdk_sqs::config::Builder::default().timeout_config(timeouts.build());
         let output = self
             .client
             .receive_message()
             .queue_url(&request.queue_url)
             .max_number_of_messages(i32::from(request.max_messages.clamp(1, 10)))
             .wait_time_seconds(duration_secs_i32(wait))
-            .set_visibility_timeout(request.visibility_timeout.map(duration_secs_i32))
+            .set_visibility_timeout(request.visibility_timeout.map(timeout_secs_i32))
             .set_receive_request_attempt_id(request.attempt_id)
             .message_system_attribute_names(MessageSystemAttributeName::All)
             .message_attribute_names("All")
@@ -302,7 +310,7 @@ impl SqsApi for AwsSqs {
                 ChangeMessageVisibilityBatchRequestEntry::builder()
                     .id(index.to_string())
                     .receipt_handle(entry.receipt_handle)
-                    .visibility_timeout(duration_secs_i32(entry.timeout))
+                    .visibility_timeout(timeout_secs_i32(entry.timeout))
                     .build()
                     .map_err(|err| Error::validation(format!("invalid visibility entry: {err}")))
             })

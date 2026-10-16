@@ -34,6 +34,27 @@ async def test_heartbeats_protect_slow_handlers(client_factory: ClientFactory, n
     assert consumer.stats()["engine"]["lease_extensions"] >= 3
 
 
+async def test_sub_second_visibility_timeouts_round_up(client_factory: ClientFactory, name: Any) -> None:
+    # SQS takes whole seconds: 0.5 s must not become 0 (the message would be redelivered at once).
+    client = client_factory()
+    queue = client.queue(name("sub-second"))
+    receive_counts: list[int] = []
+    consumer = client.consumer(queue, wait_time=1, visibility_timeout=0.5, pollers=2)
+
+    @consumer.route(OrderCreated)
+    async def handle(message: fanferro.Message[OrderCreated]) -> None:
+        receive_counts.append(message.receive_count)
+        await asyncio.sleep(2)
+
+    async with client:
+        await queue.send(OrderCreated(order_id=1))
+        await consumer.start()
+        await wait_for(lambda: bool(receive_counts))
+        await asyncio.sleep(2.5)
+        await consumer.stop()
+    assert receive_counts == [1]
+
+
 async def test_graceful_shutdown_waits_for_in_flight(client_factory: ClientFactory, name: Any) -> None:
     client = client_factory()
     queue = client.queue(name("drain"))
@@ -117,6 +138,27 @@ async def test_stop_returns_immediately_when_idle(client_factory: ClientFactory,
         elapsed = time.monotonic() - began
     assert consumer.state == "stopped"
     assert elapsed < 0.25, f"stop() took {elapsed:.3f} s"
+
+
+async def test_long_polls_outlast_a_configured_operation_timeout(client_factory: ClientFactory, name: Any) -> None:
+    # An operation timeout meant for publishing must not cut long polls short.
+    client = client_factory(timeouts=fanferro.Timeouts(operation=1.0))
+    queue = client.queue(name("operation-timeout"))
+    failures: list[fanferro.Event] = []
+    client.on("receive.failed", failures.append)
+    received: list[int] = []
+    consumer = client.consumer(queue, wait_time=3)
+
+    @consumer.route(OrderCreated)
+    async def handle(order: OrderCreated) -> None:
+        received.append(order.order_id)
+
+    async with client:
+        await consumer.start()
+        await asyncio.sleep(1.5)
+        await queue.send(OrderCreated(order_id=1))
+        await consume_until(consumer, lambda: received == [1])
+    assert not failures, failures[0].message
 
 
 async def test_stop_waits_for_running_handlers(client_factory: ClientFactory, name: Any) -> None:
@@ -456,6 +498,183 @@ async def test_signals_stop_run(memory_client: fanferro.Client, name: Any) -> No
         await wait_for(lambda: consumer.state == "running")
         os.kill(os.getpid(), signal.SIGTERM)
         await asyncio.wait_for(task, 15)
+    assert consumer.state == "stopped"
+
+
+async def test_a_second_stop_request_skips_the_drain(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory()
+    queue = client.queue(name("second-request"))
+    started = asyncio.Event()
+    cancelled: list[bool] = []
+    policy = fanferro.ShutdownPolicy(drain_timeout=60, cancel_timeout=2)
+    consumer = client.consumer(queue, wait_time=1, shutdown=policy)
+
+    @consumer.route(OrderCreated)
+    async def handle(order: OrderCreated) -> None:
+        started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+
+    async with client:
+        await queue.send(OrderCreated(order_id=1))
+        run = asyncio.create_task(consumer.run(install_signal_handlers=False))
+        await asyncio.wait_for(started.wait(), 15)
+        consumer.request_stop()
+        await wait_for(lambda: consumer.state == "stopping")
+        await asyncio.sleep(0.2)
+        began = time.monotonic()
+        consumer.request_stop()  # e.g. a second Ctrl-C
+        await asyncio.wait_for(run, 10)
+        assert time.monotonic() - began < 5
+        assert cancelled == [True]
+        assert consumer.state == "stopped"
+
+
+async def test_a_second_client_stop_skips_the_drain(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory()
+    queue = client.queue(name("client-second-stop"))
+    started = asyncio.Event()
+    policy = fanferro.ShutdownPolicy(drain_timeout=60, cancel_timeout=2)
+    consumer = client.consumer(queue, wait_time=1, shutdown=policy)
+
+    @consumer.route(OrderCreated)
+    async def handle(order: OrderCreated) -> None:
+        started.set()
+        await asyncio.sleep(3600)
+
+    async with client:
+        await queue.send(OrderCreated(order_id=1))
+        run = asyncio.create_task(client.run(install_signal_handlers=False))
+        await asyncio.wait_for(started.wait(), 15)
+        client.stop()
+        await wait_for(lambda: consumer.state == "stopping")
+        await asyncio.sleep(0.2)
+        began = time.monotonic()
+        client.stop()
+        await asyncio.wait_for(run, 10)
+        assert time.monotonic() - began < 5
+        assert consumer.state == "stopped"
+
+
+async def test_concurrent_stops_wait_for_the_stop_in_progress(memory_client: fanferro.Client, name: Any) -> None:
+    queue = memory_client.queue(name("concurrent-stops"))
+    started = asyncio.Event()
+    finish = asyncio.Event()
+    consumer = memory_client.consumer(queue, wait_time=1, shutdown=fanferro.ShutdownPolicy(drain_timeout=60))
+
+    @consumer.route(OrderCreated)
+    async def handle(order: OrderCreated) -> None:
+        started.set()
+        await finish.wait()
+
+    async with memory_client:
+        await queue.send(OrderCreated(order_id=1))
+        await consumer.start()
+        await asyncio.wait_for(started.wait(), 15)
+        first = asyncio.create_task(consumer.stop())
+        await asyncio.sleep(0.1)
+        second = asyncio.create_task(consumer.stop())
+        await asyncio.sleep(0.3)
+        assert not second.done(), "a second stop() must wait until the consumer stopped"
+        finish.set()
+        await asyncio.wait_for(asyncio.gather(first, second), 10)
+        assert consumer.state == "stopped"
+        assert consumer.stats()["processed"] == 1
+
+        # A shorter drain timeout cuts a stop in progress short.
+        finish.clear()
+        started.clear()
+        await queue.send(OrderCreated(order_id=2))
+        await consumer.start()
+        await asyncio.wait_for(started.wait(), 15)
+        graceful = asyncio.create_task(consumer.stop())
+        await asyncio.sleep(0.2)
+        began = time.monotonic()
+        await asyncio.wait_for(consumer.stop(drain_timeout=0), 15)
+        assert time.monotonic() - began < 5
+        assert graceful.done()
+        assert consumer.state == "stopped"
+
+
+async def test_stop_while_starting(memory_client: fanferro.Client, name: Any) -> None:
+    async with memory_client:
+        # Declared after entering the client: start() has to resolve the queue first.
+        queue = memory_client.queue(name("starting"))
+        consumer = memory_client.consumer(queue, wait_time=1)
+
+        @consumer.default
+        async def handle(message: fanferro.Message[Any]) -> None: ...
+
+        starting = asyncio.create_task(consumer.start())
+        await asyncio.sleep(0)
+        assert consumer.state == "starting"
+        await asyncio.wait_for(consumer.stop(), 10)
+        await starting
+        assert consumer.state == "stopped"
+
+        # Closing the client stops a consumer that is still starting, too.
+        other = memory_client.consumer(memory_client.queue(name("starting-close")), handle, wait_time=1)
+        starting = asyncio.create_task(other.start())
+        await asyncio.sleep(0)
+        assert other.state == "starting"
+        await memory_client.close()
+        await starting
+        assert other.state == "stopped"
+
+
+async def test_prefetched_messages_are_released_when_stopping(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory()
+    queue = client.queue(name("release-prefetched"))
+    started = asyncio.Event()
+    policy = fanferro.ShutdownPolicy(drain_timeout=5, cancel_timeout=1, abort_receives=False)
+    consumer = client.consumer(queue, wait_time=1, concurrency=1, prefetch=5, shutdown=policy)
+
+    @consumer.route(OrderCreated)
+    async def handle(order: OrderCreated) -> None:
+        started.set()
+        await asyncio.sleep(3600)
+
+    async with client:
+        await queue.send_batch([OrderCreated(order_id=index) for index in range(6)])
+        await consumer.start()
+        await asyncio.wait_for(started.wait(), 15)
+        await wait_for(lambda: consumer.stats()["engine"].get("in_flight", 0) == 6)
+        stopping = asyncio.create_task(consumer.stop())
+        # The slow handler drains for 5 s; the prefetched messages must not wait for it.
+        await asyncio.sleep(2)
+        counts = await queue.approximate_count()
+        assert not stopping.done()
+        assert counts["visible"] == 5, counts
+        await stopping
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGTERM") or os.name == "nt", reason="POSIX signals")
+async def test_a_second_signal_skips_the_drain(memory_client: fanferro.Client, name: Any) -> None:
+    queue = memory_client.queue(name("second-signal"))
+    started = asyncio.Event()
+    consumer = memory_client.consumer(
+        queue, wait_time=1, shutdown=fanferro.ShutdownPolicy(drain_timeout=60, cancel_timeout=2)
+    )
+
+    @consumer.route(OrderCreated)
+    async def handle(order: OrderCreated) -> None:
+        started.set()
+        await asyncio.sleep(3600)
+
+    async with memory_client:
+        await queue.send(OrderCreated(order_id=1))
+        task = asyncio.create_task(consumer.run())
+        await asyncio.wait_for(started.wait(), 15)
+        os.kill(os.getpid(), signal.SIGTERM)
+        await wait_for(lambda: consumer.state == "stopping")
+        await asyncio.sleep(0.2)
+        began = time.monotonic()
+        os.kill(os.getpid(), signal.SIGTERM)
+        await asyncio.wait_for(task, 10)
+        assert time.monotonic() - began < 5
     assert consumer.state == "stopped"
 
 

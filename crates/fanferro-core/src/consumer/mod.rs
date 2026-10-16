@@ -30,7 +30,7 @@ mod settle;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -215,6 +215,8 @@ pub(crate) struct EngineInner {
     paused: watch::Sender<bool>,
     state: Mutex<EngineState>,
     pollers: Mutex<Vec<JoinHandle<()>>>,
+    /// Whether receive loops may still be running (set by `start`, cleared once they all ended).
+    polling: AtomicBool,
     background: Mutex<Vec<JoinHandle<()>>>,
     decoders: TaskTracker,
     /// Settlements running in the background (see [`Delivery::ack_in_background`]).
@@ -431,14 +433,20 @@ impl EngineInner {
                 }
             }
         } else {
+            let message = match info.kind {
+                SnsMessageKind::UnsubscribeConfirmation => {
+                    "dropped an SNS unsubscribe confirmation: the queue's subscription to the topic was removed"
+                }
+                _ if confirm => "dropped an SNS subscription confirmation without a token; confirm it manually",
+                _ => {
+                    "dropped an SNS subscription confirmation; enable auto_confirm_subscriptions or confirm it manually"
+                }
+            };
             self.client.events().emit(EventKind::ConfigWarning, || {
-                Event::new(
-                    EventKind::ConfigWarning,
-                    "dropped an SNS subscription control message; enable auto_confirm_subscriptions or confirm it manually",
-                )
-                .field("queue", self.queue())
-                .field("topic_arn", &info.topic_arn)
-                .field("sns_type", format!("{:?}", info.kind))
+                Event::new(EventKind::ConfigWarning, message)
+                    .field("queue", self.queue())
+                    .field("topic_arn", &info.topic_arn)
+                    .field("sns_type", format!("{:?}", info.kind))
             });
         }
         let _ = lease.ack().await;
@@ -539,6 +547,7 @@ impl ConsumerEngine {
                 paused: watch::Sender::new(false),
                 state: Mutex::new(EngineState::Created),
                 pollers: Mutex::new(Vec::new()),
+                polling: AtomicBool::new(false),
                 background: Mutex::new(Vec::new()),
                 decoders: TaskTracker::new(),
                 settlements: TaskTracker::new(),
@@ -588,6 +597,7 @@ impl ConsumerEngine {
             background.push(inner.runtime.spawn(heartbeat::heartbeat_loop(inner.clone())));
         }
         *inner.background.lock() = background;
+        inner.polling.store(true, Ordering::SeqCst);
         let pollers =
             (0..inner.settings.pollers).map(|_| inner.runtime.spawn(poller::poll_loop(inner.clone()))).collect();
         *inner.pollers.lock() = pollers;
@@ -668,7 +678,8 @@ impl ConsumerEngine {
     /// whatever it returns is released immediately. Aborting it instead (`abort = true`) stops
     /// faster, but the queue keeps serving the abandoned poll on its side and may hand it
     /// messages that then stay invisible until their visibility timeout expires; messages this
-    /// engine releases afterwards are therefore kept invisible until such polls are over.
+    /// engine releases afterwards are therefore kept invisible until such polls are over. A call
+    /// with `abort` also cuts short a call without it that is still waiting for its poll.
     pub async fn stop_receiving(&self, abort: bool) {
         {
             let mut state = self.inner.state.lock();
@@ -679,7 +690,7 @@ impl ConsumerEngine {
         if abort
             && !self.inner.abort_token.is_cancelled()
             && self.inner.client.backend().kind == crate::backend::BackendKind::Aws
-            && !self.inner.pollers.lock().is_empty()
+            && self.inner.polling.load(Ordering::SeqCst)
         {
             *self.inner.orphaned_receives_until.lock() = Some(Instant::now() + self.inner.settings.wait_time);
         }
@@ -688,8 +699,12 @@ impl ConsumerEngine {
             self.inner.abort_token.cancel();
         }
         let pollers: Vec<_> = self.inner.pollers.lock().drain(..).collect();
+        let joined = !pollers.is_empty();
         for poller in pollers {
             let _ = poller.await;
+        }
+        if joined {
+            self.inner.polling.store(false, Ordering::SeqCst);
         }
         self.inner.decoders.close();
         self.inner.decoders.wait().await;
@@ -703,11 +718,12 @@ impl ConsumerEngine {
         // Background acks complete first: they need the settle loop, which stops below.
         self.inner.settlements.close();
         self.inner.settlements.wait().await;
-        for delivery in self.drain_buffered() {
-            if release_unsettled {
-                let _ = delivery.lease.release().await;
-            }
+        let buffered = self.drain_buffered();
+        if release_unsettled {
+            // Together: one batch call per ten messages instead of one round trip each.
+            futures::future::join_all(buffered.iter().map(|delivery| delivery.lease.release())).await;
         }
+        drop(buffered);
         let remaining: Vec<(u64, LeaseEntry)> = self.inner.leases.lock().drain().collect();
         self.inner.metrics.in_flight.add(-i64::try_from(remaining.len()).unwrap_or(0));
         if release_unsettled && let Some(queue) = self.inner.settle_queue() {
