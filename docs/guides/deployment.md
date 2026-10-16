@@ -3,6 +3,8 @@
 ## Processes, threads and fork
 
 The Rust core runs a Tokio runtime with 2-4 worker threads per process (`FANFERRO_WORKER_THREADS`).
+Results reach the event loop through a socket pair the loop watches: two file descriptors per
+event loop that awaits fanferro operations, released after the loop is closed.
 Create clients **after** forking (gunicorn/uvicorn workers, multiprocessing): a client created
 before `fork()` raises `ShutdownError` in the child instead of sharing connections with the parent.
 

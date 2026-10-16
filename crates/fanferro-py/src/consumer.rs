@@ -13,7 +13,7 @@ use pyo3::types::{PyDict, PyList};
 use crate::client::pointer_to_py;
 use crate::convert::{attributes_to_py, seconds, time_to_py};
 use crate::errors::{ShutdownError, to_py_err, to_py_err_with};
-use crate::runtime::{Completions, future_into_py, handle};
+use crate::runtime::{Convert, future_into_py, handle, pending_future};
 use crate::types::wire_to_py;
 
 /// Receives messages from one queue.
@@ -21,13 +21,11 @@ use crate::types::wire_to_py;
 pub struct PyConsumerEngine {
     engine: ConsumerEngine,
     pid: u32,
-    /// Resolves the settlement awaitables of this engine's deliveries in batches.
-    completions: Arc<Completions>,
 }
 
 impl PyConsumerEngine {
     pub fn new(engine: ConsumerEngine, pid: u32) -> Self {
-        Self { engine, pid, completions: Arc::default() }
+        Self { engine, pid }
     }
 
     fn engine(&self) -> PyResult<ConsumerEngine> {
@@ -40,10 +38,10 @@ impl PyConsumerEngine {
     }
 }
 
-fn deliveries_to_py(py: Python<'_>, deliveries: Vec<Delivery>, completions: &Arc<Completions>) -> PyResult<Py<PyAny>> {
+fn deliveries_to_py(py: Python<'_>, deliveries: Vec<Delivery>) -> PyResult<Py<PyAny>> {
     let list = PyList::empty(py);
     for delivery in deliveries {
-        list.append(Py::new(py, PyDelivery { inner: Arc::new(delivery), completions: completions.clone() })?)?;
+        list.append(Py::new(py, PyDelivery { inner: Arc::new(delivery) })?)?;
     }
     list.into_py_any(py)
 }
@@ -62,17 +60,16 @@ impl PyConsumerEngine {
     fn next_batch<'py>(&self, py: Python<'py>, max: usize, timeout: f64) -> PyResult<Bound<'py, PyAny>> {
         let engine = self.engine()?;
         let timeout = seconds(Some(timeout), "timeout")?.unwrap_or(Duration::from_secs(1));
-        let completions = self.completions.clone();
         future_into_py(py, async move {
             let deliveries = engine.next_batch(max, timeout).await;
-            Python::attach(|py| deliveries_to_py(py, deliveries, &completions))
+            Convert(move |py: Python<'_>| deliveries_to_py(py, deliveries))
         })
     }
 
     /// Returns buffered deliveries without waiting.
     fn drain_buffered<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let engine = self.engine()?;
-        deliveries_to_py(py, engine.drain_buffered(), &self.completions).map(|list| list.into_bound(py))
+        deliveries_to_py(py, engine.drain_buffered()).map(|list| list.into_bound(py))
     }
 
     /// Pauses receiving.
@@ -109,7 +106,7 @@ impl PyConsumerEngine {
         let engine = self.engine()?;
         future_into_py(py, async move {
             engine.stop_receiving(abort).await;
-            Ok(())
+            fanferro_core::Result::Ok(())
         })
     }
 
@@ -118,7 +115,7 @@ impl PyConsumerEngine {
         let engine = self.engine()?;
         future_into_py(py, async move {
             engine.close(release_unsettled).await;
-            Ok(())
+            fanferro_core::Result::Ok(())
         })
     }
 
@@ -139,7 +136,6 @@ impl PyConsumerEngine {
 #[pyclass(name = "Delivery", module = "fanferro._core", frozen)]
 pub struct PyDelivery {
     inner: Arc<Delivery>,
-    completions: Arc<Completions>,
 }
 
 impl PyDelivery {
@@ -150,7 +146,7 @@ impl PyDelivery {
         Settle: FnOnce(Arc<Delivery>) -> Fut + Send + 'static,
         Fut: Future<Output = fanferro_core::Result<()>> + Send + 'static,
     {
-        let (future, pending) = self.completions.future(py)?;
+        let (future, pending) = pending_future(py)?;
         self.inner.spawn_settlement(settle, move |result| pending.complete(result));
         Ok(future)
     }
@@ -320,7 +316,7 @@ impl PyDelivery {
 
     /// Deletes the message (awaitable).
     fn ack<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let (future, pending) = self.completions.future(py)?;
+        let (future, pending) = pending_future(py)?;
         self.inner.spawn_ack(move |result| pending.complete(result));
         Ok(future)
     }
