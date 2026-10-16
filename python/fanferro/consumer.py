@@ -405,6 +405,8 @@ class Consumer:
         self._hurry: asyncio.Event | None = None  # set when a later stop request moved the deadline
         self._aborting = False  # the stop in progress aborts the long poll in flight
         self._abort_receiving: asyncio.Future[None] | None = None
+        self._slot_waiters: set[asyncio.Task[Any]] = set()  # tasks of messages waiting for a slot
+        self._releasing: set[asyncio.Task[Any]] = set()  # waiters cancelled to release their message
 
     # -- routing shortcuts -----------------------------------------------------------------
 
@@ -740,13 +742,16 @@ class Consumer:
                     self._dispatcher.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await self._dispatcher
+            if policy.release_prefetched:
+                self._release_waiting_messages()
             # Handlers keep running while a final long poll completes.
             await self._drain()
             await stop_receiving
-            for delivery in engine.drain_buffered():
-                if policy.release_prefetched:
-                    await self._release_quietly(delivery)
-                else:
+            buffered = engine.drain_buffered()
+            if policy.release_prefetched:
+                await asyncio.gather(*(self._release_quietly(delivery) for delivery in buffered))
+            else:
+                for delivery in buffered:
                     self._schedule(delivery)
             await self._drain()
             if self._tasks:
@@ -765,6 +770,12 @@ class Consumer:
             self._client._unregister_consumer(self)
             self._client._release_pump()
             self._state = "stopped"
+
+    def _release_waiting_messages(self) -> None:
+        """Releases the prefetched messages that wait for a handler slot (stopping: they never start)."""
+        for task in list(self._slot_waiters):
+            self._releasing.add(task)
+            task.cancel()
 
     async def _drain(self) -> None:
         """Waits for the message tasks until they end or the drain deadline passes."""
@@ -843,6 +854,23 @@ class Consumer:
         """Forgets tasks that ended without :meth:`_task_ended` (cancelled before they ever ran)."""
         self._tasks.difference_update([task for task in self._tasks if task.done()])
 
+    async def _acquire_slot(self, semaphore: asyncio.Semaphore) -> bool:
+        """Waits for a handler slot; ``False`` when stopping released the message instead."""
+        task = asyncio.current_task()
+        assert task is not None
+        self._slot_waiters.add(task)
+        try:
+            await semaphore.acquire()
+        except asyncio.CancelledError:
+            if task not in self._releasing:
+                raise
+            self._releasing.discard(task)
+            task.uncancel()
+            return False
+        finally:
+            self._slot_waiters.discard(task)
+        return True
+
     def _task_failed(self, error: Exception) -> None:
         self._emit(EventKind.CONSUMER_ERROR, f"unexpected error in consumer {self.name}", exception=error)
 
@@ -855,14 +883,23 @@ class Consumer:
         try:
             semaphore = self._semaphore
             assert semaphore is not None
+            if self._stopping and self.shutdown_policy.release_prefetched:
+                if counted:
+                    self._waiting -= 1
+                await self._release_quietly(delivery)
+                return "released"
             if not counted:
                 self._waiting += 1
             try:
-                await semaphore.acquire()
+                if not semaphore.locked():
+                    await semaphore.acquire()  # a free slot: no wait
+                elif not await self._acquire_slot(semaphore):
+                    await self._release_quietly(delivery)
+                    return "released"
             finally:
                 self._waiting -= 1
             if self._stopping and self.shutdown_policy.release_prefetched:
-                semaphore.release()
+                semaphore.release()  # the slot came free while the consumer began to stop
                 await self._release_quietly(delivery)
                 return "released"
             delivery.mark_active()

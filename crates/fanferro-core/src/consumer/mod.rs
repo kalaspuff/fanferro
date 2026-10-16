@@ -712,11 +712,12 @@ impl ConsumerEngine {
         // Background acks complete first: they need the settle loop, which stops below.
         self.inner.settlements.close();
         self.inner.settlements.wait().await;
-        for delivery in self.drain_buffered() {
-            if release_unsettled {
-                let _ = delivery.lease.release().await;
-            }
+        let buffered = self.drain_buffered();
+        if release_unsettled {
+            // Together: one batch call per ten messages instead of one round trip each.
+            futures::future::join_all(buffered.iter().map(|delivery| delivery.lease.release())).await;
         }
+        drop(buffered);
         let remaining: Vec<(u64, LeaseEntry)> = self.inner.leases.lock().drain().collect();
         self.inner.metrics.in_flight.add(-i64::try_from(remaining.len()).unwrap_or(0));
         if release_unsettled && let Some(queue) = self.inner.settle_queue() {
