@@ -40,8 +40,11 @@ async def test_signup_flow() -> None:
 
 The broker models SQS/SNS/S3 behaviour that matters for processing: visibility timeouts, receive
 counts, redrive to DLQs, FIFO groups and deduplication, delays, SNS fan-out with filter policies,
-raw and wrapped delivery, presigned URLs. Share one `MemoryBroker` between clients with
-`memory_client(broker=broker)`; inspect queues with `broker.queue_messages(url)`.
+raw and wrapped delivery, presigned URLs. Filter policies support what SNS supports (exact values,
+`prefix`, `suffix`, `equals-ignore-case`, `wildcard`, `cidr`, `anything-but`, `numeric`, `exists`,
+`$or`, nested keys of `MessageBody` policies), with its limits, and a policy SNS would refuse fails
+when it is set. Share one `MemoryBroker` between clients with `memory_client(broker=broker)`;
+inspect queues with `broker.queue_messages(url)`.
 
 ## Against an emulator
 

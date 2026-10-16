@@ -82,7 +82,11 @@ client.subscription(events, client.queue("eu-billing"), filter_policy={"region":
 ```
 
 `fanferro.type` is set on every message published with a type, so filter policies on message
-types work without custom attributes.
+types work without custom attributes. Policies can also match prefixes, wildcards, IP ranges and
+numeric ranges, for example `{"region": [{"prefix": "eu-"}], "amount": [{"numeric": [">=", 100]}]}`;
+numeric conditions match `Number` attributes only, so publish such attributes as numbers
+(`attributes={"amount": 150}`), not as strings. With `filter_policy_scope="MessageBody"`, policies
+match (nested) fields of JSON bodies instead.
 
 ## Versioned messages
 

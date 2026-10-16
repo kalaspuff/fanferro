@@ -31,6 +31,10 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   delete no longer stalls a consumer, a stuck publish no longer hangs its caller. Long polls get
   at least their wait time plus 15 seconds, requests with large bodies one more second per 64 KiB
   uploaded; `Timeouts(read=None)` turns it off.
+- The in-memory broker evaluates filter policies like SNS: it refuses a policy SNS would refuse
+  when the subscription is created (`ProvisioningError`), and values match by type, so a numeric
+  condition no longer matches a `String` attribute that holds a number, nor a string condition a
+  `Number` attribute.
 
 ## [0.4.0] - 2026-10-16
 
