@@ -16,6 +16,7 @@
 //! `tokio::time::Instant`, so tests can pause and advance the clock.
 
 pub mod filter_policy;
+mod store;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -43,8 +44,8 @@ use crate::types::attributes::{attributes_encoded_len, md5_of_attributes, md5_of
 use crate::types::text::is_sqs_safe_text;
 use crate::types::{AttributeData, MessageAttributes, arn};
 use filter_policy::FilterScope;
+use store::{Dedup, Messages, StoredMessage};
 
-const DEDUP_WINDOW: Duration = Duration::from_secs(300);
 const DEFAULT_MAX_MESSAGE_SIZE: usize = 1_048_576;
 const DEFAULT_TOPIC_MAX_MESSAGE_SIZE: usize = 262_144;
 
@@ -78,26 +79,6 @@ fn invalid(service: &'static str, operation: &'static str, message: impl Into<St
 }
 
 #[derive(Debug)]
-struct StoredMessage {
-    message_id: String,
-    body: String,
-    attributes: MessageAttributes,
-    md5_of_body: String,
-    md5_of_attributes: Option<String>,
-    sent: OffsetDateTime,
-    available_at: Instant,
-    receive_count: u32,
-    first_receive: Option<OffsetDateTime>,
-    receipt_handle: Option<String>,
-    in_flight: bool,
-    group_id: Option<String>,
-    deduplication_id: Option<String>,
-    sequence_number: Option<String>,
-    trace_header: Option<String>,
-    dead_letter_source: Option<String>,
-}
-
-#[derive(Debug)]
 struct Queue {
     name: String,
     url: String,
@@ -105,8 +86,9 @@ struct Queue {
     fifo: bool,
     attributes: StringMap,
     tags: StringMap,
-    messages: Vec<StoredMessage>,
-    dedup: HashMap<String, (Instant, String, Option<String>)>,
+    messages: Messages,
+    /// FIFO deduplication id -> message id and sequence number.
+    dedup: Dedup<(String, Option<String>)>,
     notify: Arc<Notify>,
 }
 
@@ -118,18 +100,6 @@ impl Queue {
     fn max_message_size(&self) -> usize {
         self.attributes.get("MaximumMessageSize").and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_MAX_MESSAGE_SIZE)
     }
-
-    fn release_expired(&mut self, now: Instant) {
-        for message in &mut self.messages {
-            if message.in_flight && message.available_at <= now {
-                message.in_flight = false;
-            }
-        }
-    }
-
-    fn next_change_after(&self, now: Instant) -> Option<Instant> {
-        self.messages.iter().map(|m| m.available_at).filter(|at| *at > now).min()
-    }
 }
 
 #[derive(Debug)]
@@ -139,7 +109,8 @@ struct Topic {
     fifo: bool,
     attributes: StringMap,
     tags: StringMap,
-    dedup: HashMap<String, (Instant, String)>,
+    /// FIFO deduplication id -> message id.
+    dedup: Dedup<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -243,9 +214,10 @@ impl MemoryBroker {
 
     /// Messages currently stored in a queue (visible, delayed and in flight), in order.
     pub fn queue_messages(&self, queue_url: &str) -> Result<Vec<MessageSnapshot>> {
-        let state = self.inner.state.lock();
-        let queue = state.queues.get(queue_url).ok_or_else(|| queue_not_found("Snapshot"))?;
+        let mut state = self.inner.state.lock();
+        let queue = state.queues.get_mut(queue_url).ok_or_else(|| queue_not_found("Snapshot"))?;
         let now = Instant::now();
+        queue.messages.promote(now);
         Ok(queue
             .messages
             .iter()
@@ -362,9 +334,8 @@ fn enqueue(state: &mut State, queue_url: &str, operation: &'static str, request:
                 ));
             }
         }
-        queue.dedup.retain(|_, (at, _, _)| now.duration_since(*at) < DEDUP_WINDOW);
         if let Some(id) = &deduplication_id
-            && let Some((_, message_id, sequence_number)) = queue.dedup.get(id)
+            && let Some((message_id, sequence_number)) = queue.dedup.get(id, now)
         {
             return Ok(SendOutput {
                 message_id: message_id.clone(),
@@ -381,28 +352,31 @@ fn enqueue(state: &mut State, queue_url: &str, operation: &'static str, request:
     if let Some(id) = &deduplication_id
         && queue.fifo
     {
-        queue.dedup.insert(id.clone(), (now, message_id.clone(), sequence_number.clone()));
+        queue.dedup.insert(id.clone(), now, (message_id.clone(), sequence_number.clone()));
     }
     let md5_body = md5_of_body(&request.body);
     let md5_attributes = (!request.attributes.is_empty()).then(|| md5_of_attributes(&request.attributes));
-    queue.messages.push(StoredMessage {
-        message_id: message_id.clone(),
-        body: request.body,
-        attributes: request.attributes,
-        md5_of_body: md5_body.clone(),
-        md5_of_attributes: md5_attributes.clone(),
-        sent: request.sent.unwrap_or_else(OffsetDateTime::now_utc),
-        available_at: now + delay,
-        receive_count: 0,
-        first_receive: None,
-        receipt_handle: None,
-        in_flight: false,
-        group_id: request.group_id,
-        deduplication_id,
-        sequence_number: sequence_number.clone(),
-        trace_header: request.trace_header,
-        dead_letter_source: request.dead_letter_source,
-    });
+    queue.messages.push(
+        StoredMessage {
+            message_id: message_id.clone(),
+            body: request.body,
+            attributes: request.attributes,
+            md5_of_body: md5_body.clone(),
+            md5_of_attributes: md5_attributes.clone(),
+            sent: request.sent.unwrap_or_else(OffsetDateTime::now_utc),
+            available_at: now + delay,
+            receive_count: 0,
+            first_receive: None,
+            receipt_handle: None,
+            in_flight: false,
+            group_id: request.group_id,
+            deduplication_id,
+            sequence_number: sequence_number.clone(),
+            trace_header: request.trace_header,
+            dead_letter_source: request.dead_letter_source,
+        },
+        now,
+    );
     queue.notify.notify_waiters();
     Ok(SendOutput {
         message_id,
@@ -413,7 +387,7 @@ fn enqueue(state: &mut State, queue_url: &str, operation: &'static str, request:
 }
 
 /// Moves messages that exhausted `maxReceiveCount` to the dead-letter queue.
-fn apply_redrive(state: &mut State, queue_url: &str, now: Instant) {
+fn apply_redrive(state: &mut State, queue_url: &str) {
     let Some(queue) = state.queues.get_mut(queue_url) else { return };
     let Some(policy) =
         queue.attributes.get("RedrivePolicy").and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
@@ -430,17 +404,17 @@ fn apply_redrive(state: &mut State, queue_url: &str, now: Instant) {
         return;
     };
     let source_arn = queue.arn.clone();
-    let mut moved = Vec::new();
-    let mut index = 0;
-    while index < queue.messages.len() {
-        let message = &queue.messages[index];
-        let visible = !message.in_flight && message.available_at <= now;
-        if visible && u64::from(message.receive_count) >= max_receive_count {
-            moved.push(queue.messages.remove(index));
-        } else {
-            index += 1;
-        }
-    }
+    // Only messages received before can have reached the count (unless it is zero).
+    let exhausted = |(sequence, message): (u64, &StoredMessage)| {
+        (u64::from(message.receive_count) >= max_receive_count).then_some(sequence)
+    };
+    let sequences: Vec<u64> = if max_receive_count == 0 {
+        queue.messages.visible().filter_map(exhausted).collect()
+    } else {
+        queue.messages.redelivered().filter_map(exhausted).collect()
+    };
+    let moved: Vec<StoredMessage> =
+        sequences.into_iter().filter_map(|sequence| queue.messages.remove(sequence)).collect();
     if moved.is_empty() {
         return;
     }
@@ -466,49 +440,34 @@ fn apply_redrive(state: &mut State, queue_url: &str, now: Instant) {
 }
 
 fn try_receive(state: &mut State, request: &ReceiveRequest, now: Instant) -> Result<Vec<ReceivedMessage>> {
-    if !state.queues.contains_key(&request.queue_url) {
-        return Err(queue_not_found("ReceiveMessage"));
-    }
-    if let Some(queue) = state.queues.get_mut(&request.queue_url) {
-        queue.release_expired(now);
-    }
-    apply_redrive(state, &request.queue_url, now);
+    state.queues.get_mut(&request.queue_url).ok_or_else(|| queue_not_found("ReceiveMessage"))?.messages.promote(now);
+    apply_redrive(state, &request.queue_url);
     let queue = state.queues.get_mut(&request.queue_url).ok_or_else(|| queue_not_found("ReceiveMessage"))?;
     let visibility = request
         .visibility_timeout
         .unwrap_or_else(|| Duration::from_secs(queue.attribute_secs("VisibilityTimeout", 30)));
     let max = usize::from(request.max_messages.clamp(1, 10));
-    let blocked_groups: Vec<String> = if queue.fifo {
-        queue.messages.iter().filter(|m| m.in_flight).filter_map(|m| m.group_id.clone()).collect()
-    } else {
-        Vec::new()
-    };
-    let mut received = Vec::new();
+    // FIFO: a group with a message in flight is blocked (messages received now block it afterwards).
+    let fifo = queue.fifo;
+    let sequences: Vec<u64> = queue
+        .messages
+        .visible()
+        .filter(|(_, message)| {
+            !(fifo && message.group_id.as_deref().is_some_and(|g| queue.messages.group_in_flight(g)))
+        })
+        .map(|(sequence, _)| sequence)
+        .take(max)
+        .collect();
+    let mut received = Vec::with_capacity(sequences.len());
     let mut retired = Vec::new();
-    for message in &mut queue.messages {
-        if received.len() >= max {
-            break;
+    for sequence in sequences {
+        let Some((message, previous)) = queue.messages.receive(sequence, now + visibility) else { continue };
+        if let Some(previous) = previous {
+            retired.push((previous, message.message_id.clone()));
         }
-        if message.in_flight || message.available_at > now {
-            continue;
-        }
-        if let Some(group) = &message.group_id
-            && blocked_groups.contains(group)
-        {
-            continue;
-        }
-        message.receive_count += 1;
-        message.first_receive.get_or_insert_with(OffsetDateTime::now_utc);
-        if let Some(old) = message.receipt_handle.take() {
-            retired.push((old, message.message_id.clone()));
-        }
-        let handle = format!("{}#{}", message.message_id, uuid::Uuid::new_v4());
-        message.receipt_handle = Some(handle.clone());
-        message.in_flight = true;
-        message.available_at = now + visibility;
         received.push(ReceivedMessage {
             message_id: message.message_id.clone(),
-            receipt_handle: handle,
+            receipt_handle: message.receipt_handle.clone().unwrap_or_default(),
             body: message.body.clone(),
             md5_of_body: Some(message.md5_of_body.clone()),
             attributes: message.attributes.clone(),
@@ -614,7 +573,7 @@ impl SqsApi for MemorySqs {
                 if !messages.is_empty() {
                     return Ok(messages);
                 }
-                state.queues.get(&request.queue_url).and_then(|queue| queue.next_change_after(now))
+                state.queues.get(&request.queue_url).and_then(|queue| queue.messages.next_change())
             };
             if now >= deadline {
                 return Ok(Vec::new());
@@ -636,18 +595,18 @@ impl SqsApi for MemorySqs {
         Ok(receipt_handles
             .into_iter()
             .map(|handle| {
-                if let Some(index) =
-                    queue.messages.iter().position(|m| m.receipt_handle.as_deref() == Some(handle.as_str()))
-                {
-                    queue.messages.remove(index);
+                if let Some(sequence) = queue.messages.by_receipt(&handle) {
+                    queue.messages.remove(sequence);
                     Ok(())
                 } else if let Some(message_id) = retired_receipts.get(&handle) {
-                    if queue.messages.iter().any(|m| &m.message_id == message_id) {
+                    if queue.messages.contains_id(message_id) {
                         Err(receipt_error("InvalidParameterValue", "The receipt handle has expired."))
                     } else {
                         Ok(())
                     }
-                } else if handle.contains('#') && !queue.messages.iter().any(|m| handle.starts_with(&m.message_id)) {
+                } else if let Some((message_id, _)) = handle.split_once('#')
+                    && !queue.messages.contains_id(message_id)
+                {
                     // Already deleted with its current handle: deleting again succeeds.
                     Ok(())
                 } else {
@@ -665,6 +624,8 @@ impl SqsApi for MemorySqs {
         let mut state = self.0.state.lock();
         let queue = state.queues.get_mut(queue_url).ok_or_else(|| queue_not_found("ChangeMessageVisibilityBatch"))?;
         let now = Instant::now();
+        // Messages whose visibility timeout expired are no longer in flight.
+        queue.messages.promote(now);
         let mut changed = false;
         let results = entries
             .into_iter()
@@ -675,22 +636,14 @@ impl SqsApi for MemorySqs {
                         "VisibilityTimeout must be at most 43200 seconds.",
                     ));
                 }
-                let Some(message) = queue
-                    .messages
-                    .iter_mut()
-                    .find(|m| m.receipt_handle.as_deref() == Some(entry.receipt_handle.as_str()))
-                else {
+                let Some(sequence) = queue.messages.by_receipt(&entry.receipt_handle) else {
                     return Err(receipt_error("ReceiptHandleIsInvalid", "The input receipt handle is invalid."));
                 };
-                if !message.in_flight || message.available_at <= now {
-                    message.in_flight = false;
+                if !queue.messages.get(sequence).is_some_and(|message| message.in_flight) {
                     return Err(receipt_error("MessageNotInflight", "The message referred to is not in flight."));
                 }
-                message.available_at = now + entry.timeout;
-                if entry.timeout.is_zero() {
-                    message.in_flight = false;
-                    changed = true;
-                }
+                queue.messages.change_visibility(sequence, now, entry.timeout);
+                changed |= entry.timeout.is_zero();
                 Ok(())
             })
             .collect();
@@ -711,14 +664,11 @@ impl SqsApi for MemorySqs {
     }
 
     async fn get_queue_attributes(&self, queue_url: &str) -> Result<StringMap> {
-        let state = self.0.state.lock();
-        let queue = state.queues.get(queue_url).ok_or_else(|| queue_not_found("GetQueueAttributes"))?;
-        let now = Instant::now();
+        let mut state = self.0.state.lock();
+        let queue = state.queues.get_mut(queue_url).ok_or_else(|| queue_not_found("GetQueueAttributes"))?;
+        queue.messages.promote(Instant::now());
         let mut attributes = queue.attributes.clone();
-        let visible =
-            queue.messages.iter().filter(|m| !(m.in_flight && m.available_at > now) && m.available_at <= now).count();
-        let in_flight = queue.messages.iter().filter(|m| m.in_flight && m.available_at > now).count();
-        let delayed = queue.messages.iter().filter(|m| !m.in_flight && m.available_at > now).count();
+        let (visible, in_flight, delayed) = queue.messages.counts();
         attributes.insert("ApproximateNumberOfMessages".into(), visible.to_string());
         attributes.insert("ApproximateNumberOfMessagesNotVisible".into(), in_flight.to_string());
         attributes.insert("ApproximateNumberOfMessagesDelayed".into(), delayed.to_string());
@@ -784,8 +734,8 @@ impl SqsApi for MemorySqs {
                 fifo: fifo_attribute,
                 attributes: all,
                 tags: tags.clone(),
-                messages: Vec::new(),
-                dedup: HashMap::new(),
+                messages: Messages::default(),
+                dedup: Dedup::default(),
                 notify: Arc::new(Notify::new()),
             },
         );
@@ -959,14 +909,13 @@ fn publish_locked(inner: &Inner, state: &mut State, topic_arn: &str, request: Pu
                 ));
             }
         }
-        topic.dedup.retain(|_, (at, _)| now.duration_since(*at) < DEDUP_WINDOW);
-        if let Some((_, message_id)) = deduplication_id.as_ref().and_then(|id| topic.dedup.get(id)) {
+        if let Some(message_id) = deduplication_id.as_ref().and_then(|id| topic.dedup.get(id, now)) {
             return Ok(PublishOutput { message_id: message_id.clone(), sequence_number });
         }
     }
     let message_id = uuid::Uuid::new_v4().to_string();
     if let (true, Some(id)) = (topic.fifo, &deduplication_id) {
-        topic.dedup.insert(id.clone(), (now, message_id.clone()));
+        topic.dedup.insert(id.clone(), now, message_id.clone());
     }
     let subscriptions: Vec<Subscription> =
         state.subscriptions.values().filter(|s| s.topic_arn == topic_arn && s.protocol == "sqs").cloned().collect();
@@ -1116,7 +1065,7 @@ impl SnsApi for MemorySns {
                 fifo,
                 attributes: all,
                 tags: tags.clone(),
-                dedup: HashMap::new(),
+                dedup: Dedup::default(),
             },
         );
         Ok(topic_arn)
