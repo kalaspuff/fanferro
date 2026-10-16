@@ -87,6 +87,22 @@ async def test_idempotency_middleware_releases_messages_handed_back() -> None:
             await middleware(build_message({}, id=name), settling)
 
 
+async def test_in_memory_idempotency_store_forgets_expired_keys() -> None:
+    now = [0.0]
+    store = InMemoryIdempotencyStore(clock=lambda: now[0])
+    for index in range(100):
+        await store.claim(f"done-{index}", lock_ttl=10)
+        await store.complete(f"done-{index}", ttl=600)
+        await store.claim(f"abandoned-{index}", lock_ttl=10)
+    now[0] = 300.0
+    await store.claim("new", lock_ttl=10)
+    assert len(store) == 101, "expired claims are forgotten, completed keys are kept for their ttl"
+    now[0] = 700.0
+    await store.claim("newer", lock_ttl=10)
+    assert len(store) == 1
+    assert await store.claim("done-1", lock_ttl=10) is Claim.ACQUIRED
+
+
 async def test_concurrent_claims_retry() -> None:
     middleware = idempotent(retry_delay=7)
     started = asyncio.Event()

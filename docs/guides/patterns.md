@@ -67,7 +67,8 @@ claims the message id in a store (implement `IdempotencyStore` on Redis/DynamoDB
 so a crashed worker does not block a message forever), skips completed ids (`message.duplicate`)
 and retries messages another worker is processing. A handler that hands its message back
 (`message.retry()`, `requeue()`, `release()` or `dead_letter()`) leaves the id unclaimed, so the
-next delivery runs it again.
+next delivery runs it again. `InMemoryIdempotencyStore` forgets expired ids; it suits tests and
+single-process workers.
 
 ## Fan-out with filtering
 
