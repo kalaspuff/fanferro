@@ -169,6 +169,11 @@ class Transport:
     def offloading(self) -> bool: ...
 
 @final
+class Destination:
+    @property
+    def address(self) -> str: ...
+
+@final
 class MemoryBroker:
     def __init__(self, region: str = "us-east-1", account_id: str = "000000000000") -> None: ...
     @property
@@ -193,9 +198,10 @@ class CoreClient:
     def backend(self) -> Literal["aws", "memory"]: ...
     def account_id(self) -> Awaitable[str]: ...
     def transport(self, offload: Mapping[str, Any] | None) -> Transport: ...
+    def destination(self, destination: Mapping[str, Any] | Destination) -> Destination: ...
     def publish(
         self,
-        destination: Mapping[str, Any],
+        destination: Mapping[str, Any] | Destination,
         wire: WireMessage,
         message_id: str,
         *,
@@ -208,7 +214,7 @@ class CoreClient:
     ) -> Awaitable[dict[str, Any]]: ...
     def publish_batch(
         self,
-        destination: Mapping[str, Any],
+        destination: Mapping[str, Any] | Destination,
         messages: Sequence[Mapping[str, Any]],
         *,
         transport: Transport | None = None,

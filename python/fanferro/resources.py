@@ -55,10 +55,11 @@ type GroupId = str | Callable[[OutgoingMessage], str]
 """A FIFO message group id, or a function deriving it from the message."""
 
 
+_PLAIN_BODIES = (str, bytes, bytearray, memoryview, int, float, bool, dict, list, tuple, type(None))
+
+
 def _structured(body: Any) -> bool:
-    return not isinstance(
-        body, str | bytes | bytearray | memoryview | int | float | bool | dict | list | tuple | type(None)
-    )
+    return not isinstance(body, _PLAIN_BODIES)
 
 
 class _Resource:
@@ -151,6 +152,7 @@ class _Destination(_Resource):
         self._codec = codec
         self._transport: Transport | None = None
         self._destination_cache: tuple[Any, dict[str, Any]] | None = None
+        self._native_destination_cache: tuple[Mapping[str, Any], Any] | None = None
 
     @property
     def envelope(self) -> Envelope:
@@ -177,6 +179,21 @@ class _Destination(_Resource):
             cache = self._destination_cache = (info, self._destination(info))
         return cache[1]
 
+    def _native_destination(self, core: Any, destination: Mapping[str, Any]) -> Any:
+        """The core's converted ``destination``.
+
+        Converted once for this resource's own destination (what :meth:`_destination_for` returns),
+        on every call for any other mapping.
+        """
+        cache = self._native_destination_cache
+        if cache is not None and cache[0] is destination:
+            return cache[1]
+        native = core.destination(destination)
+        own = self._destination_cache
+        if own is not None and own[1] is destination:
+            self._native_destination_cache = (destination, native)
+        return native
+
     async def _transport_for(self) -> Transport | None:
         if self._large_payloads is _UNSET:
             return None
@@ -193,8 +210,10 @@ class _Destination(_Resource):
             raise TypeError(f"invalid publish option: {error}") from None
 
     async def _encode(self, context: PublishContext, info: Any) -> PreparedMessage:
+        return self._encode_now(context.message, info)
+
+    def _encode_now(self, message: OutgoingMessage, info: Any) -> PreparedMessage:
         client = self._client
-        message = context.message
         if message.group_id is None and self._group_id is not None:
             message.group_id = self._group_id(message) if callable(self._group_id) else self._group_id
         if self.fifo and not message.group_id:
@@ -241,6 +260,8 @@ class _Destination(_Resource):
         )
 
     async def _prepare_message(self, message: OutgoingMessage, info: Any) -> PreparedMessage:
+        if not self._client.publish_middleware:
+            return self._encode_now(message, info)
         context = PublishContext(message=message, destination=self.name, kind=self.kind, fifo=self.fifo)  # type: ignore[arg-type]
 
         async def final(ctx: PublishContext) -> PreparedMessage:
@@ -273,15 +294,18 @@ class _Destination(_Resource):
         """
         message = body if isinstance(body, OutgoingMessage) else self._message(body, options)
         client = self._client
-        info = await self._resolve()
+        info = self._info if self._info is not None else await self._resolve()
         started = monotonic()
-        core = await client._core()
-        transport = await self._transport_for()
+        core = client._core_client if client._core_client is not None else await client._core()
+        transport = None if self._large_payloads is _UNSET else await self._transport_for()
         with client._telemetry.publish_span(self.name, self.kind, message.id) as span:
             try:
-                prepared = await self._prepare_message(message, info)
+                if client.publish_middleware:
+                    prepared = await self._prepare_message(message, info)
+                else:
+                    prepared = self._encode_now(message, info)
                 receipt = await core.publish(
-                    prepared.destination,
+                    self._native_destination(core, prepared.destination),
                     prepared.wire,
                     prepared.message_id,
                     group_id=prepared.group_id,
@@ -352,15 +376,19 @@ class _Destination(_Resource):
         results: list[PublishResult | BatchFailure | None] = [None] * len(outgoing)
         with client._telemetry.publish_span(self.name, self.kind, None, batch_size=len(outgoing)) as span:
             entries: list[tuple[int, PreparedMessage]] = []
+            prepare_now = not client.publish_middleware
             for index, message in enumerate(outgoing):
                 try:
-                    entries.append((index, await self._prepare_message(message, info)))
+                    if prepare_now:
+                        entries.append((index, self._encode_now(message, info)))
+                    else:
+                        entries.append((index, await self._prepare_message(message, info)))
                 except Exception as error:  # noqa: BLE001 - deliberate catch-all; the error is reported, never swallowed silently
                     results[index] = BatchFailure(index, message, error)
             if entries:
                 try:
                     receipts = await core.publish_batch(
-                        self._destination_for(info),
+                        self._native_destination(core, self._destination_for(info)),
                         [prepared.core_entry() for _, prepared in entries],
                         transport=transport,
                     )

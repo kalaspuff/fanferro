@@ -134,6 +134,12 @@ pub fn attributes_from_py(value: Option<&Bound<'_, PyAny>>) -> PyResult<MessageA
     if value.is_none() {
         return Ok(attributes);
     }
+    if let Ok(dict) = value.cast_exact::<PyDict>() {
+        for (name, attribute) in dict.iter() {
+            attributes.insert(name.extract()?, attribute_from_py(&attribute)?);
+        }
+        return Ok(attributes);
+    }
     let items = value.call_method0("items")?;
     for item in items.try_iter()? {
         let (name, attribute): (String, Bound<'_, PyAny>) = item?.extract()?;
@@ -166,20 +172,32 @@ pub fn headers_from_py(value: Option<&Bound<'_, PyAny>>) -> PyResult<Headers> {
     if value.is_none() {
         return Ok(headers);
     }
+    if let Ok(dict) = value.cast_exact::<PyDict>() {
+        for (name, header) in dict.iter() {
+            let name: String = name.extract()?;
+            let header = header_from_py(&name, &header)?;
+            headers.insert(name, header);
+        }
+        return Ok(headers);
+    }
     for item in value.call_method0("items")?.try_iter()? {
         let (name, header): (String, Bound<'_, PyAny>) = item?.extract()?;
-        let header = if header.is_instance_of::<PyBool>() {
-            HeaderValue::Boolean(header.extract()?)
-        } else if header.is_instance_of::<PyInt>() {
-            HeaderValue::Integer(header.extract()?)
-        } else if let Ok(text) = header.cast::<PyString>() {
-            HeaderValue::String(text.to_str()?.to_string())
-        } else {
-            return Err(ValidationError::new_err(format!("header {name:?} must be str, int or bool")));
-        };
+        let header = header_from_py(&name, &header)?;
         headers.insert(name, header);
     }
     Ok(headers)
+}
+
+fn header_from_py(name: &str, header: &Bound<'_, PyAny>) -> PyResult<HeaderValue> {
+    if header.is_instance_of::<PyBool>() {
+        Ok(HeaderValue::Boolean(header.extract()?))
+    } else if header.is_instance_of::<PyInt>() {
+        Ok(HeaderValue::Integer(header.extract()?))
+    } else if let Ok(text) = header.cast::<PyString>() {
+        Ok(HeaderValue::String(text.to_str()?.to_string()))
+    } else {
+        Err(ValidationError::new_err(format!("header {name:?} must be str, int or bool")))
+    }
 }
 
 /// Converts headers into a `dict`.

@@ -5,6 +5,7 @@
 //! custom label such as `Number.int`) and a value. Attribute names, types and values all
 //! count towards the message size limit.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
@@ -57,31 +58,42 @@ pub enum AttributeData {
 /// A single message attribute value with its data type.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AttributeValue {
-    data_type: String,
+    /// The plain base types are static strings: creating and cloning them allocates nothing.
+    data_type: Cow<'static, str>,
     data: AttributeData,
+}
+
+/// `data_type` without an allocation of its own when it is a plain base type.
+fn shared_data_type(data_type: String) -> Cow<'static, str> {
+    match data_type.as_str() {
+        "String" => Cow::Borrowed("String"),
+        "Number" => Cow::Borrowed("Number"),
+        "Binary" => Cow::Borrowed("Binary"),
+        _ => Cow::Owned(data_type),
+    }
 }
 
 impl AttributeValue {
     /// Creates a `String` attribute.
     pub fn string(value: impl Into<String>) -> Self {
-        Self { data_type: "String".into(), data: AttributeData::Text(value.into()) }
+        Self { data_type: Cow::Borrowed("String"), data: AttributeData::Text(value.into()) }
     }
 
     /// Creates a `Number` attribute from its textual representation.
     pub fn number(value: impl Into<String>) -> Self {
-        Self { data_type: "Number".into(), data: AttributeData::Text(value.into()) }
+        Self { data_type: Cow::Borrowed("Number"), data: AttributeData::Text(value.into()) }
     }
 
     /// Creates a `Binary` attribute.
     pub fn binary(value: impl Into<Bytes>) -> Self {
-        Self { data_type: "Binary".into(), data: AttributeData::Binary(value.into()) }
+        Self { data_type: Cow::Borrowed("Binary"), data: AttributeData::Binary(value.into()) }
     }
 
     /// Creates an attribute with an explicit (possibly custom) data type, e.g. `Number.int`.
     ///
     /// The data must match the base type: text for `String`/`Number`, bytes for `Binary`.
     pub fn with_type(data_type: impl Into<String>, data: AttributeData) -> Result<Self> {
-        let data_type = data_type.into();
+        let data_type = shared_data_type(data_type.into());
         let base = parse_base_type(&data_type)?;
         match (base, &data) {
             (BaseType::Binary, AttributeData::Binary(_))
@@ -106,6 +118,11 @@ impl AttributeValue {
     /// The value.
     pub fn data(&self) -> &AttributeData {
         &self.data
+    }
+
+    /// The data type and the value.
+    pub fn into_parts(self) -> (String, AttributeData) {
+        (self.data_type.into_owned(), self.data)
     }
 
     /// The text value, if this is a `String` or `Number` attribute.

@@ -1,5 +1,6 @@
 //! `CoreClient`: publishing, provisioning, events and metrics; plus the in-memory broker.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use fanferro_core::backend::BackendKind;
@@ -163,7 +164,34 @@ pub fn event_to_py(py: Python<'_>, event: &Event) -> PyResult<Py<PyAny>> {
 /// Transport settings for a destination (per-destination large payload overrides).
 #[pyclass(name = "Transport", module = "fanferro._core", frozen)]
 pub struct PyTransport {
-    pub inner: Transport,
+    pub inner: Arc<Transport>,
+}
+
+/// Where messages go: a queue or a topic, converted once (see `CoreClient.destination`).
+#[pyclass(name = "Destination", module = "fanferro._core", frozen)]
+pub struct PyDestination {
+    inner: Arc<Destination>,
+}
+
+#[pymethods]
+impl PyDestination {
+    /// The queue URL or topic ARN.
+    #[getter]
+    fn address(&self) -> &str {
+        self.inner.address()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("Destination({:?})", self.inner.address())
+    }
+}
+
+/// A destination object, or a destination mapping (converted on every call).
+fn destination_from(destination: &Bound<'_, PyAny>) -> PyResult<Arc<Destination>> {
+    if let Ok(destination) = destination.cast::<PyDestination>() {
+        return Ok(destination.get().inner.clone());
+    }
+    depythonize(destination).map(Arc::new).map_err(|err| config_error("destination", err))
 }
 
 #[pymethods]
@@ -361,7 +389,12 @@ impl PyCoreClient {
             Some(depythonize(offload).map_err(|err| config_error("large payload settings", err))?)
         };
         let inner = client.transport().with_offload(offload).map_err(to_py_err)?;
-        Ok(PyTransport { inner })
+        Ok(PyTransport { inner: Arc::new(inner) })
+    }
+
+    /// Converts a destination mapping once, for calls that publish to it again and again.
+    fn destination(&self, destination: &Bound<'_, PyAny>) -> PyResult<PyDestination> {
+        Ok(PyDestination { inner: destination_from(destination)? })
     }
 
     /// Sends/publishes one message (awaitable receipt dict).
@@ -381,11 +414,14 @@ impl PyCoreClient {
         transport: Option<&Bound<'py, PyTransport>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client()?;
-        let destination: Destination = depythonize(destination).map_err(|err| config_error("destination", err))?;
+        let destination = destination_from(destination)?;
         let message = message_from_kwargs(wire, message_id, group_id, deduplication_id, delay, subject, trace_header)?;
-        let transport = transport.map_or_else(|| client.transport().clone(), |t| t.get().inner.clone());
+        let transport = transport.map(|transport| transport.get().inner.clone());
         future_into_py(py, async move {
-            let receipt = client.publish_with(&transport, &destination, message).await;
+            let receipt = match &transport {
+                Some(transport) => client.publish_with(transport, &destination, message).await,
+                None => client.publish(&destination, message).await,
+            };
             convert(receipt, |py, receipt| receipt_to_py(py, &receipt))
         })
     }
@@ -400,11 +436,14 @@ impl PyCoreClient {
         transport: Option<&Bound<'py, PyTransport>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client()?;
-        let destination: Destination = depythonize(destination).map_err(|err| config_error("destination", err))?;
+        let destination = destination_from(destination)?;
         let messages = messages.try_iter()?.map(|item| message_from_dict(&item?)).collect::<PyResult<Vec<_>>>()?;
-        let transport = transport.map_or_else(|| client.transport().clone(), |t| t.get().inner.clone());
+        let transport = transport.map(|transport| transport.get().inner.clone());
         future_into_py(py, async move {
-            let results = client.publish_batch_with(&transport, &destination, messages).await;
+            let results = match &transport {
+                Some(transport) => client.publish_batch_with(transport, &destination, messages).await,
+                None => client.publish_batch(&destination, messages).await,
+            };
             convert(results, |py, results| {
                 let list = PyList::empty(py);
                 for result in &results {

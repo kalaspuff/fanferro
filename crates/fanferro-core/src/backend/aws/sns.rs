@@ -26,20 +26,22 @@ impl AwsSns {
     }
 }
 
-fn to_sdk_attribute(value: &AttributeValue) -> Result<MessageAttributeValue> {
-    let builder = MessageAttributeValue::builder().data_type(value.data_type());
-    let builder = match value.data() {
+/// Converts an attribute for a request (moving its strings, without copying them).
+fn to_sdk_attribute(value: AttributeValue) -> Result<MessageAttributeValue> {
+    let (data_type, data) = value.into_parts();
+    let builder = MessageAttributeValue::builder().data_type(data_type);
+    let builder = match data {
         AttributeData::Text(text) => builder.string_value(text),
-        AttributeData::Binary(bytes) => builder.binary_value(Blob::new(bytes.to_vec())),
+        AttributeData::Binary(bytes) => builder.binary_value(Blob::new(Vec::from(bytes))),
     };
     builder.build().map_err(|err| Error::validation(format!("invalid message attribute: {err}")))
 }
 
-fn to_sdk_attributes(attributes: &MessageAttributes) -> Result<Option<HashMap<String, MessageAttributeValue>>> {
+fn to_sdk_attributes(attributes: MessageAttributes) -> Result<Option<HashMap<String, MessageAttributeValue>>> {
     if attributes.is_empty() {
         return Ok(None);
     }
-    attributes.iter().map(|(name, value)| Ok((name.clone(), to_sdk_attribute(value)?))).collect::<Result<_>>().map(Some)
+    attributes.into_iter().map(|(name, value)| Ok((name, to_sdk_attribute(value)?))).collect::<Result<_>>().map(Some)
 }
 
 fn to_tags(tags: &StringMap) -> Result<Vec<Tag>> {
@@ -63,7 +65,7 @@ impl SnsApi for AwsSns {
             .publish()
             .topic_arn(topic_arn)
             .message(request.message)
-            .set_message_attributes(to_sdk_attributes(&request.attributes)?)
+            .set_message_attributes(to_sdk_attributes(request.attributes)?)
             .set_subject(request.subject)
             .set_message_group_id(request.group_id)
             .set_message_deduplication_id(request.deduplication_id);
@@ -93,7 +95,7 @@ impl SnsApi for AwsSns {
                 PublishBatchRequestEntry::builder()
                     .id(index.to_string())
                     .message(entry.message)
-                    .set_message_attributes(to_sdk_attributes(&entry.attributes)?)
+                    .set_message_attributes(to_sdk_attributes(entry.attributes)?)
                     .set_subject(entry.subject)
                     .set_message_group_id(entry.group_id)
                     .set_message_deduplication_id(entry.deduplication_id)
