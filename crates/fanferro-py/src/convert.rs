@@ -227,11 +227,11 @@ pub fn string_map_to_py<'py>(
 
 /// Reads optional seconds as a `Duration`.
 pub fn seconds(value: Option<f64>, what: &str) -> PyResult<Option<std::time::Duration>> {
-    match value {
-        None => Ok(None),
-        Some(secs) if secs.is_finite() && secs >= 0.0 => Ok(Some(std::time::Duration::from_secs_f64(secs))),
-        Some(secs) => {
-            Err(ValidationError::new_err(format!("{what} must be a non-negative number of seconds, got {secs}")))
-        }
+    let Some(secs) = value else { return Ok(None) };
+    if !(secs.is_finite() && secs >= 0.0) {
+        return Err(ValidationError::new_err(format!("{what} must be a non-negative number of seconds, got {secs}")));
     }
+    std::time::Duration::try_from_secs_f64(secs)
+        .map(Some)
+        .map_err(|_| ValidationError::new_err(format!("{what} is out of range: {secs} seconds")))
 }

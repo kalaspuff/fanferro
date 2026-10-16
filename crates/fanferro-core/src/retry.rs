@@ -87,6 +87,9 @@ pub async fn sleep_or_cancel(duration: Duration, token: &CancellationToken) -> b
     }
 }
 
+/// The longest single wait of [`RateLimiter::acquire_up_to`] before it checks the bucket again.
+const MAX_WAIT: Duration = Duration::from_secs(3600);
+
 /// A token bucket limiting how many messages per second are received.
 #[derive(Debug)]
 pub struct RateLimiter {
@@ -123,7 +126,8 @@ impl RateLimiter {
                     state.0 -= f64::from(take);
                     return Some(take);
                 }
-                Duration::from_secs_f64((1.0 - state.0) / self.rate)
+                // Waits are capped (the loop refills and waits again): a tiny rate would overflow.
+                Duration::try_from_secs_f64((1.0 - state.0) / self.rate).map_or(MAX_WAIT, |wait| wait.min(MAX_WAIT))
             };
             if !sleep_or_cancel(wait, token).await {
                 return None;
@@ -172,5 +176,17 @@ mod tests {
         let empty = RateLimiter::new(0.001, 1);
         assert_eq!(empty.acquire_up_to(1, &token).await, Some(1));
         assert_eq!(empty.acquire_up_to(1, &token).await, None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tiny_rates_wait_without_overflowing() {
+        let limiter = RateLimiter::new(1e-30, 1);
+        let token = CancellationToken::new();
+        assert_eq!(limiter.acquire_up_to(1, &token).await, Some(1));
+        let waiting = limiter.acquire_up_to(1, &token);
+        tokio::pin!(waiting);
+        assert!(tokio::time::timeout(Duration::from_secs(2 * 3600), &mut waiting).await.is_err());
+        token.cancel();
+        assert_eq!(waiting.await, None);
     }
 }

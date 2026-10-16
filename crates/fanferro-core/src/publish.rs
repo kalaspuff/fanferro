@@ -161,6 +161,13 @@ fn validate(destination: &Destination, message: &OutgoingMessage) -> Result<()> 
     if message.message_id.is_empty() {
         return Err(Error::validation("message_id must not be empty"));
     }
+    if let Some(header) = &message.trace_header
+        && (header.is_empty() || !header.bytes().all(|byte| matches!(byte, b' '..=b'~')))
+    {
+        return Err(Error::validation(format!(
+            "trace_header must be an AWS X-Ray trace header (printable ASCII), got {header:?}"
+        )));
+    }
     match destination {
         Destination::Queue { fifo, .. } => {
             if message.subject.is_some() {

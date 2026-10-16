@@ -66,6 +66,12 @@ async fn validates_destination_options() {
     let mut subject = message("m", "x");
     subject.subject = Some("s".into());
     assert!(client.publish(&queue("u"), subject).await.is_err());
+    for header in ["", "Root=1-5759e988-bd862e3fe1be46a994272793\nParent=1", "Root=\u{e9}"] {
+        let mut traced = message("m", "x");
+        traced.trace_header = Some(header.into());
+        let err = client.publish(&topic, traced).await.unwrap_err();
+        assert!(err.to_string().contains("trace_header"), "{err}");
+    }
 }
 
 #[tokio::test]

@@ -211,6 +211,26 @@ async def test_idempotent_consumer_runs_explicit_retries_again(client_factory: C
     assert not duplicates
 
 
+async def test_out_of_range_extensions_are_validation_errors(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory()
+    queue = client.queue(name("extend-range"))
+    raised: list[BaseException] = []
+    consumer = client.consumer(queue, wait_time=1)
+
+    @consumer.route(OrderCreated)
+    async def handle(message: fanferro.Message[OrderCreated]) -> None:
+        try:
+            await message.extend(1e30)
+        except BaseException as error:  # a panic would surface as a BaseException
+            raised.append(error)
+
+    async with client:
+        await queue.send(OrderCreated(order_id=1))
+        await consume_until(consumer, lambda: consumer.stats()["processed"] == 1)
+    assert len(raised) == 1
+    assert isinstance(raised[0], fanferro.ValidationError), repr(raised[0])
+
+
 async def test_attempts_beyond_limit_skip_the_handler(client_factory: ClientFactory, name: Any) -> None:
     client = client_factory()
     queue = queue_with_dlq(client, name("limit"))
