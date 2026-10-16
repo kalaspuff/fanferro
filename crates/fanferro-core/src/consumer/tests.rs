@@ -683,6 +683,39 @@ async fn next_batch_returns_as_soon_as_receiving_stops() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_abort_during_a_graceful_stop_still_guards_against_the_orphaned_poll() {
+    // A second stop request (a second signal) aborts the long poll a graceful stop waits for: the
+    // queue keeps serving that poll, so messages released afterwards must stay invisible until it
+    // is over, as when the stop aborts right away.
+    let broker = MemoryBroker::new("us-east-1", "000000000000");
+    let mut backend = broker.backend();
+    backend.kind = crate::backend::BackendKind::Aws;
+    let client = Client::with_backend(backend, ClientConfig::default()).unwrap();
+    let url = client.backend().sqs.create_queue("work", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let fx = Fixture { broker, client, url };
+    fx.send("held").await;
+    let engine = fx.engine(|c| {
+        c.wait_time = 20.0;
+        c.min_receive_batch = Some(1);
+    });
+    let delivery = collect(&engine, 1).await.remove(0);
+    tokio::time::sleep(Duration::from_millis(100)).await; // the next long poll is in flight
+    let graceful = tokio::spawn({
+        let engine = engine.clone();
+        async move { engine.stop_receiving(false).await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    engine.stop_receiving(true).await;
+    graceful.await.unwrap();
+    delivery.lease.release().await.unwrap();
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    assert!(fx.stored()[0].in_flight, "released into the window of the aborted poll");
+    tokio::time::sleep(Duration::from_secs(15)).await;
+    assert!(!fx.stored()[0].in_flight);
+    engine.close(true).await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn buffered_deliveries_are_returned_after_receiving_stops() {
     let fx = fixture(ClientConfig::default()).await;
     for i in 0..3 {
