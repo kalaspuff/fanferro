@@ -17,6 +17,11 @@ worker = client.queue(
 client.subscription(orders, worker, filter_policy={"fanferro.type": ["orders.created.v1"]})
 ```
 
+Declaring a resource again returns the same handle; settings that differ from the first declaration
+raise `ConfigurationError` (configure each resource in one place). Several queues can share a
+dead-letter queue: the first declaration of it sets its attributes, and later `DeadLetterQueue`s of
+the same name may only repeat them.
+
 ## What happens
 
 For every resource: **lookup** (`GetQueueUrl`, `GetTopicAttributes` by ARN derived from the account

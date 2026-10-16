@@ -16,6 +16,9 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   production.
 - `consumer.stop()` called while a stop is in progress waits for it instead of returning at once,
   and `client.close()` stops its consumers concurrently instead of one after another.
+- Declaring a queue or topic again with the same settings returns it instead of raising, and
+  declaring a subscription again with different settings raises `ConfigurationError` instead of
+  silently keeping the first declaration.
 
 ## [0.4.0] - 2026-10-16
 
