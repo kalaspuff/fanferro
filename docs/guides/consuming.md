@@ -136,7 +136,8 @@ While a message is buffered or processed, the engine extends its visibility befo
 timeout), batching ten messages per call. Heartbeats run on Rust threads, so a handler blocking the
 event loop does not lose its lease. If a receipt handle becomes invalid, a `lease.lost` event is
 emitted (the message may be processed twice; make handlers idempotent). Pass `heartbeat=False` to
-disable heartbeats.
+disable heartbeats. SQS counts visibility timeouts and delays in whole seconds: fanferro rounds
+fractions up (0.5 s becomes 1 s, never 0), and so does the in-memory broker.
 
 ## FIFO queues
 
