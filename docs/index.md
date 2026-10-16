@@ -16,5 +16,5 @@
 Reference: [configuration](reference/configuration.md) · [events](reference/events.md) ·
 [attributes](reference/attributes.md) · [errors](reference/errors.md)
 
-Internals: [architecture](architecture.md) · [decision records](adr/README.md) ·
-[contributing guide for agents](../AGENTS.md)
+Internals: [architecture](architecture.md) · [performance](performance.md) ·
+[decision records](adr/README.md) · [contributing guide for agents](../AGENTS.md)
