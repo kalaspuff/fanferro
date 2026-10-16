@@ -8,6 +8,13 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 
 ## [Unreleased]
 
+### Behaviour changes
+
+- Visibility timeouts and delays are rounded up to whole seconds, as SQS counts them: a visibility
+  timeout of 0.5 s is 1 s instead of 0, and a retry after 0.7 s waits 1 s instead of none. The
+  in-memory broker rounds them the same way, so sub-second timeouts behave in tests as in
+  production.
+
 ## [0.4.0] - 2026-10-16
 
 ### Faster publishing and consuming

@@ -304,3 +304,35 @@ async fn objects_and_presigned_urls() {
     assert!(backend.http.get(&url, 100).await.is_err());
     assert!(backend.http.get("https://example.com/x", 100).await.is_err());
 }
+
+#[tokio::test(start_paused = true)]
+async fn visibility_timeouts_and_delays_are_whole_seconds() {
+    // SQS takes whole seconds; like the AWS adapter, the broker rounds fractions up.
+    let (broker, backend) = broker();
+    let url = backend.sqs.create_queue("q", &StringMap::new(), &StringMap::new()).await.unwrap();
+    backend.sqs.send_message(&url, send("a")).await.unwrap();
+    let request = ReceiveRequest { visibility_timeout: Some(Duration::from_millis(500)), ..receive(&url, 1, None) };
+    let message = backend.sqs.receive_messages(request.clone()).await.unwrap().remove(0);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(backend.sqs.receive_messages(request.clone()).await.unwrap().is_empty(), "0.5 s means 1 s");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let message = {
+        let again = backend.sqs.receive_messages(request.clone()).await.unwrap();
+        assert_eq!(again.len(), 1);
+        assert_ne!(again[0].receipt_handle, message.receipt_handle);
+        again.into_iter().next().unwrap()
+    };
+    let change = VisibilityChange { receipt_handle: message.receipt_handle, timeout: Duration::from_millis(1200) };
+    backend.sqs.change_visibility_batch(&url, vec![change]).await.unwrap().remove(0).unwrap();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(broker.queue_messages(&url).unwrap()[0].in_flight, "1.2 s means 2 s");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!broker.queue_messages(&url).unwrap()[0].in_flight);
+
+    let url = backend.sqs.create_queue("delayed", &StringMap::new(), &StringMap::new()).await.unwrap();
+    backend.sqs.send_message(&url, SendRequest { delay: Some(Duration::from_millis(300)), ..send("b") }).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    assert!(backend.sqs.receive_messages(receive(&url, 1, Some(5))).await.unwrap().is_empty(), "0.3 s means 1 s");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(backend.sqs.receive_messages(receive(&url, 1, Some(5))).await.unwrap().len(), 1);
+}

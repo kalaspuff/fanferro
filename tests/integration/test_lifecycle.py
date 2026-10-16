@@ -34,6 +34,27 @@ async def test_heartbeats_protect_slow_handlers(client_factory: ClientFactory, n
     assert consumer.stats()["engine"]["lease_extensions"] >= 3
 
 
+async def test_sub_second_visibility_timeouts_round_up(client_factory: ClientFactory, name: Any) -> None:
+    # SQS takes whole seconds: 0.5 s must not become 0 (the message would be redelivered at once).
+    client = client_factory()
+    queue = client.queue(name("sub-second"))
+    receive_counts: list[int] = []
+    consumer = client.consumer(queue, wait_time=1, visibility_timeout=0.5, pollers=2)
+
+    @consumer.route(OrderCreated)
+    async def handle(message: fanferro.Message[OrderCreated]) -> None:
+        receive_counts.append(message.receive_count)
+        await asyncio.sleep(2)
+
+    async with client:
+        await queue.send(OrderCreated(order_id=1))
+        await consumer.start()
+        await wait_for(lambda: bool(receive_counts))
+        await asyncio.sleep(2.5)
+        await consumer.stop()
+    assert receive_counts == [1]
+
+
 async def test_graceful_shutdown_waits_for_in_flight(client_factory: ClientFactory, name: Any) -> None:
     client = client_factory()
     queue = client.queue(name("drain"))
