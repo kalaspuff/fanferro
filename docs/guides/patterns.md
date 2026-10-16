@@ -65,7 +65,9 @@ async def apply(message: fanferro.Message[PaymentCaptured]) -> None:
 For handlers whose effects are not in your database, `fanferro.idempotency.IdempotencyMiddleware`
 claims the message id in a store (implement `IdempotencyStore` on Redis/DynamoDB; claims expire
 so a crashed worker does not block a message forever), skips completed ids (`message.duplicate`)
-and retries messages another worker is processing.
+and retries messages another worker is processing. A handler that hands its message back
+(`message.retry()`, `requeue()`, `release()` or `dead_letter()`) leaves the id unclaimed, so the
+next delivery runs it again.
 
 ## Fan-out with filtering
 

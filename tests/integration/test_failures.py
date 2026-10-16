@@ -188,6 +188,29 @@ async def test_idempotent_consumer(client_factory: ClientFactory, name: Any) -> 
     assert consumer.stats()["duplicates"] == 2
 
 
+async def test_idempotent_consumer_runs_explicit_retries_again(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory()
+    queue = client.queue(name("idempotent-retry"))
+    attempts: list[int] = []
+    duplicates: list[fanferro.Event] = []
+    client.on("message.duplicate", duplicates.append)
+    consumer = client.consumer(queue, wait_time=1, middleware=[idempotent()])
+
+    @consumer.route(OrderCreated)
+    async def handle(message: fanferro.Message[OrderCreated]) -> None:
+        attempts.append(message.attempt)
+        if message.attempt == 1:
+            # Settled explicitly: not processed yet. (Without a delay the message could come back
+            # before this handler returned, while its key is still claimed.)
+            await message.retry(delay=1)
+
+    async with client:
+        await queue.send(OrderCreated(order_id=1))
+        await consume_until(consumer, lambda: len(attempts) == 2 or bool(duplicates))
+    assert attempts == [1, 2]
+    assert not duplicates
+
+
 async def test_attempts_beyond_limit_skip_the_handler(client_factory: ClientFactory, name: Any) -> None:
     client = client_factory()
     queue = queue_with_dlq(client, name("limit"))

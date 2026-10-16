@@ -4,7 +4,10 @@ SQS delivers at least once, and producers may publish the same message twice aft
 handlers with side effects should be idempotent. The :class:`IdempotencyMiddleware` claims a key
 (the message id by default - stable across producer retries) before the handler runs:
 
-* new key: the handler runs; the key is marked completed on success, released on failure;
+* new key: the handler runs; the key is marked completed on success, released on failure and when
+  the handler hands the message back for another attempt (``message.retry()``, ``requeue()``,
+  ``release()``, or ``dead_letter()``, which a redrive may undo; a message handed back without a
+  delay may arrive again before the handler returned, and is then retried after ``retry_delay``);
 * completed key: the message is acknowledged without running the handler (``message.duplicate``);
 * key in progress elsewhere: the message is retried later (another consumer is working on it).
 
@@ -91,6 +94,10 @@ class InMemoryIdempotencyStore:
         return len(self._entries)
 
 
+_PROCESSED_AGAIN = frozenset({"retried", "requeued", "released", "dead_lettered"})
+"""Outcomes of explicit settlements after which the message is delivered again (or may be)."""
+
+
 def _default_key(message: Message[Any]) -> str:
     return f"{message.queue}:{message.id}"
 
@@ -134,6 +141,11 @@ class IdempotencyMiddleware:
         except BaseException:
             await self.store.release(key)
             raise
+        if message.outcome in _PROCESSED_AGAIN:
+            # The handler handed the message back (or to the dead-letter queue, from where it may be
+            # redriven): its next delivery must run the handler again, not be skipped as a duplicate.
+            await self.store.release(key)
+            return
         await self.store.complete(key, ttl=self.ttl)
 
 
