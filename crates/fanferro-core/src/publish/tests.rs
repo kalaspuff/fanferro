@@ -3,7 +3,7 @@ use bytes::Bytes;
 use super::*;
 use crate::backend::StringMap;
 use crate::backend::memory::MemoryBroker;
-use crate::backend::testing::{SlowBatches, ThrottledBatches};
+use crate::backend::testing::{SlowBatches, SlowUploads, ThrottledBatches};
 use crate::client::ClientConfig;
 use crate::transport::OffloadSettings;
 use crate::transport::claim_check::{EncryptionSettings, PointerFormat, ReferenceMode};
@@ -282,4 +282,34 @@ async fn standard_batches_retry_throttled_entries() {
     let results = client.publish_batch(&queue(&url), messages).await.unwrap();
     assert!(results.iter().all(Result::is_ok));
     assert_eq!(broker.queue_messages(&url).unwrap().len(), 25);
+}
+
+#[tokio::test(start_paused = true)]
+async fn batches_upload_a_bounded_number_of_payloads_at_once() {
+    let broker = MemoryBroker::new("us-east-1", "000000000000");
+    let mut backend = broker.backend();
+    let uploads = std::sync::Arc::new(SlowUploads::new(backend.objects.clone(), Duration::from_millis(50)));
+    backend.objects = uploads.clone();
+    let offload = OffloadSettings {
+        bucket: "payloads".into(),
+        key_prefix: "p/".into(),
+        threshold: 100,
+        always: false,
+        reference: ReferenceMode::S3,
+        presign_ttl: 60.0,
+        format: PointerFormat::Fanferro,
+        encryption: EncryptionSettings::BucketDefault,
+        storage_class: None,
+    };
+    let client =
+        Client::with_backend(backend, ClientConfig { offload: Some(offload), ..ClientConfig::default() }).unwrap();
+    client.backend().objects.create_bucket("payloads").await.unwrap();
+    let url = client.backend().sqs.create_queue("q", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let big = "x".repeat(500);
+    let messages: Vec<OutgoingMessage> = (0..100).map(|i| message(&format!("m{i}"), &big)).collect();
+    let results = client.publish_batch(&queue(&url), messages).await.unwrap();
+    assert!(results.iter().all(Result::is_ok));
+    assert_eq!(client.metrics().payloads_offloaded.get(), 100);
+    assert_eq!(uploads.puts.take_peak(), MAX_CONCURRENT_UPLOADS);
+    assert_eq!(broker.queue_messages(&url).unwrap().len(), 100);
 }

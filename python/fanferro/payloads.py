@@ -1,7 +1,7 @@
 """Large payloads (claim checks): store big messages in S3 and send a pointer.
 
-SQS and SNS limit messages to 256 KiB (SQS and SNS topics configured for it: 1 MiB). With
-:class:`LargePayloads`, messages whose encoded size exceeds ``threshold`` are uploaded to S3 and
+SQS accepts messages of up to 1 MiB, SNS of up to 256 KiB by default. With :class:`LargePayloads`,
+messages whose encoded size exceeds ``threshold`` (256 KiB by default) are uploaded to S3 and
 replaced by a small pointer; consumers download them transparently (the handler never notices).
 
 The pointer can contain:
@@ -15,8 +15,8 @@ libraries (Java, Python), so fanferro can interoperate with services that use th
 accept both formats regardless of this setting.
 
 Lifecycle: payload objects are not deleted by default (with SNS fan-out several subscribers read
-the same object). Configure an S3 lifecycle rule on the prefix, or set
-``delete_after_processing=True`` on consumers of point-to-point queues.
+the same object). Configure an S3 lifecycle rule on the prefix, or pass
+``delete_offloaded_payloads=True`` to consumers of point-to-point queues.
 """
 
 from __future__ import annotations
