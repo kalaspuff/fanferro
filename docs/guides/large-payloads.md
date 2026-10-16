@@ -7,7 +7,7 @@ client = fanferro.Client(
         prefix="events/",
         threshold=256 * 1024,         # offload when body + attributes exceed this
         reference="both",             # "s3", "url" (presigned) or "both"
-        presign_ttl=timedelta(hours=6),
+        presign_ttl=timedelta(days=2),  # default: 24 hours
         encryption=fanferro.Kms("alias/my-key"),   # or "s3", or None (bucket default)
     )
 )
@@ -22,8 +22,13 @@ large_payloads=LargePayloads(...))` or `large_payloads=None` to disable.
 
 * `reference="s3"`: consumers need `s3:GetObject` (and KMS decrypt for SSE-KMS).
 * `reference="url"`: consumers download with plain HTTPS - useful for other teams/accounts that
-  should not get S3 permissions. Presigned URLs expire (`presign_ttl`, at most 7 days; less with
-  temporary credentials - the URL dies with the session).
+  should not get S3 permissions. Presigned URLs expire after `presign_ttl` (24 hours by default,
+  at most 7 days, the limit of AWS signatures). A message that waits longer (a consumer outage, a
+  redrive from the dead-letter queue) can no longer be fetched: it fails to decode ("payload URL
+  expired at ...") and is dead-lettered by default. A URL signed with temporary credentials (an
+  IAM role on EC2, ECS, EKS or Lambda) also stops working when those credentials expire, often
+  within hours: choose `presign_ttl` for how long messages may wait, and `reference="both"` when
+  consumers can read the bucket.
 * `reference="both"`: consumers use `PayloadFetch(prefer="s3")` and fall back to the URL.
 
 ## Safety

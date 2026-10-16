@@ -23,6 +23,8 @@ use aws_types::app_name::AppName;
 use aws_types::region::Region;
 use bytes::{Bytes, BytesMut};
 use serde::Deserialize;
+use time::macros::format_description;
+use time::{OffsetDateTime, PrimitiveDateTime};
 use tokio::sync::OnceCell;
 
 pub(crate) use errors::classify;
@@ -270,11 +272,10 @@ impl HttpFetch for ReqwestFetch {
             self.client().await?.get(url).send().await.map_err(|err| Error::Http(redact_url_error(&err)))?;
         let status = response.status();
         if !status.is_success() {
-            let error = Error::Http(format!("GET returned HTTP {status}"));
             return Err(if status.as_u16() == 404 || status.as_u16() == 403 {
-                Error::Payload(format!("payload URL is not accessible (HTTP {status}); it may have expired"))
+                inaccessible_url_error(url, status, OffsetDateTime::now_utc())
             } else {
-                error
+                Error::Http(format!("GET returned HTTP {status}"))
             });
         }
         if let Some(length) = response.content_length()
@@ -293,6 +294,30 @@ impl HttpFetch for ReqwestFetch {
     }
 }
 
+/// Why a presigned URL was refused: it expired (by its `X-Amz-Date` and `X-Amz-Expires`), or it
+/// is not accessible for another reason. The URL itself is left out: it carries credentials.
+fn inaccessible_url_error(url: &str, status: reqwest::StatusCode, now: OffsetDateTime) -> Error {
+    let parsed = reqwest::Url::parse(url).ok();
+    let parameter =
+        |name: &str| parsed.as_ref()?.query_pairs().find(|(key, _)| key == name).map(|(_, value)| value.into_owned());
+    let signed_at = parameter("X-Amz-Date").and_then(|date| {
+        PrimitiveDateTime::parse(&date, format_description!("[year][month][day]T[hour][minute][second]Z")).ok()
+    });
+    let lifetime = parameter("X-Amz-Expires").and_then(|seconds| seconds.parse::<i64>().ok());
+    if let (Some(signed_at), Some(lifetime)) = (signed_at, lifetime) {
+        let expired_at = signed_at.assume_utc() + time::Duration::seconds(lifetime);
+        if expired_at <= now {
+            return crate::transport::claim_check::expired_url_error(expired_at);
+        }
+    }
+    let reason = if parameter("X-Amz-Security-Token").is_some() {
+        "it was signed with temporary credentials, which may have expired"
+    } else {
+        "it may have expired"
+    };
+    Error::Payload(format!("payload URL is not accessible (HTTP {status}); {reason}"))
+}
+
 /// Formats a reqwest error without the URL (presigned URLs contain credentials).
 fn redact_url_error(err: &reqwest::Error) -> String {
     let mut text = err.to_string();
@@ -303,4 +328,28 @@ fn redact_url_error(err: &reqwest::Error) -> String {
         text.push_str(" (timeout)");
     }
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use time::macros::datetime;
+
+    use super::*;
+
+    #[test]
+    fn expired_presigned_urls_say_when_they_expired() {
+        let url = "https://b.s3.amazonaws.com/k?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Date=20261016T120000Z\
+                   &X-Amz-Expires=3600&X-Amz-Signature=abc";
+        let forbidden = reqwest::StatusCode::FORBIDDEN;
+        let error = inaccessible_url_error(url, forbidden, datetime!(2026-10-16 13:00 UTC)).to_string();
+        assert!(error.contains("expired at 2026-10-16T13:00:00Z"), "{error}");
+        assert!(!error.contains("Signature"), "the URL is left out: {error}");
+        let error = inaccessible_url_error(url, forbidden, datetime!(2026-10-16 12:59 UTC)).to_string();
+        assert!(error.contains("not accessible (HTTP 403 Forbidden); it may have expired"), "{error}");
+        let session = format!("{url}&X-Amz-Security-Token=token");
+        let error = inaccessible_url_error(&session, forbidden, datetime!(2026-10-16 12:30 UTC)).to_string();
+        assert!(error.contains("temporary credentials"), "{error}");
+        let error = inaccessible_url_error("not a url", reqwest::StatusCode::NOT_FOUND, OffsetDateTime::now_utc());
+        assert!(error.to_string().contains("HTTP 404"), "{error}");
+    }
 }
