@@ -625,6 +625,32 @@ async def test_stop_while_starting(memory_client: fanferro.Client, name: Any) ->
         assert other.state == "stopped"
 
 
+async def test_prefetched_messages_are_released_when_stopping(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory()
+    queue = client.queue(name("release-prefetched"))
+    started = asyncio.Event()
+    policy = fanferro.ShutdownPolicy(drain_timeout=5, cancel_timeout=1, abort_receives=False)
+    consumer = client.consumer(queue, wait_time=1, concurrency=1, prefetch=5, shutdown=policy)
+
+    @consumer.route(OrderCreated)
+    async def handle(order: OrderCreated) -> None:
+        started.set()
+        await asyncio.sleep(3600)
+
+    async with client:
+        await queue.send_batch([OrderCreated(order_id=index) for index in range(6)])
+        await consumer.start()
+        await asyncio.wait_for(started.wait(), 15)
+        await wait_for(lambda: consumer.stats()["engine"].get("in_flight", 0) == 6)
+        stopping = asyncio.create_task(consumer.stop())
+        # The slow handler drains for 5 s; the prefetched messages must not wait for it.
+        await asyncio.sleep(2)
+        counts = await queue.approximate_count()
+        assert not stopping.done()
+        assert counts["visible"] == 5, counts
+        await stopping
+
+
 @pytest.mark.skipif(not hasattr(signal, "SIGTERM") or os.name == "nt", reason="POSIX signals")
 async def test_a_second_signal_skips_the_drain(memory_client: fanferro.Client, name: Any) -> None:
     queue = memory_client.queue(name("second-signal"))
