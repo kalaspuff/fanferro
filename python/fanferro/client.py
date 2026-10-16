@@ -278,15 +278,19 @@ class Client:
         await self.close()
 
     async def close(self) -> None:
-        """Stops running consumers, flushes events and waits for async hooks."""
-        for consumer in list(self._running_consumers):
-            await consumer.stop()
+        """Stops running consumers (concurrently), flushes events and waits for async hooks."""
+        stops = await asyncio.gather(
+            *(consumer.stop() for consumer in list(self._running_consumers)), return_exceptions=True
+        )
+        failure = next((result for result in stops if isinstance(result, BaseException)), None)
         if self._entered:
             self._entered = False
             self._release_pump()
         await self._stop_pump()
         self._drain_core_events()
         await self.events.flush()
+        if failure is not None:
+            raise failure
 
     # -- events ----------------------------------------------------------------------------
 
@@ -715,19 +719,22 @@ class Client:
     async def run(self, *consumers: Consumer, install_signal_handlers: bool = True) -> None:
         """Runs consumers until SIGINT/SIGTERM or :meth:`stop`, then shuts them down gracefully.
 
-        Runs every consumer created by this client unless consumers are given. A second signal
-        skips the drain.
+        Runs every consumer created by this client unless consumers are given. A second signal (or
+        a second :meth:`stop`) skips the drain: handlers are cancelled and long polls aborted.
         """
         targets = list(consumers) or list(self._consumers)
         if not targets:
             raise ConfigurationError("no consumers to run")
         stop = asyncio.Event()
         force = False
+        started: list[Consumer] = []
 
         def request_stop() -> None:
             nonlocal force
             if stop.is_set():
                 force = True
+                for consumer in started:
+                    consumer._hurry_stop(0, True)
             stop.set()
 
         self._stop_request = request_stop
@@ -740,23 +747,25 @@ class Client:
                     installed.append(sig)
                 except (NotImplementedError, RuntimeError, ValueError):
                     break
-        started: list[Consumer] = []
         try:
             for consumer in targets:
                 await consumer.start()
                 started.append(consumer)
             await stop.wait()
         finally:
-            for sig in installed:
-                loop.remove_signal_handler(sig)
-            await asyncio.gather(
-                *(
-                    consumer.stop(drain_timeout=0, abort_receives=True) if force else consumer.stop()
-                    for consumer in started
-                ),
-                return_exceptions=True,
-            )
-            self._stop_request = None
+            # The handlers stay installed while consumers drain: a second signal cuts it short.
+            try:
+                await asyncio.gather(
+                    *(
+                        consumer.stop(drain_timeout=0, abort_receives=True) if force else consumer.stop()
+                        for consumer in started
+                    ),
+                    return_exceptions=True,
+                )
+            finally:
+                for sig in installed:
+                    loop.remove_signal_handler(sig)
+                self._stop_request = None
 
     _stop_request: Callable[[], None] | None = None
 

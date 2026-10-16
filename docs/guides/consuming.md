@@ -176,7 +176,10 @@ Shutdown follows `ShutdownPolicy`:
 5. pending acks are flushed: automatic acks run in the background and complete, and so does a
    settlement that started (`await message.ack()`...) even if its handler was cancelled.
 
-A second SIGINT/SIGTERM skips the drain.
+A second SIGINT/SIGTERM (or a second `request_stop()`/`client.stop()`) skips the drain: handlers
+are cancelled at once and the long poll in flight is aborted. `stop()` called while a stop is in
+progress waits for it (and `stop(drain_timeout=0)` cuts it short); called while the consumer is
+starting, it stops the consumer once it started. `client.close()` stops all consumers at once.
 
 ## Consume middleware
 

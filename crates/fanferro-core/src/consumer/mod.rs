@@ -30,7 +30,7 @@ mod settle;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -215,6 +215,8 @@ pub(crate) struct EngineInner {
     paused: watch::Sender<bool>,
     state: Mutex<EngineState>,
     pollers: Mutex<Vec<JoinHandle<()>>>,
+    /// Whether receive loops may still be running (set by `start`, cleared once they all ended).
+    polling: AtomicBool,
     background: Mutex<Vec<JoinHandle<()>>>,
     decoders: TaskTracker,
     /// Settlements running in the background (see [`Delivery::ack_in_background`]).
@@ -539,6 +541,7 @@ impl ConsumerEngine {
                 paused: watch::Sender::new(false),
                 state: Mutex::new(EngineState::Created),
                 pollers: Mutex::new(Vec::new()),
+                polling: AtomicBool::new(false),
                 background: Mutex::new(Vec::new()),
                 decoders: TaskTracker::new(),
                 settlements: TaskTracker::new(),
@@ -588,6 +591,7 @@ impl ConsumerEngine {
             background.push(inner.runtime.spawn(heartbeat::heartbeat_loop(inner.clone())));
         }
         *inner.background.lock() = background;
+        inner.polling.store(true, Ordering::SeqCst);
         let pollers =
             (0..inner.settings.pollers).map(|_| inner.runtime.spawn(poller::poll_loop(inner.clone()))).collect();
         *inner.pollers.lock() = pollers;
@@ -668,7 +672,8 @@ impl ConsumerEngine {
     /// whatever it returns is released immediately. Aborting it instead (`abort = true`) stops
     /// faster, but the queue keeps serving the abandoned poll on its side and may hand it
     /// messages that then stay invisible until their visibility timeout expires; messages this
-    /// engine releases afterwards are therefore kept invisible until such polls are over.
+    /// engine releases afterwards are therefore kept invisible until such polls are over. A call
+    /// with `abort` also cuts short a call without it that is still waiting for its poll.
     pub async fn stop_receiving(&self, abort: bool) {
         {
             let mut state = self.inner.state.lock();
@@ -679,7 +684,7 @@ impl ConsumerEngine {
         if abort
             && !self.inner.abort_token.is_cancelled()
             && self.inner.client.backend().kind == crate::backend::BackendKind::Aws
-            && !self.inner.pollers.lock().is_empty()
+            && self.inner.polling.load(Ordering::SeqCst)
         {
             *self.inner.orphaned_receives_until.lock() = Some(Instant::now() + self.inner.settings.wait_time);
         }
@@ -688,8 +693,12 @@ impl ConsumerEngine {
             self.inner.abort_token.cancel();
         }
         let pollers: Vec<_> = self.inner.pollers.lock().drain(..).collect();
+        let joined = !pollers.is_empty();
         for poller in pollers {
             let _ = poller.await;
+        }
+        if joined {
+            self.inner.polling.store(false, Ordering::SeqCst);
         }
         self.inner.decoders.close();
         self.inner.decoders.wait().await;
