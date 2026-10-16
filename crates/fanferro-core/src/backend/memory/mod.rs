@@ -44,7 +44,7 @@ use crate::types::attributes::{attributes_encoded_len, md5_of_attributes, md5_of
 use crate::types::text::is_sqs_safe_text;
 use crate::types::{AttributeData, MessageAttributes, arn};
 use crate::util::whole_seconds;
-use filter_policy::FilterScope;
+use filter_policy::{FilterPolicy, FilterScope};
 use store::{Dedup, Messages, StoredMessage};
 
 const DEFAULT_MAX_MESSAGE_SIZE: usize = 1_048_576;
@@ -121,6 +121,8 @@ struct Subscription {
     protocol: String,
     endpoint: String,
     attributes: StringMap,
+    /// The `FilterPolicy` attribute, validated for its `FilterPolicyScope`.
+    filter: Option<Arc<FilterPolicy>>,
 }
 
 #[derive(Debug, Clone)]
@@ -923,15 +925,8 @@ fn publish_locked(inner: &Inner, state: &mut State, topic_arn: &str, request: Pu
     let subscriptions: Vec<Subscription> =
         state.subscriptions.values().filter(|s| s.topic_arn == topic_arn && s.protocol == "sqs").cloned().collect();
     for subscription in subscriptions {
-        if let Some(policy) = subscription.attributes.get("FilterPolicy").filter(|p| !p.is_empty()) {
-            let scope = match subscription.attributes.get("FilterPolicyScope").map(String::as_str) {
-                Some("MessageBody") => FilterScope::MessageBody,
-                _ => FilterScope::MessageAttributes,
-            };
-            let Ok(policy) = serde_json::from_str::<serde_json::Value>(policy) else { continue };
-            if !filter_policy::matches(&policy, scope, &request.attributes, &request.message) {
-                continue;
-            }
+        if subscription.filter.as_ref().is_some_and(|filter| !filter.matches(&request.attributes, &request.message)) {
+            continue;
         }
         let Some(queue_url) = state.queue_url_by_arn(&subscription.endpoint) else { continue };
         let raw = subscription.attributes.get("RawMessageDelivery").map(String::as_str) == Some("true");
@@ -975,12 +970,31 @@ fn publish_locked(inner: &Inner, state: &mut State, topic_arn: &str, request: Pu
     Ok(PublishOutput { message_id, sequence_number })
 }
 
+/// Validates a subscription's filter policy like SNS (for its scope) and compiles it.
+fn filter_of(
+    policy: Option<&String>,
+    scope: Option<&String>,
+    operation: &'static str,
+) -> Result<Option<Arc<FilterPolicy>>> {
+    let Some(policy) = policy.filter(|policy| !policy.is_empty()) else { return Ok(None) };
+    match FilterPolicy::parse(policy, FilterScope::from_attribute(scope.map(String::as_str))) {
+        Ok(filter) => Ok(Some(Arc::new(filter))),
+        Err(reason) => Err(aws_error(
+            "sns",
+            operation,
+            AwsErrorKind::InvalidRequest,
+            "InvalidParameter",
+            format!("Invalid parameter: FilterPolicy: {reason}"),
+        )),
+    }
+}
+
 fn validate_subscription_attribute(name: &str, value: &str) -> Result<()> {
     match name {
         "RawMessageDelivery" if value != "true" && value != "false" => {
             Err(invalid("sns", "SetSubscriptionAttributes", "RawMessageDelivery must be true or false"))
         }
-        "FilterPolicy" | "RedrivePolicy" | "DeliveryPolicy"
+        "RedrivePolicy" | "DeliveryPolicy"
             if !value.is_empty() && serde_json::from_str::<serde_json::Value>(value).is_err() =>
         {
             Err(invalid("sns", "SetSubscriptionAttributes", format!("Invalid parameter: {name} is not valid JSON")))
@@ -1124,6 +1138,7 @@ impl SnsApi for MemorySns {
         for (name, value) in attributes {
             validate_subscription_attribute(name, value)?;
         }
+        let filter = filter_of(attributes.get("FilterPolicy"), attributes.get("FilterPolicyScope"), "Subscribe")?;
         let mut state = self.0.state.lock();
         if !state.topics.contains_key(topic_arn) {
             return Err(topic_not_found("Subscribe"));
@@ -1153,6 +1168,7 @@ impl SnsApi for MemorySns {
                 protocol: protocol.to_string(),
                 endpoint: endpoint.to_string(),
                 attributes: all,
+                filter,
             },
         );
         Ok(subscription_arn)
@@ -1200,11 +1216,20 @@ impl SnsApi for MemorySns {
             .subscriptions
             .get_mut(subscription_arn)
             .ok_or_else(|| subscription_not_found("SetSubscriptionAttributes"))?;
+        let mut attributes = subscription.attributes.clone();
         if value.is_empty() {
-            subscription.attributes.remove(name);
+            attributes.remove(name);
         } else {
-            subscription.attributes.insert(name.to_string(), value.to_string());
+            attributes.insert(name.to_string(), value.to_string());
         }
+        if name == "FilterPolicy" || name == "FilterPolicyScope" {
+            subscription.filter = filter_of(
+                attributes.get("FilterPolicy"),
+                attributes.get("FilterPolicyScope"),
+                "SetSubscriptionAttributes",
+            )?;
+        }
+        subscription.attributes = attributes;
         Ok(())
     }
 

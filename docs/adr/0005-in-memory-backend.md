@@ -13,8 +13,9 @@ also need fast tests for their handlers and flows.
 * All AWS access goes through backend traits (`SqsApi`, `SnsApi`, `ObjectStoreApi`, `HttpFetch`,
   `IdentityApi`). The AWS SDK adapter and an in-memory broker implement them.
 * The in-memory broker models visibility timeouts, receive counts, long polling, delays, redrive,
-  FIFO groups and deduplication, SNS fan-out (raw and notification JSON), filter policies and
-  presigned URLs. It uses `tokio::time`, so Rust tests run on paused, deterministic time.
+  FIFO groups and deduplication, SNS fan-out (raw and notification JSON), filter policies (every
+  operator and limit of SNS, validated when they are set) and presigned URLs. It uses
+  `tokio::time`, so Rust tests run on paused, deterministic time.
 * `fanferro.testing.memory_client()` exposes it to users.
 
 ## Consequences

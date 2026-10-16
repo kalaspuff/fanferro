@@ -291,6 +291,42 @@ async fn sns_fifo_requires_group_and_dedups() {
 }
 
 #[tokio::test]
+async fn invalid_filter_policies_are_refused() {
+    let (broker, backend) = broker();
+    let topic = backend.sns.create_topic("events", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let url = backend.sqs.create_queue("events", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let queue_arn = "arn:aws:sqs:us-east-1:000000000000:events";
+    let attributes = |pairs: &[(&str, &str)]| -> StringMap {
+        pairs.iter().map(|(name, value)| ((*name).to_string(), (*value).to_string())).collect()
+    };
+    let error = backend
+        .sns
+        .subscribe(&topic, "sqs", queue_arn, &attributes(&[("FilterPolicy", r#"{"kind": [{"glob": "a*"}]}"#)]))
+        .await
+        .unwrap_err();
+    assert_eq!(error.aws().unwrap().code.as_deref(), Some("InvalidParameter"));
+    assert!(error.to_string().contains("FilterPolicy: \"kind\": unrecognized match type glob"), "{error}");
+    let nested =
+        attributes(&[("FilterPolicy", r#"{"order": {"status": ["paid"]}}"#), ("FilterPolicyScope", "MessageBody")]);
+    let subscription = backend.sns.subscribe(&topic, "sqs", queue_arn, &nested).await.unwrap();
+    // The scope applies to the policy as it is: attribute policies cannot be nested.
+    let error = backend
+        .sns
+        .set_subscription_attribute(&subscription, "FilterPolicyScope", "MessageAttributes")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("FilterPolicyScope MessageBody"), "{error}");
+    let request = |body: &str| PublishRequest { message: body.into(), ..PublishRequest::default() };
+    backend.sns.publish(&topic, request(r#"{"order": {"status": "paid"}}"#)).await.unwrap();
+    backend.sns.publish(&topic, request(r#"{"order": {"status": "open"}}"#)).await.unwrap();
+    let delivered = broker.queue_messages(&url).unwrap();
+    assert_eq!(delivered.len(), 1, "the subscription kept its scope and policy");
+    backend.sns.set_subscription_attribute(&subscription, "FilterPolicy", "").await.unwrap();
+    backend.sns.publish(&topic, request(r#"{"order": {"status": "open"}}"#)).await.unwrap();
+    assert_eq!(broker.queue_messages(&url).unwrap().len(), 2, "without a policy everything is delivered");
+}
+
+#[tokio::test]
 async fn objects_and_presigned_urls() {
     let (_, backend) = broker();
     assert!(!backend.objects.bucket_exists("b").await.unwrap());

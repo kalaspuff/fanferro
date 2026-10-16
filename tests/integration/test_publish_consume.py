@@ -130,6 +130,53 @@ async def test_filter_policies(client_factory: ClientFactory, name: Any) -> None
     assert [message.type for message in messages] == ["test.order_created.v1"]
 
 
+async def test_filter_policy_operators(client_factory: ClientFactory, name: Any) -> None:
+    """Wildcards, CIDR ranges, anything-but, numeric ranges and nested body keys filter like SNS."""
+    client = client_factory()
+    topic = client.topic(name("events"))
+    by_attributes = client.queue(name("attributes"))
+    by_body = client.queue(name("body"))
+    client.subscription(
+        topic,
+        by_attributes,
+        filter_policy={
+            "region": [{"wildcard": "eu-*-1"}],
+            "client_ip": [{"cidr": "10.0.0.0/8"}],
+            "tier": [{"anything-but": {"prefix": "free"}}],
+        },
+    )
+    client.subscription(
+        topic,
+        by_body,
+        filter_policy={"order": {"total": [{"numeric": [">=", 100]}], "status": [{"equals-ignore-case": "paid"}]}},
+        filter_policy_scope="MessageBody",
+    )
+    async with client:
+        for total, status, region, client_ip, tier in [
+            (150, "PAID", "eu-west-1", "10.1.2.3", "pro"),
+            (50, "paid", "eu-west-2", "10.1.2.3", "pro"),
+            (100, "Paid", "eu-west-1", "192.168.0.1", "free-trial"),
+        ]:
+            await topic.publish(
+                {"order": {"total": total, "status": status}},
+                attributes={"region": region, "client_ip": client_ip, "tier": tier},
+            )
+        by_attributes_messages = await drain_queue(client, by_attributes)
+        by_body_messages = await drain_queue(client, by_body)
+    assert [message.json()["order"]["total"] for message in by_attributes_messages] == [150]
+    assert sorted(message.json()["order"]["total"] for message in by_body_messages) == [100, 150]
+
+
+async def test_invalid_filter_policies_are_refused(memory_client: fanferro.Client, name: Any) -> None:
+    """Like SNS, the in-memory broker refuses a policy it cannot evaluate when it is set."""
+    topic = memory_client.topic(name("events"))
+    queue = memory_client.queue(name("events"))
+    memory_client.subscription(topic, queue, filter_policy={"region": [{"glob": "eu-*"}]})
+    with pytest.raises(fanferro.ProvisioningError, match="unrecognized match type glob"):
+        async with memory_client:
+            pass
+
+
 async def test_batches(client_factory: ClientFactory, name: Any) -> None:
     client = client_factory()
     queue = client.queue(name("batch"))
