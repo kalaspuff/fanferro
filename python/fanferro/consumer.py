@@ -577,6 +577,12 @@ class Consumer:
                 f"no dead-letter queue is configured for {self.queue.name}; messages that should be dead-lettered "
                 f"will be handled with on_missing_queue={self.dead_letter_policy.on_missing_queue!r}",
             )
+        if self.retry_policy.strategy == "requeue" and info.fifo:
+            self._emit(
+                EventKind.CONFIG_WARNING,
+                "RetryPolicy(strategy='requeue') on a FIFO queue sends a failed message behind the rest of its "
+                "message group, which then loses its order; strategy='visibility' keeps the group waiting instead",
+            )
         visibility = self.visibility_timeout or info.visibility_timeout
         if self.heartbeat is False and self.handler_timeout and visibility and self.handler_timeout > visibility:
             self._emit(

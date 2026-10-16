@@ -433,14 +433,20 @@ impl EngineInner {
                 }
             }
         } else {
+            let message = match info.kind {
+                SnsMessageKind::UnsubscribeConfirmation => {
+                    "dropped an SNS unsubscribe confirmation: the queue's subscription to the topic was removed"
+                }
+                _ if confirm => "dropped an SNS subscription confirmation without a token; confirm it manually",
+                _ => {
+                    "dropped an SNS subscription confirmation; enable auto_confirm_subscriptions or confirm it manually"
+                }
+            };
             self.client.events().emit(EventKind::ConfigWarning, || {
-                Event::new(
-                    EventKind::ConfigWarning,
-                    "dropped an SNS subscription control message; enable auto_confirm_subscriptions or confirm it manually",
-                )
-                .field("queue", self.queue())
-                .field("topic_arn", &info.topic_arn)
-                .field("sns_type", format!("{:?}", info.kind))
+                Event::new(EventKind::ConfigWarning, message)
+                    .field("queue", self.queue())
+                    .field("topic_arn", &info.topic_arn)
+                    .field("sns_type", format!("{:?}", info.kind))
             });
         }
         let _ = lease.ack().await;
