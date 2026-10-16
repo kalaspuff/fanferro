@@ -30,7 +30,9 @@ consumer = client.consumer(
   count keeps growing; delays up to 12 hours; a FIFO group is blocked while its message waits.
 * `"requeue"`: send a copy with `fanferro.attempt` incremented and delete the original. Resets the SQS
   receive count (a queue `RedrivePolicy` never cuts the sequence short) and supports delays up to
-  15 minutes on standard queues. A crash between send and delete can duplicate the message.
+  15 minutes on standard queues. A crash between send and delete can duplicate the message. On a
+  FIFO queue the copy goes behind the rest of its message group, which loses its order (consumers
+  emit a `config.warning`); keep `"visibility"` there.
 
 `message.attempt` counts processing attempts across both (SQS receives plus requeues).
 

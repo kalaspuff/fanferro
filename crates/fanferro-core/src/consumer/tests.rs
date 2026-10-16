@@ -925,7 +925,23 @@ async fn subscription_confirmations_are_handled_internally() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(fx.stored().is_empty());
     let events = fx.client.events().drain(10);
-    assert!(events.iter().any(|e| e.kind == EventKind::ConfigWarning));
+    assert!(events.iter().any(|e| e.kind == EventKind::ConfigWarning && e.message.contains("auto_confirm")));
+    engine.close(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn unsubscribe_confirmations_are_reported_as_such() {
+    let fx = fixture(ClientConfig::default()).await;
+    fx.client.events().set_enabled(&[EventKind::ConfigWarning]);
+    fx.send(r#"{"Type":"UnsubscribeConfirmation","MessageId":"1","Token":"t","TopicArn":"arn:aws:sns:us-east-1:000000000000:x","Message":"unsubscribed"}"#)
+        .await;
+    let engine = fx.engine(|_| {});
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(fx.stored().is_empty(), "control messages are deleted");
+    let events = fx.client.events().drain(10);
+    let warning = events.iter().find(|e| e.kind == EventKind::ConfigWarning).unwrap();
+    assert!(warning.message.contains("unsubscribe confirmation"), "{}", warning.message);
+    assert!(!warning.message.contains("auto_confirm"));
     engine.close(true).await;
 }
 
