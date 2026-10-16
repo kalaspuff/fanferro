@@ -26,6 +26,11 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 - Presigned URLs of offloaded payloads (`LargePayloads(reference="url" | "both")`) are valid for
   24 hours instead of 1 hour by default, so messages that wait in a queue for a while can still be
   fetched; `presign_ttl=timedelta(hours=1)` keeps the old lifetime.
+- AWS calls fail (and are retried) when their response does not start within 10 seconds
+  (`Timeouts(read=10)`), instead of waiting for as long as a dead connection stays open: a stuck
+  delete no longer stalls a consumer, a stuck publish no longer hangs its caller. Long polls get
+  at least their wait time plus 15 seconds, requests with large bodies one more second per 64 KiB
+  uploaded; `Timeouts(read=None)` turns it off.
 
 ## [0.4.0] - 2026-10-16
 

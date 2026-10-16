@@ -389,13 +389,14 @@ async fn errors_are_classified() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn long_polls_outlast_a_configured_operation_timeout() {
+async fn long_polls_outlast_configured_timeouts() {
     if endpoint().is_none() {
         eprintln!("skipping: FANFERRO_TEST_ENDPOINT_URL is not set");
         return;
     }
-    let aws =
-        AwsConfig { timeouts: TimeoutSettings { operation: Some(1.0), ..TimeoutSettings::default() }, ..aws_config() };
+    let short =
+        TimeoutSettings { read: Some(1.0), attempt: Some(1.0), operation: Some(1.0), ..TimeoutSettings::default() };
+    let aws = AwsConfig { timeouts: short, ..aws_config() };
     let client = Client::connect(&aws, ClientConfig::default()).await.expect("connect");
     let queue = client
         .ensure_queue(&QueueSpec { name: Some(unique("e2e-timeout")), policy: create(), ..QueueSpec::default() })
@@ -420,7 +421,7 @@ async fn long_polls_outlast_a_configured_operation_timeout() {
             attempt_id: None,
         })
         .await
-        .expect("the long poll outlasts the 1 s operation timeout");
+        .expect("the long poll outlasts the 1 s read, attempt and operation timeouts");
     send.await.unwrap().unwrap();
     assert_eq!(received.iter().map(|m| m.body.as_str()).collect::<Vec<_>>(), ["late"]);
     client.delete_queue(&queue.url).await.unwrap();
