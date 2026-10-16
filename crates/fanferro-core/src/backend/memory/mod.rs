@@ -1310,8 +1310,9 @@ impl HttpFetch for MemoryHttp {
         let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
         let expires: Option<i64> =
             query.split('&').find_map(|pair| pair.strip_prefix("expires=")).and_then(|v| v.parse().ok());
-        if expires.is_some_and(|at| at < OffsetDateTime::now_utc().unix_timestamp()) {
-            return Err(Error::Payload("payload URL is not accessible (HTTP 403); it may have expired".into()));
+        if let Some(at) = expires.filter(|at| *at < OffsetDateTime::now_utc().unix_timestamp()) {
+            let expired_at = OffsetDateTime::from_unix_timestamp(at).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+            return Err(crate::transport::claim_check::expired_url_error(expired_at));
         }
         let (bucket, key) = path.split_once('/').ok_or_else(|| Error::Http("malformed memory URL".into()))?;
         let key = decode_key(key).ok_or_else(|| Error::Http("malformed memory URL".into()))?;

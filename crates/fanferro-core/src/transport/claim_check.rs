@@ -19,6 +19,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 use crate::backend::{Backend, BackendKind, ObjectEncryption, PutOptions};
 use crate::error::{Error, Result};
@@ -82,7 +84,7 @@ fn default_threshold() -> usize {
 }
 
 fn default_presign_ttl() -> f64 {
-    3600.0
+    24.0 * 3600.0
 }
 
 /// When and how outgoing payloads are offloaded.
@@ -103,7 +105,8 @@ pub struct OffloadSettings {
     /// What the pointer contains.
     #[serde(default)]
     pub reference: ReferenceMode,
-    /// Lifetime of presigned URLs in seconds (max 7 days).
+    /// Lifetime of presigned URLs in seconds (24 hours by default, at most 7 days). URLs signed
+    /// with temporary credentials stop working when those expire.
     #[serde(default = "default_presign_ttl")]
     pub presign_ttl: f64,
     /// Pointer format.
@@ -352,6 +355,16 @@ pub async fn fetch(backend: &Backend, settings: &FetchSettings, pointer: &Payloa
         }
     }
     Err(last_error.unwrap_or_else(|| Error::Payload("claim check pointer has neither bucket/key nor url".into())))
+}
+
+/// The error for a presigned payload URL that expired before the message was consumed.
+pub(crate) fn expired_url_error(expired_at: OffsetDateTime) -> Error {
+    let expired_at = expired_at.format(&Rfc3339).unwrap_or_else(|_| expired_at.to_string());
+    Error::Payload(format!(
+        "payload URL expired at {expired_at}: the message waited longer than the presign_ttl it was published \
+         with (raise it, or publish with reference=\"both\" so that consumers that can read the bucket fetch it \
+         from there)"
+    ))
 }
 
 fn verify(pointer: &PayloadPointer, data: Bytes, verify_checksum: bool) -> Result<Bytes> {

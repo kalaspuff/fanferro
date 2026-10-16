@@ -23,6 +23,9 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   previous one is confirmed, which adds a delete round trip per message of a group. A message
   whose delete failed is redelivered before the group's later messages instead of after them.
   `client.consumer(queue, strict_ordering=False)` acks in the background as before.
+- Presigned URLs of offloaded payloads (`LargePayloads(reference="url" | "both")`) are valid for
+  24 hours instead of 1 hour by default, so messages that wait in a queue for a while can still be
+  fetched; `presign_ttl=timedelta(hours=1)` keeps the old lifetime.
 
 ## [0.4.0] - 2026-10-16
 

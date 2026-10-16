@@ -256,6 +256,7 @@ def test_large_payload_settings() -> None:
     core = settings.to_core()
     assert core["encryption"] == {"mode": "kms", "key_id": "key", "bucket_key": True}
     assert core["presign_ttl"] == 60
+    assert fanferro.LargePayloads("b").to_core()["presign_ttl"] == 24 * 3600, "presigned URLs last a day"
     assert fanferro.LargePayloads("b", encryption="s3").to_core()["encryption"] == {"mode": "s3"}
     with pytest.raises(ValueError, match="aws_extended"):
         fanferro.LargePayloads("b", format="aws_extended", reference="url")

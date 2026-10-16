@@ -44,7 +44,9 @@ class LargePayloads:
         threshold: Offload when the encoded message (body plus attributes) exceeds this many bytes.
         always: Offload every message regardless of size.
         reference: What the pointer contains: ``"s3"``, ``"url"`` (presigned) or ``"both"``.
-        presign_ttl: Lifetime of presigned URLs (max 7 days; less with temporary credentials).
+        presign_ttl: Lifetime of presigned URLs (24 hours by default, at most 7 days). A URL signed
+            with temporary credentials (an IAM role) stops working when they expire, which can be
+            sooner: consumers that can read the bucket should get ``reference="both"``.
         format: ``"fanferro"`` or ``"aws_extended"`` (AWS extended client compatible; S3 only).
         encryption: ``"s3"`` (SSE-S3), a :class:`fanferro.Kms` key (SSE-KMS) or ``None`` (bucket default).
         bucket_key: Use S3 bucket keys with SSE-KMS (fewer KMS requests).
@@ -57,7 +59,7 @@ class LargePayloads:
     threshold: int = 256 * 1024
     always: bool = False
     reference: Literal["s3", "url", "both"] = "s3"
-    presign_ttl: Duration = timedelta(hours=1)
+    presign_ttl: Duration = timedelta(hours=24)
     format: Literal["fanferro", "aws_extended"] = "fanferro"
     encryption: Literal["s3"] | Kms | None = None
     bucket_key: bool = True

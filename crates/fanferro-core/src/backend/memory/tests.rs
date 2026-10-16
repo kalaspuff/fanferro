@@ -300,6 +300,9 @@ async fn objects_and_presigned_urls() {
     assert!(backend.objects.get_object("b", "p/k 1", 2).await.is_err());
     let url = backend.objects.presign_get("b", "p/k 1", Duration::from_secs(60)).await.unwrap();
     assert_eq!(&backend.http.get(&url, 100).await.unwrap()[..], b"data");
+    let expired = format!("{}?expires=1", url.split_once('?').unwrap().0);
+    let error = backend.http.get(&expired, 100).await.unwrap_err().to_string();
+    assert!(error.contains("expired at 1970-01-01T00:00:01Z"), "{error}");
     backend.objects.delete_object("b", "p/k 1").await.unwrap();
     assert!(backend.http.get(&url, 100).await.is_err());
     assert!(backend.http.get("https://example.com/x", 100).await.is_err());

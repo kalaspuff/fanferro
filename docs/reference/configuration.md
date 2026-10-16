@@ -137,7 +137,7 @@ at most 12 hours).
 `create_missing()`, `ensure()`, `assume()`.
 
 `LargePayloads`: `bucket`, `prefix` (`"fanferro/"`), `threshold` (262144), `always` (`False`),
-`reference` (`"s3"`), `presign_ttl` (1 hour), `format` (`"fanferro"`), `encryption` (`None`),
+`reference` (`"s3"`), `presign_ttl` (24 hours), `format` (`"fanferro"`), `encryption` (`None`),
 `bucket_key` (`True`), `storage_class` (`None`), `create_bucket` (`False`).
 
 `PayloadFetch`: `max_bytes` (64 MiB), `prefer` (`"s3"`), `allowed_url_hosts` (AWS + endpoint),
