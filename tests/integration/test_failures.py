@@ -246,6 +246,29 @@ async def test_requeue_strategy_on_fifo_queues_warns(memory_client: fanferro.Cli
     assert any("loses its order" in event.message for event in warnings)
 
 
+async def test_an_immediate_fifo_retry_hands_the_group_back_once(client_factory: ClientFactory, name: Any) -> None:
+    """The group's redelivery is processed, not handed back again while the rest is released."""
+    client = client_factory()
+    queue = client.queue(f"{name('again')}.fifo")
+    seen: list[tuple[int, int]] = []
+    retry = fanferro.RetryPolicy(backoff=fanferro.Backoff.immediate())
+    consumer = client.consumer(queue, wait_time=1, retry=retry)
+
+    @consumer.route(OrderCreated)
+    async def handle(message: fanferro.Message[OrderCreated]) -> None:
+        seen.append((message.body.order_id, message.receive_count))
+        if message.body.order_id == 0 and message.receive_count == 1:
+            raise fanferro.Retry()
+
+    async with client:
+        await queue.send_batch(
+            [fanferro.OutgoingMessage(body=OrderCreated(order_id=i), group_id="g") for i in range(3)]
+        )
+        await consume_until(consumer, lambda: len(seen) == 4)
+    assert seen == [(0, 1), (0, 2), (1, 2), (2, 2)]
+    assert consumer.stats()["engine"]["messages_released"] == 2
+
+
 async def test_attempts_beyond_limit_skip_the_handler(client_factory: ClientFactory, name: Any) -> None:
     client = client_factory()
     queue = queue_with_dlq(client, name("limit"))

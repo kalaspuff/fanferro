@@ -253,12 +253,15 @@ class _Settler:
 
 
 class _GroupSequencer:
-    """Processes messages of the same FIFO group one at a time, in order."""
+    """Processes messages of the same FIFO group one at a time, in order.
+
+    A message that was not completed (it was retried or released) hands the group's later
+    messages back, so that SQS redelivers the group in order.
+    """
 
     def __init__(self, consumer: Consumer) -> None:
         self._consumer = consumer
         self._pending: dict[str, deque[Delivery]] = {}
-        self._poisoned: set[str] = set()
 
     def submit(self, group: str, delivery: Delivery) -> None:
         queue = self._pending.get(group)
@@ -275,25 +278,20 @@ class _GroupSequencer:
         try:
             while queue:
                 delivery = queue.popleft()
-                if group in self._poisoned:
-                    # An earlier message of this group was not completed: keep the order by
-                    # handing this one back; SQS redelivers the group in sequence.
-                    if counted:
-                        counted = False
-                        self._consumer._waiting -= 1
-                    await self._consumer._release_quietly(delivery)
-                    continue
                 was_counted, counted = counted, False
                 outcome = await self._consumer._run(delivery, counted=was_counted)
                 if outcome not in ("acked", "discarded", "dead_lettered"):
-                    self._poisoned.add(group)
+                    # The message comes back: hand back the rest of its batch, so that SQS
+                    # redelivers the group in order. What arrives meanwhile is that redelivery.
+                    later = list(queue)
+                    queue.clear()
+                    await asyncio.gather(*(self._consumer._release_quietly(other) for other in later))
         except Exception as error:  # noqa: BLE001 - deliberate catch-all; the error is reported, never swallowed silently
             self._consumer._task_failed(error)
         finally:
             if counted:
                 self._consumer._waiting -= 1
             self._pending.pop(group, None)
-            self._poisoned.discard(group)
             self._consumer._task_ended()
 
 
