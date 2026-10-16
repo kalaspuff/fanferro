@@ -300,6 +300,34 @@ async def test_publish_middleware(client_factory: ClientFactory, name: Any) -> N
     assert messages[0].attribute("tenant") == "acme"
 
 
+async def test_publish_options_are_not_mutated(client_factory: ClientFactory, name: Any) -> None:
+    tenant = {"current": "acme"}
+
+    async def add_tenant(context: fanferro.PublishContext, call_next: fanferro.PrepareNext) -> fanferro.PreparedMessage:
+        context.message.attributes.setdefault("tenant", tenant["current"])
+        context.message.headers.setdefault("tenant", tenant["current"])
+        return await call_next(context)
+
+    client = client_factory(publish_middleware=[add_tenant])
+    queue = client.queue(name("shared-options"))
+    common_attributes = {"source": "importer"}
+    common_headers: dict[str, fanferro.messages.HeaderValue] = {}
+    async with client:
+        await queue.send({"n": 1}, attributes=common_attributes, headers=common_headers)
+        tenant["current"] = "globex"
+        await queue.send({"n": 2}, attributes=common_attributes, headers=common_headers)
+        tenant["current"] = "initech"
+        await queue.send_batch([{"n": 3}, {"n": 4}], attributes=common_attributes)
+        messages = await drain_queue(client, queue)
+    assert common_attributes == {"source": "importer"}
+    assert common_headers == {}
+    tenants = {message.json()["n"]: message.attribute("tenant") for message in messages}
+    assert tenants == {1: "acme", 2: "globex", 3: "initech", 4: "initech"}
+    # Optional arguments passed through as None still mean "none".
+    message = fanferro.OutgoingMessage({"n": 5}, attributes=None, headers=None)  # type: ignore[arg-type]
+    assert (message.attributes, message.headers) == ({}, {})
+
+
 async def test_reserved_attributes_are_rejected(client_factory: ClientFactory, name: Any) -> None:
     client = client_factory()
     queue = client.queue(name("reserved"))

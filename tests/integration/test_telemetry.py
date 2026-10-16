@@ -92,6 +92,25 @@ async def test_trace_propagation(otel: Any, carrier: Carrier, name: Any) -> None
     await client.close()
 
 
+async def test_each_publish_carries_its_own_trace_context(otel: Any, name: Any) -> None:
+    """A shared attributes dict must not keep the trace context of the first publish."""
+    tracer_provider, exporter, meter_provider, _ = otel
+    telemetry = fanferro.Telemetry(tracer_provider=tracer_provider, meter_provider=meter_provider)
+    client = testing.memory_client(telemetry=telemetry)
+    queue = client.queue(name("shared-attributes"))
+    tracer = tracer_provider.get_tracer("test")
+    common = {"tenant": "acme"}
+    async with client:
+        for request in ("first", "second"):
+            with tracer.start_as_current_span(request):
+                await queue.send(OrderCreated(order_id=1), attributes=common)
+        received = await drain_queue(client, queue)
+    assert common == {"tenant": "acme"}
+    requests = {span.name: span for span in exporter.get_finished_spans() if span.name in ("first", "second")}
+    trace_ids = {message.attribute("traceparent").split("-")[1] for message in received}
+    assert trace_ids == {f"{span.context.trace_id:032x}" for span in requests.values()}
+
+
 async def test_link_mode_and_errors(otel: Any, name: Any) -> None:
     tracer_provider, exporter, meter_provider, _ = otel
     client = testing.memory_client(

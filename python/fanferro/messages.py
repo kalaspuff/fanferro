@@ -468,6 +468,9 @@ class Message[T]:
 class OutgoingMessage:
     """A message to publish, with every option. Middleware receives and may modify it.
 
+    The message holds its own copies of ``attributes`` and ``headers``: changing them never changes
+    the dicts it was created with.
+
     Attributes:
         body: The application object (encoded by a codec).
         type: Message type name (defaults to the name registered for the body's class).
@@ -505,6 +508,13 @@ class OutgoingMessage:
     codec: Codec | str | None = None
     envelope: Envelope | None = None
     trace_header: str | None = None
+
+    def __post_init__(self) -> None:
+        # Own copies: middleware and telemetry add entries (tenant, trace context...), and the dicts
+        # passed in may be shared by several messages (constants, the defaults of publish_batch).
+        # None (an optional argument passed through) means none.
+        self.attributes = dict(self.attributes) if self.attributes is not None else {}
+        self.headers = dict(self.headers) if self.headers is not None else {}
 
 
 @dataclass(frozen=True, slots=True)
