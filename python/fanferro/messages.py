@@ -160,6 +160,7 @@ class Message[T]:
         "_data",
         "_json",
         "_settled",
+        "_settlement_failed",
         "_settler",
         "_slot",
         "attributes",
@@ -203,6 +204,7 @@ class Message[T]:
         """How the message was settled (``None`` while unsettled)."""
         self._settler = settler
         self._settled = False
+        self._settlement_failed = False  # a settlement call raised (see the consumer's _Settler)
         self._slot: Any = None  # the consumer's handler slot while the handler runs
         self._body: Any = body
         self._data: tuple[Payload, bytes] | None = None  # (payload, its data): read once per payload
@@ -230,6 +232,7 @@ class Message[T]:
         message.outcome = None
         message._settler = settler
         message._settled = False
+        message._settlement_failed = False
         message._slot = None
         message._body = _UNSET
         message._data = None

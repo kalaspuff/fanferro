@@ -336,8 +336,9 @@ impl PyDelivery {
         self.inner.lease.mark_active();
     }
 
-    /// Notes that a handler waits for the next settlement; `waiting_handlers`: how many handlers
-    /// wait when all of them do (the batch is then sent once it holds all their settlements).
+    /// Notes that a handler (or a FIFO message group) waits for the next settlement;
+    /// `waiting_handlers`: how many settlements are awaited when everything that could settle
+    /// waits (the batch is then sent once it holds all of them).
     #[pyo3(signature = (waiting_handlers=None))]
     fn mark_awaited(&self, waiting_handlers: Option<usize>) {
         self.inner.lease.mark_awaited(waiting_handlers);

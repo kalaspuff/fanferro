@@ -19,6 +19,10 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 - Declaring a queue or topic again with the same settings returns it instead of raising, and
   declaring a subscription again with different settings raises `ConfigurationError` instead of
   silently keeping the first declaration.
+- On FIFO queues, the next message of a message group starts once the automatic ack of the
+  previous one is confirmed, which adds a delete round trip per message of a group. A message
+  whose delete failed is redelivered before the group's later messages instead of after them.
+  `client.consumer(queue, strict_ordering=False)` acks in the background as before.
 
 ## [0.4.0] - 2026-10-16
 

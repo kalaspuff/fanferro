@@ -29,8 +29,9 @@ A handler is an `async def` whose first parameter's annotation decides what it r
 Return normally to **ack** (delete) the message. Raise to apply the [retry policy](failure-handling.md).
 Automatic acks are not awaited: the delete is batched with others and completes in the background
 (`consumer.stop()` waits for it; a failed delete is reported as a `message.ack_failed` event and
-the message is redelivered). `consumer.stats()["processed"]` counts messages whose handler
-succeeded, `stats()["engine"]["messages_acked"]` the confirmed deletes.
+the message is redelivered). On FIFO queues, the next message of the group waits for the delete
+instead (see [FIFO queues](#fifo-queues)). `consumer.stats()["processed"]` counts messages whose
+handler succeeded, `stats()["engine"]["messages_acked"]` the confirmed deletes.
 
 ## Routing
 
@@ -141,9 +142,16 @@ fractions up (0.5 s becomes 1 s, never 0), and so does the in-memory broker.
 
 ## FIFO queues
 
-Messages of the same group are processed one at a time in order; groups run concurrently. When a
-message of a group is retried, the group's later messages in the same batch are released so SQS
-redelivers the group in order. Force or disable this with `ordering="fifo"|"none"`.
+Messages of the same group are processed one at a time in order; groups run concurrently. A
+group's next message starts once the automatic ack of the previous one is confirmed. When a message
+is retried or released, or its delete fails, the group's later messages in the same batch are
+released, so SQS redelivers the group in order, starting with that message. Force or disable the
+sequencing with `ordering="fifo"|"none"`.
+
+Waiting for the delete adds its round trip to each message of a group (the delete does not wait for
+`settle_linger` when nothing else could join its batch). `strict_ordering=False` acks in the
+background instead: faster per group, but a message whose delete fails is redelivered after the
+group's later messages.
 
 ## SNS subscriptions
 

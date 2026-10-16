@@ -64,9 +64,10 @@ pub(crate) struct SettleCommand {
     /// A handler waits for this settlement (an explicit `await message.ack()`...).
     pub awaited: bool,
     /// Set when every handler that could request another settlement waits for one: how many
-    /// handlers wait. Once the batch holds that many awaited settlements, nothing else can join
-    /// it; while fewer are pending, some handlers wait for settlements already sent and will
-    /// soon make room for handlers that settle more.
+    /// settlements are awaited (by handlers, or by FIFO message groups whose next message
+    /// waits). Once the batch holds that many awaited settlements, nothing else can join it;
+    /// while fewer are pending, some of them were sent already, and their completion will soon
+    /// make room for handlers that settle more.
     pub waiting_handlers: Option<usize>,
     /// When the command was queued (the linger counts from the oldest pending command).
     pub queued_at: Instant,

@@ -140,6 +140,8 @@ These are relied upon across layers; tests cover each of them.
   semaphore of `concurrency` permits held while decoding, middleware and the handler run; the
   task settles the message after giving its permit back. Automatic acks are not awaited: the
   engine deletes the message in the background (`message.ack_failed` events report failures).
+  A FIFO group's task awaits them (`strict_ordering`): its next message starts once the delete
+  is confirmed, and a settlement that failed hands the group's later messages back.
 * Events flow Rust → Python through a bounded channel drained by an event pump task (started
   while a consumer runs or the client is entered) or synchronously after operations. The pump
   is stopped by waking its pending wait, not by cancelling it, so events that wait already took

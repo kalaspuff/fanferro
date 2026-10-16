@@ -114,9 +114,7 @@ class _Slot:
         self._waits += 1
         if self._waits == 1:
             consumer._blocked += 1
-        return consumer._blocked >= consumer._active and (
-            consumer._waiting == 0 or consumer._active >= consumer.concurrency
-        )
+        return consumer._all_waiting()
 
     def unblock(self, _settlement: object = None) -> None:
         """Ends a wait started with :meth:`block` (usable as a done callback)."""
@@ -136,24 +134,43 @@ class _Settler:
             raise ConsumerStateError("message has no delivery")
         return message.delivery
 
-    async def _call(self, message: Message[Any], operation: Callable[[Delivery], Awaitable[None]]) -> None:
+    async def _call(
+        self, message: Message[Any], operation: Callable[[Delivery], Awaitable[None]], *, settlement: bool = True
+    ) -> None:
         """Runs one settlement call on the message's delivery.
 
         A handler that still holds its slot (an explicit ``await message.ack()``...) counts as
-        waiting for the call until the call completes (see :meth:`_Slot.block`). When every
-        handler that could request another settlement is waiting, the engine sends the batch as
-        soon as it holds all their settlements instead of waiting to fill it.
+        waiting for the call until the call completes (see :meth:`_Slot.block`), and so does the
+        message group of a sequenced message, whose next message waits for it. When everything
+        that could request another settlement is waiting, the engine sends the batch as soon as
+        it holds all their settlements instead of waiting to fill it.
+
+        A settlement call that raises is noted on the message: its group's later messages are
+        then handed back (see :class:`_GroupSequencer`). ``settlement=False`` (extensions) does not.
         """
         delivery = self._delivery(message)
+        consumer = self._consumer
         slot: _Slot | None = message._slot
-        if slot is None or not slot.held:
-            await operation(delivery)
-            return
-        delivery.mark_awaited(self._consumer._blocked if slot.block() else None)
-        future = asyncio.ensure_future(operation(delivery))
-        # Not waiting any more once the call completed, even before the handler resumes.
-        future.add_done_callback(slot.unblock)
-        await future
+        try:
+            if slot is not None and slot.held:
+                delivery.mark_awaited(consumer._awaited_settlements() if slot.block() else None)
+                future = asyncio.ensure_future(operation(delivery))
+                # Not waiting any more once the call completed, even before the handler resumes.
+                future.add_done_callback(slot.unblock)
+                await future
+            elif consumer._sequenced and message.group_id is not None:
+                consumer._group_waits += 1
+                try:
+                    delivery.mark_awaited(consumer._awaited_settlements() if consumer._all_waiting() else None)
+                    await operation(delivery)
+                finally:
+                    consumer._group_waits -= 1
+            else:
+                await operation(delivery)
+        except Exception:
+            if settlement:
+                message._settlement_failed = True
+            raise
 
     async def ack(self, message: Message[Any]) -> None:
         await self._call(message, lambda delivery: delivery.ack())
@@ -249,14 +266,16 @@ class _Settler:
         self._consumer._emit(EventKind.MESSAGE_DROPPED, f"message dropped: {reason}", message=message, reason=reason)
 
     async def extend(self, message: Message[Any], timeout: float) -> None:
-        await self._call(message, lambda delivery: delivery.extend(timeout))
+        await self._call(message, lambda delivery: delivery.extend(timeout), settlement=False)
 
 
 class _GroupSequencer:
     """Processes messages of the same FIFO group one at a time, in order.
 
-    A message that was not completed (it was retried or released) hands the group's later
-    messages back, so that SQS redelivers the group in order.
+    A message whose settlement did not complete (it was retried or released, or a delete
+    failed) hands the group's later messages back, so SQS redelivers the group in order. With
+    ``strict_ordering``, the group's next message also waits until the automatic ack of the
+    previous one is confirmed.
     """
 
     def __init__(self, consumer: Consumer) -> None:
@@ -325,6 +344,7 @@ class Consumer:
         shutdown: ShutdownPolicy | None = None,
         handler_timeout: float | None = None,
         ordering: Literal["auto", "fifo", "none"] = "auto",
+        strict_ordering: bool = True,
         envelopes: Sequence[Envelope] | None = None,
         middleware: Sequence[ConsumeMiddleware] = (),
         auto_ack: bool = True,
@@ -370,6 +390,7 @@ class Consumer:
         self.shutdown_policy = shutdown or ShutdownPolicy()
         self.handler_timeout = handler_timeout
         self.ordering = ordering
+        self.strict_ordering = strict_ordering
         self._envelopes = tuple(envelopes) if envelopes is not None else None
         self._middleware = tuple(middleware)
         self.auto_ack = auto_ack
@@ -396,6 +417,7 @@ class Consumer:
         self._active = 0  # handlers holding a slot
         self._waiting = 0  # messages scheduled for a handler that have no slot yet
         self._blocked = 0  # handlers waiting for a settlement they requested
+        self._group_waits = 0  # settlements of sequenced messages whose group's next message waits
         self._last_activity = 0.0
         self._starting: asyncio.Future[None] | None = None  # resolved when a start ends
         self._stopped: asyncio.Future[None] | None = None  # the stop in progress (or the last one)
@@ -540,7 +562,7 @@ class Consumer:
         self._stop_event = asyncio.Event()
         self._stopping = False
         self._force_stop = False
-        self._active = self._waiting = self._blocked = 0
+        self._active = self._waiting = self._blocked = self._group_waits = 0
         client._acquire_pump()
         try:
             self._engine.start()
@@ -858,6 +880,14 @@ class Consumer:
         """Forgets tasks that ended without :meth:`_task_ended` (cancelled before they ever ran)."""
         self._tasks.difference_update([task for task in self._tasks if task.done()])
 
+    def _all_waiting(self) -> bool:
+        """Whether every handler that could request another settlement waits for one."""
+        return self._blocked >= self._active and (self._waiting == 0 or self._active >= self.concurrency)
+
+    def _awaited_settlements(self) -> int:
+        """Settlements that handlers and message groups wait for (see :meth:`_Settler._call`)."""
+        return self._blocked + self._group_waits
+
     async def _acquire_slot(self, semaphore: asyncio.Semaphore) -> bool:
         """Waits for a handler slot; ``False`` when stopping released the message instead."""
         task = asyncio.current_task()
@@ -1002,7 +1032,8 @@ class Consumer:
                 await self._failed(message, exc)
             finally:
                 telemetry.record_process(self.queue.name, monotonic() - started, error)
-        return message.outcome
+        # None when a settlement failed: the message comes back, so a FIFO group must wait for it.
+        return None if message._settlement_failed else message.outcome
 
     async def _handle(self, message: Message[Any], slot: _Slot) -> None:
         """Routes, decodes and runs the handler while holding ``slot``, then settles without it."""
@@ -1054,7 +1085,12 @@ class Consumer:
             slot.release()
         if not message.settled and self.auto_ack:
             try:
-                if self.delete_offloaded_payloads or message.delivery is None:
+                if (
+                    self.delete_offloaded_payloads
+                    or message.delivery is None
+                    or (self._sequenced and self.strict_ordering and message.group_id is not None)
+                ):
+                    # Awaited: a sequenced group's next message starts once the delete is confirmed.
                     await message.ack()
                 else:
                     # The engine deletes the message in the background (batched, tracked until the
@@ -1208,7 +1244,7 @@ class Consumer:
             await self._apply_action(message, "retry", "transient decode failure", error)
         else:
             await self._apply_action(message, self.dead_letter_policy.on_decode_error, "decode failed", error)
-        return message.outcome
+        return None if message._settlement_failed else message.outcome
 
     async def _after_ack(self, message: Message[Any]) -> None:
         if not self.delete_offloaded_payloads:

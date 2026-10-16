@@ -94,7 +94,8 @@ pub struct Lease {
     settled: AtomicBool,
     /// The next settlement is awaited by a handler (see [`Lease::mark_awaited`]).
     awaited: AtomicBool,
-    /// How many handlers wait, when all of them do (0: unknown; see [`Lease::mark_awaited`]).
+    /// How many settlements are awaited, when everything that could settle waits (0: unknown;
+    /// see [`Lease::mark_awaited`]).
     waiting_handlers: AtomicUsize,
 }
 
@@ -270,13 +271,14 @@ impl Lease {
         }
     }
 
-    /// Notes that a handler waits for this lease's next settlement (or explicit extension), so
-    /// that the batch it joins is not held back for settlements that cannot come.
+    /// Notes that a handler (or a FIFO message group) waits for this lease's next settlement or
+    /// explicit extension, so that the batch it joins is not held back for settlements that
+    /// cannot come.
     ///
     /// `waiting_handlers`: when every handler that could request another settlement waits for
-    /// one, how many handlers wait. The settle loop sends the batch as soon as it holds that many
-    /// awaited settlements; while fewer are pending, some handlers wait for settlements that were
-    /// sent already, and their slots will soon go to handlers that settle more.
+    /// one, how many settlements are awaited. The settle loop sends the batch as soon as it holds
+    /// that many awaited settlements; while fewer are pending, some of them were sent already,
+    /// and their completion will soon make room for handlers that settle more.
     pub fn mark_awaited(&self, waiting_handlers: Option<usize>) {
         self.awaited.store(true, Ordering::SeqCst);
         self.waiting_handlers.store(waiting_handlers.unwrap_or(0), Ordering::SeqCst);

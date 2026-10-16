@@ -101,8 +101,8 @@ Publish options (keywords or `fanferro.OutgoingMessage`): `type`, `attributes`, 
 
 Consumer options: `concurrency`, `prefetch`, `batch_size`, `min_receive_batch`,
 `receive_batch_wait`, `wait_time`, `pollers`, `rate_limit`, `visibility_timeout`, `heartbeat`,
-`retry`, `dead_letter`, `shutdown`, `handler_timeout`, `ordering`, `envelopes`, `middleware`,
-`auto_ack`, `settle_linger`, `sns_unwrap`, `auto_confirm_subscriptions`,
+`retry`, `dead_letter`, `shutdown`, `handler_timeout`, `ordering`, `strict_ordering`, `envelopes`,
+`middleware`, `auto_ack`, `settle_linger`, `sns_unwrap`, `auto_confirm_subscriptions`,
 `delete_offloaded_payloads`, `name`.
 
 ## Credentials and region
@@ -197,7 +197,9 @@ other producers) only match `when=` routes and the default route.
 
 Use FIFO resources (`"name.fifo"`) and a group id per entity:
 `client.topic("ledger.fifo", group_id=lambda m: m.body.account_id)`. Same-group messages are
-processed sequentially; publishing the same `id` twice within 5 minutes is deduplicated.
+processed sequentially, each after the previous one's delete is confirmed (`strict_ordering=False`
+acks in the background: faster, but a failed delete reorders the group); publishing the same `id`
+twice within 5 minutes is deduplicated.
 
 ## Large messages
 

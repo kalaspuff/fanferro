@@ -98,6 +98,7 @@ each parameter and field listed here exists in the code and that every one in th
 | `shutdown` | `ShutdownPolicy()` | Shutdown policy |
 | `handler_timeout` | `None` | Cancel handlers after N seconds |
 | `ordering` | `"auto"` | `"fifo"` (per-group sequencing), `"none"`, or auto (FIFO queues) |
+| `strict_ordering` | `True` | A group's next message waits until the automatic ack of the previous one is confirmed (`False`: background acks; a failed delete can reorder the group) |
 | `envelopes` | client default | Envelopes to try |
 | `middleware` | `()` | Consume middleware for this consumer |
 | `auto_ack` | `True` | Ack when the handler returns |
