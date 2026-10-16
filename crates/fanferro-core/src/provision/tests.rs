@@ -234,6 +234,59 @@ async fn subscriptions_and_queue_policy() {
 }
 
 #[tokio::test]
+async fn queue_policy_updates_keep_subscription_permissions() {
+    let client = client();
+    let topic = client
+        .ensure_topic(&TopicSpec { name: Some("events".into()), policy: ensure(), ..TopicSpec::default() })
+        .await
+        .unwrap()
+        .resource
+        .unwrap();
+    let own = r#"{"Version":"2012-10-17","Statement":[{"Sid":"auditor","Effect":"Allow","Principal":{"AWS":"arn:aws:iam::111111111111:root"},"Action":"sqs:GetQueueAttributes","Resource":"*"}]}"#;
+    let queue_spec = QueueSpec {
+        name: Some("listener".into()),
+        attributes: attrs(&[("Policy", own)]),
+        policy: ensure(),
+        ..QueueSpec::default()
+    };
+    let queue = client.ensure_queue(&queue_spec).await.unwrap().resource.unwrap();
+    let subscription = SubscriptionSpec {
+        topic_arn: topic.arn.clone(),
+        queue_arn: queue.arn.clone(),
+        queue_url: queue.url.clone(),
+        attributes: attrs(&[("RawMessageDelivery", "true")]),
+        manage_queue_policy: true,
+        dead_letter_queue_url: None,
+        dead_letter_queue_arn: None,
+        policy: ensure(),
+    };
+    client.ensure_subscription(&subscription).await.unwrap();
+
+    // Provisioning again (the next deployment): the queue comes first and must keep the permission,
+    // or SNS drops what is published until the subscription restores it.
+    let report = client.ensure_queue(&queue_spec).await.unwrap();
+    assert_eq!(report.status, ProvisionStatus::Found, "{:?}", report.actions);
+    assert!(report.drift.is_empty());
+    let policy: serde_json::Value =
+        serde_json::from_str(&client.queue_attributes(&queue.url).await.unwrap()["Policy"]).unwrap();
+    assert!(policy_doc::allows_topic(&policy, &queue.arn, &topic.arn));
+    let read_only = QueueSpec { policy: ProvisionPolicy::default(), ..queue_spec.clone() };
+    assert!(client.ensure_queue(&read_only).await.unwrap().drift.is_empty());
+
+    // Changing the application's own statements updates them, still keeping the permission.
+    let changed = own.replace("sqs:GetQueueAttributes", "sqs:*");
+    let report = client
+        .ensure_queue(&QueueSpec { attributes: attrs(&[("Policy", &changed)]), ..queue_spec.clone() })
+        .await
+        .unwrap();
+    assert_eq!(report.status, ProvisionStatus::Updated);
+    let policy: serde_json::Value =
+        serde_json::from_str(&client.queue_attributes(&queue.url).await.unwrap()["Policy"]).unwrap();
+    assert!(policy_doc::allows_topic(&policy, &queue.arn, &topic.arn));
+    assert!(policy.to_string().contains("sqs:*"));
+}
+
+#[tokio::test]
 async fn read_only_subscription_reports_missing_policy() {
     let client = client();
     let topic = client
