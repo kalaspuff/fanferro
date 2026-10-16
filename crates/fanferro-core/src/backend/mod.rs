@@ -12,6 +12,8 @@
 
 pub mod aws;
 pub mod memory;
+#[cfg(test)]
+pub(crate) mod testing;
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;

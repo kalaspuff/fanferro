@@ -30,8 +30,8 @@ mod settle;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use parking_lot::Mutex;
@@ -57,7 +57,7 @@ use crate::types::attributes::{md5_of_attributes, md5_of_body};
 use crate::types::reserved;
 use config::Settings;
 use lease::LeaseEntry;
-use settle::{Reply, SettleCommand, SettleKind};
+use settle::{Reply, SettleCommand, SettleKind, SettleQueue};
 
 /// A received message handed to the application.
 #[derive(Debug)]
@@ -182,7 +182,8 @@ pub(crate) struct EngineInner {
     /// Decoded deliveries, one entry per received batch (dispatched together).
     deliveries_tx: mpsc::Sender<Vec<Delivery>>,
     deliveries_rx: tokio::sync::Mutex<DeliveryBuffer>,
-    settle_tx: Mutex<Option<mpsc::UnboundedSender<SettleCommand>>>,
+    /// Pending settlements (set when the engine starts).
+    settle: OnceLock<Arc<SettleQueue>>,
     receive_token: CancellationToken,
     abort_token: CancellationToken,
     shutdown_token: CancellationToken,
@@ -220,8 +221,9 @@ impl DeliveryBuffer {
 }
 
 impl EngineInner {
-    pub(crate) fn settle_sender(&self) -> Option<mpsc::UnboundedSender<SettleCommand>> {
-        self.settle_tx.lock().clone()
+    /// The settle queue, once the engine started.
+    pub(crate) fn settle_queue(&self) -> Option<&SettleQueue> {
+        self.settle.get().map(Arc::as_ref)
     }
 
     fn queue(&self) -> &str {
@@ -253,11 +255,11 @@ impl EngineInner {
             let mut leases = self.leases.lock();
             for (message, permit) in messages.into_iter().zip(permits) {
                 let id = self.next_lease_id.fetch_add(1, Ordering::Relaxed);
+                let message = Arc::new(message);
                 leases.insert(
                     id,
                     LeaseEntry {
-                        receipt_handle: message.receipt_handle.clone(),
-                        message_id: message.message_id.clone(),
+                        message: message.clone(),
                         received_at: now,
                         visible_until: now + self.settings.visibility_timeout,
                         next_heartbeat: now + self.settings.heartbeat_interval,
@@ -266,7 +268,7 @@ impl EngineInner {
                         extending: false,
                     },
                 );
-                leased.push(Lease::new(id, self.clone(), Arc::new(message), permit));
+                leased.push(Lease::new(id, self.clone(), message, permit));
             }
         }
         self.metrics.messages_received.add(leased.len() as u64);
@@ -480,7 +482,7 @@ impl ConsumerEngine {
                     receiver: deliveries_rx,
                     leftover: VecDeque::new(),
                 }),
-                settle_tx: Mutex::new(None),
+                settle: OnceLock::new(),
                 receive_token: CancellationToken::new(),
                 abort_token: CancellationToken::new(),
                 shutdown_token: CancellationToken::new(),
@@ -518,8 +520,7 @@ impl ConsumerEngine {
             *state = EngineState::Running;
         }
         let inner = &self.inner;
-        let (settle_tx, settle_rx) = mpsc::unbounded_channel();
-        *inner.settle_tx.lock() = Some(settle_tx);
+        let queue = inner.settle.get_or_init(Arc::default).clone();
         let settle_task = inner.runtime.spawn(settle::settle_loop(
             settle::SettleContext {
                 client: inner.client.clone(),
@@ -529,7 +530,7 @@ impl ConsumerEngine {
                 retry: inner.settings.settle_retry.clone(),
                 backoff: inner.settings.settle_backoff,
             },
-            settle_rx,
+            queue,
         ));
         let mut background = vec![settle_task];
         if inner.settings.heartbeat_enabled {
@@ -658,18 +659,18 @@ impl ConsumerEngine {
         }
         let remaining: Vec<(u64, LeaseEntry)> = self.inner.leases.lock().drain().collect();
         self.inner.metrics.in_flight.add(-i64::try_from(remaining.len()).unwrap_or(0));
-        if release_unsettled && let Some(sender) = self.inner.settle_sender() {
+        if release_unsettled && let Some(queue) = self.inner.settle_queue() {
             let mut replies = Vec::new();
             for (_, entry) in remaining {
                 if matches!(entry.status, LeaseStatus::Buffered | LeaseStatus::Active) {
                     let (reply, receiver) = tokio::sync::oneshot::channel();
                     let mut command = SettleCommand::new(
-                        entry.receipt_handle,
+                        entry.message.receipt_handle.clone(),
                         SettleKind::Visibility(self.inner.visibility_floor(Duration::ZERO)),
                         Some(Reply::Channel(reply)),
                     );
                     command.urgent = true;
-                    if sender.send(command).is_ok() {
+                    if queue.push(command).is_ok() {
                         self.inner.metrics.messages_released.inc();
                         replies.push(receiver);
                     }
@@ -679,7 +680,9 @@ impl ConsumerEngine {
                 let _ = receiver.await;
             }
         }
-        self.inner.settle_tx.lock().take();
+        if let Some(queue) = self.inner.settle_queue() {
+            queue.close();
+        }
         self.inner.shutdown_token.cancel();
         let background: Vec<_> = self.inner.background.lock().drain(..).collect();
         for task in background {

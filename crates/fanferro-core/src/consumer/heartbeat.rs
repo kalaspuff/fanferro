@@ -9,7 +9,7 @@ use tokio::time::Instant;
 use super::EngineInner;
 use super::config::MAX_VISIBILITY;
 use super::lease::{LeaseStatus, is_lost};
-use crate::backend::VisibilityChange;
+use crate::backend::{ReceivedMessage, VisibilityChange};
 use crate::events::{Event, EventKind};
 use crate::publish::MAX_BATCH_ENTRIES;
 use crate::retry::sleep_or_cancel;
@@ -19,8 +19,7 @@ const SAFETY_MARGIN: Duration = Duration::from_secs(5);
 
 struct Due {
     id: u64,
-    receipt_handle: String,
-    message_id: String,
+    message: Arc<ReceivedMessage>,
     timeout: Duration,
 }
 
@@ -47,19 +46,18 @@ pub(crate) async fn heartbeat_loop(inner: Arc<EngineInner>) {
                 let remaining = lease.max_until.saturating_duration_since(now).min(hard_cap);
                 if remaining.is_zero() {
                     lease.status = LeaseStatus::Expired;
-                    expired.push(lease.message_id.clone());
+                    expired.push(lease.message.clone());
                     continue;
                 }
                 lease.extending = true;
                 due.push(Due {
                     id: *id,
-                    receipt_handle: lease.receipt_handle.clone(),
-                    message_id: lease.message_id.clone(),
+                    message: lease.message.clone(),
                     timeout: inner.settings.extend_by.min(remaining),
                 });
             }
         }
-        for message_id in expired {
+        for message in expired {
             inner.metrics.leases_expired.inc();
             inner.client.events().emit(EventKind::LeaseExpired, || {
                 Event::new(
@@ -67,7 +65,7 @@ pub(crate) async fn heartbeat_loop(inner: Arc<EngineInner>) {
                     "maximum lease duration reached; the message will become visible again",
                 )
                 .field("queue", &inner.settings.queue_url)
-                .field("sqs_message_id", message_id)
+                .field("sqs_message_id", &message.message_id)
             });
         }
         if due.is_empty() {
@@ -86,7 +84,7 @@ async fn extend_chunk(inner: &Arc<EngineInner>, chunk: Vec<Due>) {
     let started = Instant::now();
     let entries = chunk
         .iter()
-        .map(|due| VisibilityChange { receipt_handle: due.receipt_handle.clone(), timeout: due.timeout })
+        .map(|due| VisibilityChange { receipt_handle: due.message.receipt_handle.clone(), timeout: due.timeout })
         .collect();
     let result = inner.client.backend().sqs.change_visibility_batch(&inner.settings.queue_url, entries).await;
     let mut leases = inner.leases.lock();
@@ -103,7 +101,7 @@ async fn extend_chunk(inner: &Arc<EngineInner>, chunk: Vec<Due>) {
                         inner.client.events().emit(EventKind::LeaseExtended, || {
                             Event::new(EventKind::LeaseExtended, "visibility extended")
                                 .field("queue", &inner.settings.queue_url)
-                                .field("sqs_message_id", &due.message_id)
+                                .field("sqs_message_id", &due.message.message_id)
                                 .field("visibility_seconds", due.timeout.as_secs_f64())
                         });
                     }
@@ -126,7 +124,7 @@ async fn extend_chunk(inner: &Arc<EngineInner>, chunk: Vec<Due>) {
                                     "receipt handle is no longer valid; the message may be processed twice",
                                 )
                                 .field("queue", &inner.settings.queue_url)
-                                .field("sqs_message_id", &due.message_id)
+                                .field("sqs_message_id", &due.message.message_id)
                                 .error(&error)
                             });
                         } else {
@@ -135,7 +133,7 @@ async fn extend_chunk(inner: &Arc<EngineInner>, chunk: Vec<Due>) {
                             inner.client.events().emit(EventKind::LeaseExtensionFailed, || {
                                 Event::new(EventKind::LeaseExtensionFailed, "failed to extend visibility; retrying")
                                     .field("queue", &inner.settings.queue_url)
-                                    .field("sqs_message_id", &due.message_id)
+                                    .field("sqs_message_id", &due.message.message_id)
                                     .error(&error)
                             });
                         }
