@@ -6,8 +6,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
+use bytes::Bytes;
+
 use super::{
-    BatchResult, ReceiveRequest, ReceivedMessage, SendOutput, SendRequest, SqsApi, StringMap, VisibilityChange,
+    BatchResult, ObjectStoreApi, PutOptions, ReceiveRequest, ReceivedMessage, SendOutput, SendRequest, SqsApi,
+    StringMap, VisibilityChange,
 };
 use crate::error::{AwsError, AwsErrorKind, Result};
 
@@ -31,6 +34,43 @@ impl Overlap {
         let result = call.await;
         self.active.fetch_sub(1, Ordering::SeqCst);
         result
+    }
+}
+
+/// S3 whose uploads take `delay` each (and that records their overlap).
+#[derive(Debug)]
+pub(crate) struct SlowUploads {
+    inner: Arc<dyn ObjectStoreApi>,
+    delay: Duration,
+    /// `PutObject` calls.
+    pub(crate) puts: Overlap,
+}
+
+impl SlowUploads {
+    pub(crate) fn new(inner: Arc<dyn ObjectStoreApi>, delay: Duration) -> Self {
+        Self { inner, delay, puts: Overlap::default() }
+    }
+}
+
+#[async_trait]
+impl ObjectStoreApi for SlowUploads {
+    async fn put_object(&self, bucket: &str, key: &str, data: Bytes, options: &PutOptions) -> Result<()> {
+        self.puts.around(self.delay, self.inner.put_object(bucket, key, data, options)).await
+    }
+    async fn get_object(&self, bucket: &str, key: &str, max_bytes: usize) -> Result<Bytes> {
+        self.inner.get_object(bucket, key, max_bytes).await
+    }
+    async fn delete_object(&self, bucket: &str, key: &str) -> Result<()> {
+        self.inner.delete_object(bucket, key).await
+    }
+    async fn presign_get(&self, bucket: &str, key: &str, ttl: Duration) -> Result<String> {
+        self.inner.presign_get(bucket, key, ttl).await
+    }
+    async fn bucket_exists(&self, bucket: &str) -> Result<bool> {
+        self.inner.bucket_exists(bucket).await
+    }
+    async fn create_bucket(&self, bucket: &str) -> Result<()> {
+        self.inner.create_bucket(bucket).await
     }
 }
 

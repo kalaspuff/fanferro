@@ -8,7 +8,6 @@
 use std::time::Duration;
 
 use futures::StreamExt as _;
-use futures::future::join_all;
 use serde::Deserialize;
 
 use crate::backend::aws::classify;
@@ -27,6 +26,9 @@ pub const MAX_BATCH_ENTRIES: usize = 10;
 /// send their batches one after another, and retry a batch's failed entries before the next batch, so
 /// that message groups keep their order).
 pub const MAX_CONCURRENT_BATCH_CALLS: usize = 8;
+/// Messages of one `publish_batch` prepared at once: each may upload its payload to S3, and a large
+/// batch must not open a connection per message.
+pub const MAX_CONCURRENT_UPLOADS: usize = 16;
 /// Maximum per-message delay for SQS standard queues.
 pub const MAX_DELAY: Duration = Duration::from_secs(900);
 
@@ -424,7 +426,10 @@ impl Client {
     ) -> Result<Vec<Result<Receipt>>> {
         let count = messages.len();
         let prepared: Vec<Result<Prepared>> =
-            join_all(messages.into_iter().map(|message| self.prepare(transport, destination, message))).await;
+            futures::stream::iter(messages.into_iter().map(|message| self.prepare(transport, destination, message)))
+                .buffered(MAX_CONCURRENT_UPLOADS)
+                .collect()
+                .await;
         let mut results: Vec<Option<Result<Receipt>>> = (0..count).map(|_| None).collect();
         let mut pending: Vec<(usize, Prepared)> = Vec::new();
         for (index, entry) in prepared.into_iter().enumerate() {
