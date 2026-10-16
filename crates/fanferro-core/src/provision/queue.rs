@@ -3,6 +3,7 @@
 use futures::future::BoxFuture;
 
 use super::drift::{Drift, compare, compare_tags};
+use super::policy_doc;
 use super::{ProvisionStatus, QueueSpec, Report};
 use crate::backend::StringMap;
 use crate::client::Client;
@@ -194,6 +195,12 @@ impl Client {
         let mut current = attributes;
 
         if spec.policy.verify || spec.policy.update {
+            // The permissions subscriptions added to the queue policy are part of the desired state.
+            if let (Some(wanted), Some(actual)) = (desired.get("Policy"), current.get("Policy"))
+                && let Some(merged) = policy_doc::with_managed_statements(wanted, actual)
+            {
+                desired.insert("Policy".into(), merged);
+            }
             let mut drift = compare(&desired, &current);
             if spec.policy.update && report.status != ProvisionStatus::Created {
                 let updates: StringMap =

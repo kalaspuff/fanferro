@@ -5,9 +5,47 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 
+/// Prefix of the ids of the statements fanferro adds for SNS subscriptions.
+const MANAGED_SID_PREFIX: &str = "fanferro-sns-";
+
 /// The statement id fanferro uses for the permission of `topic_arn`.
 pub fn statement_id(topic_arn: &str) -> String {
-    format!("fanferro-sns-{}", &hex::encode(Sha256::digest(topic_arn.as_bytes()))[..16])
+    format!("{MANAGED_SID_PREFIX}{}", &hex::encode(Sha256::digest(topic_arn.as_bytes()))[..16])
+}
+
+fn statement_sid(statement: &Value) -> Option<&str> {
+    statement.get("Sid").and_then(Value::as_str)
+}
+
+/// The policy `desired` (from a queue spec) plus the statements fanferro added to the queue's
+/// `actual` policy for SNS subscriptions, so that provisioning the queue does not revoke them (SNS
+/// drops messages a queue policy rejects). `None` when there is nothing to add, or when either
+/// policy is not a JSON object.
+pub fn with_managed_statements(desired: &str, actual: &str) -> Option<String> {
+    let mut document = serde_json::from_str::<Value>(desired).ok()?;
+    let actual = serde_json::from_str::<Value>(actual).ok()?;
+    let object = document.as_object_mut()?;
+    let mut statements: Vec<Value> =
+        object.get("Statement").map(as_list).unwrap_or_default().into_iter().cloned().collect();
+    let managed: Vec<Value> = actual
+        .get("Statement")
+        .map(as_list)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|statement| {
+            statement_sid(statement).is_some_and(|sid| {
+                sid.starts_with(MANAGED_SID_PREFIX)
+                    && !statements.iter().any(|existing| statement_sid(existing) == Some(sid))
+            })
+        })
+        .cloned()
+        .collect();
+    if managed.is_empty() {
+        return None;
+    }
+    statements.extend(managed);
+    object.insert("Statement".into(), Value::Array(statements));
+    Some(document.to_string())
 }
 
 fn as_list(value: &Value) -> Vec<&Value> {
@@ -128,7 +166,7 @@ pub fn with_topic_permission(policy: Option<&str>, queue_arn: &str, topic_arn: &
     object.entry("Version").or_insert_with(|| json!("2012-10-17"));
     let mut statements: Vec<Value> =
         object.get("Statement").map(as_list).unwrap_or_default().into_iter().cloned().collect();
-    statements.retain(|existing| existing.get("Sid").and_then(Value::as_str) != Some(sid.as_str()));
+    statements.retain(|existing| statement_sid(existing) != Some(sid.as_str()));
     statements.push(statement);
     object.insert("Statement".into(), Value::Array(statements));
     Ok(Some(document.to_string()))
@@ -177,6 +215,20 @@ mod tests {
         assert!(glob_match("a?c", "abc"));
         assert!(!glob_match("a*d", "abc"));
         assert!(glob_match("*", ""));
+    }
+
+    #[test]
+    fn managed_statements_are_kept_in_desired_policies() {
+        let desired = r#"{"Version":"2012-10-17","Statement":{"Sid":"other","Effect":"Allow","Principal":"*","Action":"sqs:ReceiveMessage","Resource":"*"}}"#;
+        let actual = with_topic_permission(Some(desired), QUEUE, TOPIC).unwrap().unwrap();
+        let merged = with_managed_statements(desired, &actual).unwrap();
+        let document: Value = serde_json::from_str(&merged).unwrap();
+        assert!(allows_topic(&document, QUEUE, TOPIC));
+        assert_eq!(document["Statement"].as_array().unwrap().len(), 2);
+        // Nothing to add: the desired policy has the statement already, or the queue has none.
+        assert!(with_managed_statements(&merged, &actual).is_none());
+        assert!(with_managed_statements(desired, desired).is_none());
+        assert!(with_managed_statements("not json", &actual).is_none());
     }
 
     #[test]
