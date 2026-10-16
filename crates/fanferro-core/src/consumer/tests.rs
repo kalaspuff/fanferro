@@ -889,6 +889,78 @@ async fn decode_failures_are_delivered_with_errors() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn envelopes_are_unwrapped_while_decoding() {
+    use crate::envelope::{CloudEventsJson, Envelope, EnvelopeSet, RawEnvelope};
+    use crate::types::Payload;
+
+    let fx = fixture(ClientConfig::default()).await;
+    let payload = Payload {
+        data: Bytes::from_static(br#"{"n":1}"#),
+        content_type: Some("application/json".into()),
+        message_type: Some("orders.created".into()),
+        id: Some("m-1".into()),
+        ..Payload::default()
+    };
+    let send = |wire: WireMessage| {
+        let request = SendRequest {
+            body: String::from_utf8(wire.body.to_vec()).unwrap(),
+            attributes: wire.attributes,
+            ..SendRequest::default()
+        };
+        fx.client.backend().sqs.send_message(&fx.url, request)
+    };
+    send(CloudEventsJson::default().wrap(&payload).unwrap()).await.unwrap();
+    send(RawEnvelope::default().wrap(&payload).unwrap()).await.unwrap();
+    let mut broken = CloudEventsJson::default().wrap(&payload).unwrap();
+    broken.body = Bytes::from_static(br#"{"specversion":"1.0"}"#);
+    send(broken).await.unwrap();
+
+    let mut config = ConsumerConfig::new(fx.url.clone());
+    config.wait_time = 1.0;
+    let envelopes = EnvelopeSet::default_set();
+    let engine = ConsumerEngine::with_envelopes(&fx.client, config, Some(envelopes)).unwrap();
+    engine.start().unwrap();
+    let deliveries = collect(&engine, 3).await;
+    let mut seen = Vec::new();
+    for delivery in &deliveries {
+        match &delivery.unwrapped {
+            Unwrapped::Payload { payload: unwrapped, envelope } => {
+                assert_eq!(unwrapped.data, payload.data);
+                assert_eq!(unwrapped.id, payload.id);
+                assert_eq!(unwrapped.message_type, payload.message_type);
+                seen.push(*envelope);
+            }
+            Unwrapped::Failed(error) => {
+                assert!(matches!(error, Error::Envelope(_)), "{error}");
+                seen.push(usize::MAX);
+            }
+            other => panic!("unexpected outcome {other:?}"),
+        }
+        delivery.lease.ack().await.unwrap();
+    }
+    seen.sort_unstable();
+    assert_eq!(seen, [0, 2, usize::MAX], "CloudEvents, raw and a malformed CloudEvent");
+    engine.close(true).await;
+
+    // Without a matching envelope, and without envelopes at all.
+    fx.send("plain").await;
+    let mut config = ConsumerConfig::new(fx.url.clone());
+    config.wait_time = 1.0;
+    let only_cloudevents = EnvelopeSet::new(vec![Arc::new(CloudEventsJson::default())]);
+    let engine = ConsumerEngine::with_envelopes(&fx.client, config, Some(only_cloudevents)).unwrap();
+    engine.start().unwrap();
+    let delivery = collect(&engine, 1).await.remove(0);
+    assert!(matches!(&delivery.unwrapped, Unwrapped::Unrecognised { tried } if tried == "cloudevents"));
+    delivery.lease.release().await.unwrap();
+    engine.close(true).await;
+    let engine = fx.engine(|_| {});
+    let delivery = collect(&engine, 1).await.remove(0);
+    assert!(matches!(delivery.unwrapped, Unwrapped::NotAttempted));
+    delivery.lease.ack().await.unwrap();
+    engine.close(true).await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn receive_errors_back_off_and_recover() {
     let fx = fixture(ClientConfig::default()).await;
     fx.client.events().set_enabled(&[EventKind::ReceiveFailed]);

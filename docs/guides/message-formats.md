@@ -84,7 +84,9 @@ type you expect.
 
 A custom envelope implements `name`, `wrap(payload) -> WireMessage` and
 `unwrap(wire) -> Payload | None` (return `None` for messages that are not in its format). See
-`examples/custom_envelope_and_codec.py`.
+`examples/custom_envelope_and_codec.py`. When a consumer uses only built-in envelopes, the Rust
+engine unwraps messages while it decodes them, off the event loop; with a custom envelope among
+them, the consumer tries them in Python, in the same order.
 
 ## Binary data on SQS
 

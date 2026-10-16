@@ -72,15 +72,29 @@ impl EnvelopeSet {
     /// Unwraps `wire` with the first matching envelope, returning the payload and the
     /// name of the envelope that matched.
     pub fn unwrap(&self, wire: &WireMessage) -> Result<(Payload, String)> {
-        for envelope in &self.envelopes {
+        match self.unwrap_indexed(wire)? {
+            Some((payload, index)) => Ok((payload, self.envelopes[index].name().to_string())),
+            None => Err(Error::Envelope(format!(
+                "no configured envelope ({}) recognised the message",
+                self.envelopes.iter().map(|e| e.name()).collect::<Vec<_>>().join(", ")
+            ))),
+        }
+    }
+
+    /// Unwraps `wire` with the first matching envelope, returning the payload and the position of
+    /// the envelope that matched (`None` when no envelope recognises the message).
+    pub fn unwrap_indexed(&self, wire: &WireMessage) -> Result<Option<(Payload, usize)>> {
+        for (index, envelope) in self.envelopes.iter().enumerate() {
             if let Some(payload) = envelope.unwrap(wire)? {
-                return Ok((payload, envelope.name().to_string()));
+                return Ok(Some((payload, index)));
             }
         }
-        Err(Error::Envelope(format!(
-            "no configured envelope ({}) recognised the message",
-            self.envelopes.iter().map(|e| e.name()).collect::<Vec<_>>().join(", ")
-        )))
+        Ok(None)
+    }
+
+    /// The envelopes, in priority order.
+    pub fn envelopes(&self) -> &[Arc<dyn Envelope>] {
+        &self.envelopes
     }
 }
 
@@ -172,5 +186,16 @@ mod tests {
     fn empty_set_reports_error() {
         let set = EnvelopeSet::new(vec![]);
         assert!(set.unwrap(&WireMessage::default()).is_err());
+        let set = EnvelopeSet::new(vec![Arc::new(CloudEventsJson::default())]);
+        assert!(set.unwrap_indexed(&WireMessage::default()).unwrap().is_none());
+    }
+
+    #[test]
+    fn indexed_unwrap_reports_the_matching_position() {
+        let set = EnvelopeSet::default_set();
+        let wire =
+            RawEnvelope::default().wrap(&Payload { data: Bytes::from_static(b"x"), ..Payload::default() }).unwrap();
+        assert_eq!(set.unwrap_indexed(&wire).unwrap().unwrap().1, 2);
+        assert_eq!(set.envelopes()[2].name(), "raw");
     }
 }

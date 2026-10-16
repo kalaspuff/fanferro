@@ -6,6 +6,7 @@ use fanferro_core::backend::BackendKind;
 use fanferro_core::backend::aws::AwsConfig;
 use fanferro_core::backend::memory::MemoryBroker;
 use fanferro_core::consumer::{ConsumerConfig, ConsumerEngine};
+use fanferro_core::envelope::EnvelopeSet;
 use fanferro_core::events::{Event, EventKind, FieldValue};
 use fanferro_core::provision::{
     Drift, QueueInfo, QueueSpec, Report, SubscriptionInfo, SubscriptionSpec, TopicInfo, TopicSpec,
@@ -498,12 +499,32 @@ impl PyCoreClient {
         future_into_py(py, async move { client.backend().objects.delete_object(&bucket, &key).await })
     }
 
-    /// Creates a consumer engine for a queue (call `start()` on it).
-    fn consumer(&self, config: &Bound<'_, PyAny>) -> PyResult<PyConsumerEngine> {
+    /// Creates a consumer engine for a queue (call `start()` on it). With `envelopes` (built-in
+    /// envelopes only), the engine unwraps received messages while decoding them (see
+    /// `Delivery.parts`).
+    #[pyo3(signature = (config, envelopes=None))]
+    fn consumer(
+        &self,
+        config: &Bound<'_, PyAny>,
+        envelopes: Option<Vec<Bound<'_, PyAny>>>,
+    ) -> PyResult<PyConsumerEngine> {
         let client = self.client()?;
         let config: ConsumerConfig = depythonize(config).map_err(|err| config_error("consumer configuration", err))?;
+        let envelopes = envelopes
+            .map(|envelopes| {
+                envelopes
+                    .iter()
+                    .map(|envelope| {
+                        crate::envelopes::builtin(envelope).ok_or_else(|| {
+                            ValidationError::new_err("the engine only unwraps built-in envelopes (CloudEvents, Raw...)")
+                        })
+                    })
+                    .collect::<PyResult<Vec<_>>>()
+            })
+            .transpose()?
+            .map(EnvelopeSet::new);
         let _guard = handle().enter();
-        let engine = ConsumerEngine::new(&client, config).map_err(to_py_err)?;
+        let engine = ConsumerEngine::with_envelopes(&client, config, envelopes).map_err(to_py_err)?;
         Ok(PyConsumerEngine::new(engine, self.pid))
     }
 

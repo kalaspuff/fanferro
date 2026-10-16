@@ -217,3 +217,39 @@ async def test_attempts_beyond_limit_skip_the_handler(client_factory: ClientFact
         await consume_until(strict, lambda: strict.stats()["engine"].get("messages_dead_lettered", 0) == 1)
         dead_messages = await drain_queue(client, dlq)
     assert dead_messages[0].dead_letter_info["reason"] == "maximum attempts exceeded"  # type: ignore[index]
+
+
+class _BrokenCloudEvent:
+    """Sends a malformed CloudEvent (declared by its content type, missing required attributes)."""
+
+    name = "broken"
+
+    def wrap(self, payload: fanferro.Payload) -> fanferro.WireMessage:
+        return fanferro.WireMessage(b'{"specversion":"1.0"}', {"content-type": "application/cloudevents+json"})
+
+    def unwrap(self, wire: fanferro.WireMessage) -> fanferro.Payload | None:
+        return None
+
+
+async def test_envelope_failures_are_decode_failures(client_factory: ClientFactory, name: Any) -> None:
+    # The engine unwraps built-in envelopes; failures surface exactly as when Python unwraps them.
+    client = client_factory()
+    queue = queue_with_dlq(client, name("envelope-failures"))
+    events: list[fanferro.Event] = []
+    client.on("message.decode_failed", events.append)
+    consumer = client.consumer(queue, wait_time=1, envelopes=[fanferro.envelopes.CloudEvents()])
+
+    @consumer.default
+    async def handle(message: fanferro.Message[Any]) -> None:
+        raise AssertionError("must not be called")
+
+    async with client:
+        await queue.send(OrderCreated(order_id=1))  # raw: no configured envelope recognises it
+        await queue.send(OrderCreated(order_id=2), envelope=_BrokenCloudEvent())
+        await consume_until(consumer, lambda: len(events) == 2)
+    errors = sorted(str(event.exception) for event in events)
+    assert errors == [
+        'envelope error: CloudEvents attribute "id" is required',
+        "no configured envelope recognised the message (tried cloudevents)",
+    ]
+    assert all(isinstance(event.exception, fanferro.EnvelopeError) for event in events)

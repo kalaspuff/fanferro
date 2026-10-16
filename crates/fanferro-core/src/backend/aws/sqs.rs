@@ -54,12 +54,14 @@ fn to_sdk_attributes(attributes: &MessageAttributes) -> Result<Option<HashMap<St
     attributes.iter().map(|(name, value)| Ok((name.clone(), to_sdk_attribute(value)?))).collect::<Result<_>>().map(Some)
 }
 
-fn from_sdk_attribute(value: &MessageAttributeValue) -> Option<AttributeValue> {
-    let data = match value.string_value() {
-        Some(text) => AttributeData::Text(text.to_string()),
-        None => AttributeData::Binary(Bytes::copy_from_slice(value.binary_value()?.as_ref())),
+/// Converts a received attribute (moving its strings, without copying them).
+fn from_sdk_attribute(value: MessageAttributeValue) -> Option<AttributeValue> {
+    let data = match (value.string_value, value.binary_value) {
+        (Some(text), _) => AttributeData::Text(text),
+        (None, Some(binary)) => AttributeData::Binary(Bytes::from(binary.into_inner())),
+        (None, None) => return None,
     };
-    AttributeValue::with_type(value.data_type(), data).ok()
+    AttributeValue::with_type(value.data_type, data).ok()
 }
 
 fn trace_header_attribute(header: &str) -> Result<MessageSystemAttributeValue> {
@@ -75,36 +77,35 @@ fn millis_to_time(value: Option<&String>) -> Option<OffsetDateTime> {
     OffsetDateTime::from_unix_timestamp_nanos(millis * 1_000_000).ok()
 }
 
+/// Converts a received message, moving its strings (bodies of up to 1 MiB) instead of copying them.
 fn to_received(message: aws_sdk_sqs::types::Message) -> Option<ReceivedMessage> {
-    let system = message.attributes().cloned().unwrap_or_default();
-    let get = |name: MessageSystemAttributeName| system.get(&name).cloned();
+    let mut system = message.attributes.unwrap_or_default();
+    let mut take = |name: MessageSystemAttributeName| system.remove(&name);
     let attributes = message
-        .message_attributes()
-        .map(|attrs| {
-            attrs.iter().filter_map(|(name, value)| Some((name.clone(), from_sdk_attribute(value)?))).collect()
-        })
+        .message_attributes
+        .map(|attrs| attrs.into_iter().filter_map(|(name, value)| Some((name, from_sdk_attribute(value)?))).collect())
         .unwrap_or_default();
     Some(ReceivedMessage {
-        message_id: message.message_id()?.to_string(),
-        receipt_handle: message.receipt_handle()?.to_string(),
-        body: message.body().unwrap_or_default().to_string(),
-        md5_of_body: message.md5_of_body().map(str::to_string),
+        message_id: message.message_id?,
+        receipt_handle: message.receipt_handle?,
+        body: message.body.unwrap_or_default(),
+        md5_of_body: message.md5_of_body,
         attributes,
-        md5_of_message_attributes: message.md5_of_message_attributes().map(str::to_string),
+        md5_of_message_attributes: message.md5_of_message_attributes,
         system: SystemAttributes {
-            approximate_receive_count: get(MessageSystemAttributeName::ApproximateReceiveCount)
+            approximate_receive_count: take(MessageSystemAttributeName::ApproximateReceiveCount)
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1),
-            sent_timestamp: millis_to_time(system.get(&MessageSystemAttributeName::SentTimestamp)),
+            sent_timestamp: millis_to_time(take(MessageSystemAttributeName::SentTimestamp).as_ref()),
             approximate_first_receive_timestamp: millis_to_time(
-                system.get(&MessageSystemAttributeName::ApproximateFirstReceiveTimestamp),
+                take(MessageSystemAttributeName::ApproximateFirstReceiveTimestamp).as_ref(),
             ),
-            sender_id: get(MessageSystemAttributeName::SenderId),
-            message_group_id: get(MessageSystemAttributeName::MessageGroupId),
-            message_deduplication_id: get(MessageSystemAttributeName::MessageDeduplicationId),
-            sequence_number: get(MessageSystemAttributeName::SequenceNumber),
-            aws_trace_header: get(MessageSystemAttributeName::AwsTraceHeader),
-            dead_letter_queue_source_arn: get(MessageSystemAttributeName::DeadLetterQueueSourceArn),
+            sender_id: take(MessageSystemAttributeName::SenderId),
+            message_group_id: take(MessageSystemAttributeName::MessageGroupId),
+            message_deduplication_id: take(MessageSystemAttributeName::MessageDeduplicationId),
+            sequence_number: take(MessageSystemAttributeName::SequenceNumber),
+            aws_trace_header: take(MessageSystemAttributeName::AwsTraceHeader),
+            dead_letter_queue_source_arn: take(MessageSystemAttributeName::DeadLetterQueueSourceArn),
         },
     })
 }

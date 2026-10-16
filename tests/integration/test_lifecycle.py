@@ -510,3 +510,35 @@ async def test_consumer_state_errors(memory_client: fanferro.Client, name: Any) 
         await empty.stop()
         await empty.start()
         await empty.stop()
+
+
+async def test_tasks_cancelled_before_they_ran_are_forgotten(memory_client: fanferro.Client, name: Any) -> None:
+    # Message tasks forget themselves when they end; a task cancelled before it ever ran (prefetched
+    # messages scheduled at shutdown, or cancelled from outside) never does, so stopping and
+    # run_until_idle must forget finished tasks themselves.
+    queue = memory_client.queue(name("forget-tasks"))
+    seen: list[int] = []
+    policy = fanferro.ShutdownPolicy(drain_timeout=0.2, cancel_timeout=1)
+    consumer = memory_client.consumer(queue, wait_time=1, shutdown=policy)
+
+    @consumer.route(OrderCreated)
+    async def handle(order: OrderCreated) -> None:
+        seen.append(order.order_id)
+
+    async with memory_client:
+        await consumer.start()
+        consumer._spawn(asyncio.Event().wait())  # stands in for a task that never runs
+        began = time.monotonic()
+        await consumer.stop()
+        assert time.monotonic() - began < 2
+        assert consumer.stats()["active"] == 0
+        await queue.send(OrderCreated(order_id=1))
+        await consumer.run_until_idle(idle_for=0.2, timeout=15)
+        # Cancelled from outside before it ran: still forgotten.
+        await consumer.start()
+        consumer._spawn(asyncio.Event().wait())
+        for task in list(consumer._tasks):
+            task.cancel()
+        await queue.send(OrderCreated(order_id=2))
+        await consumer.run_until_idle(idle_for=0.2, timeout=15)
+    assert seen == [1, 2]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import json
 from typing import Any
 
 import pytest
@@ -307,3 +308,53 @@ async def test_reserved_attributes_are_rejected(client_factory: ClientFactory, n
             await queue.send({"x": 1}, attributes={"fanferro.type": "spoof"})
         with pytest.raises(fanferro.ValidationError, match="at most 10"):
             await queue.send({"x": 1}, attributes={f"a{i}": "v" for i in range(10)})
+
+
+class LegacyEnvelope:
+    """A custom (Python) envelope: consumers unwrap it in Python, built-in ones in the engine."""
+
+    name = "legacy"
+
+    def wrap(self, payload: fanferro.Payload) -> fanferro.WireMessage:
+        document = {"kind": payload.message_type, "data": payload.data.decode()}
+        return fanferro.WireMessage(json.dumps(document), {"legacy": "1"})
+
+    def unwrap(self, wire: fanferro.WireMessage) -> fanferro.Payload | None:
+        if "legacy" not in wire.attributes:
+            return None
+        document = json.loads(wire.body)
+        return fanferro.Payload(document["data"], message_type=document["kind"], content_type="application/json")
+
+
+async def test_custom_and_builtin_envelopes(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory()
+    queue = client.queue(name("envelopes"))
+    received: list[tuple[str, int, dict[str, str]]] = []
+
+    async def handle(message: fanferro.Message[OrderCreated]) -> None:
+        attributes = {key: str(value.value) for key, value in message.attributes.items()}
+        received.append((message.envelope, message.body.order_id, attributes))
+
+    custom = client.consumer(
+        queue,
+        handle,
+        wait_time=1,
+        envelopes=[LegacyEnvelope(), fanferro.envelopes.CloudEvents(), fanferro.envelopes.Raw()],
+    )
+    async with client:
+        await queue.send(OrderCreated(order_id=1), envelope=LegacyEnvelope())
+        await queue.send(OrderCreated(order_id=2), envelope=fanferro.envelopes.CloudEvents(), attributes={"a": "1"})
+        await queue.send(OrderCreated(order_id=3), attributes={"b": "2"})
+        await consume_until(custom, lambda: len(received) == 3)
+        # Built-in envelopes only: the engine unwraps the messages while decoding them.
+        builtin = client.consumer(queue, handle, wait_time=1, name="builtin")
+        await queue.send(OrderCreated(order_id=4), envelope=fanferro.envelopes.CloudEvents(), attributes={"c": "3"})
+        await queue.send(OrderCreated(order_id=5))
+        await consume_until(builtin, lambda: len(received) == 5)
+    assert sorted(received, key=lambda item: item[1]) == [
+        ("legacy", 1, {"legacy": "1"}),
+        ("cloudevents", 2, {"a": "1", "content-type": "application/cloudevents+json"}),
+        ("raw", 3, {"b": "2"}),
+        ("cloudevents", 4, {"c": "3", "content-type": "application/cloudevents+json"}),
+        ("raw", 5, {}),
+    ]
