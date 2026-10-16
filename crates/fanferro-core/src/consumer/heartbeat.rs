@@ -17,6 +17,13 @@ use crate::retry::sleep_or_cancel;
 const RETRY_SOON: Duration = Duration::from_secs(1);
 const SAFETY_MARGIN: Duration = Duration::from_secs(5);
 
+/// How long an extension call may take before its leases are retried (at the next tick): the loop
+/// waits for its calls, and the SDK has no read timeout by default, so one stuck connection would
+/// otherwise stall every lease's heartbeat until their visibility runs out.
+fn call_timeout(heartbeat_interval: Duration) -> Duration {
+    (heartbeat_interval / 2).clamp(Duration::from_millis(500), Duration::from_secs(10))
+}
+
 struct Due {
     id: u64,
     message: Arc<ReceivedMessage>,
@@ -86,7 +93,14 @@ async fn extend_chunk(inner: &Arc<EngineInner>, chunk: Vec<Due>) {
         .iter()
         .map(|due| VisibilityChange { receipt_handle: due.message.receipt_handle.clone(), timeout: due.timeout })
         .collect();
-    let result = inner.client.backend().sqs.change_visibility_batch(&inner.settings.queue_url, entries).await;
+    let limit = call_timeout(inner.settings.heartbeat_interval);
+    let call = inner.client.backend().sqs.change_visibility_batch(&inner.settings.queue_url, entries);
+    let result = tokio::time::timeout(limit, call).await.unwrap_or_else(|_| {
+        Err(crate::error::Error::Timeout(format!(
+            "ChangeMessageVisibilityBatch did not complete within {:.1} s",
+            limit.as_secs_f64()
+        )))
+    });
     let mut leases = inner.leases.lock();
     match result {
         Ok(results) => {
@@ -142,10 +156,12 @@ async fn extend_chunk(inner: &Arc<EngineInner>, chunk: Vec<Due>) {
             }
         }
         Err(error) => {
+            // A call that timed out got no answer at all: try again at the next tick.
+            let retry_in = if matches!(error, crate::error::Error::Timeout(_)) { Duration::ZERO } else { RETRY_SOON };
             for due in chunk {
                 if let Some(lease) = leases.get_mut(&due.id) {
                     lease.extending = false;
-                    lease.next_heartbeat = Instant::now() + RETRY_SOON;
+                    lease.next_heartbeat = Instant::now() + retry_in;
                 }
                 inner.metrics.lease_extension_failures.inc();
             }

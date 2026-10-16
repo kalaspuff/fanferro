@@ -5,7 +5,7 @@ use bytes::Bytes;
 
 use super::*;
 use crate::backend::memory::MemoryBroker;
-use crate::backend::testing::SlowBatches;
+use crate::backend::testing::{SlowBatches, StuckVisibility};
 use crate::backend::{SendRequest, StringMap};
 use crate::client::ClientConfig;
 use crate::events::EventKind;
@@ -515,6 +515,33 @@ async fn heartbeats_keep_messages_invisible() {
     assert_eq!(stored[0].receive_count, 1);
     assert!(engine.stats().metrics["lease_extensions"] >= 10);
     assert!(delivery.lease.remaining_visibility() > Duration::ZERO);
+    delivery.lease.ack().await.unwrap();
+    engine.close(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stuck_extension_call_does_not_stall_heartbeats() {
+    // The first ChangeMessageVisibilityBatch never answers (the SDK has no read timeout by default):
+    // the heartbeat gives up on it and extends the lease again instead of waiting forever.
+    let broker = MemoryBroker::new("us-east-1", "000000000000");
+    let mut backend = broker.backend();
+    backend.sqs = std::sync::Arc::new(StuckVisibility::new(backend.sqs.clone(), 1));
+    let client = Client::with_backend(backend, ClientConfig::default()).unwrap();
+    let url = client.backend().sqs.create_queue("work", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let fx = Fixture { broker, client, url };
+    fx.send("slow").await;
+    let engine = fx.engine(|c| {
+        c.visibility_timeout = 3.0;
+        c.heartbeat.interval = Some(1.0);
+    });
+    let delivery = collect(&engine, 1).await.remove(0);
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    let stored = fx.stored();
+    assert!(stored[0].in_flight);
+    assert_eq!(stored[0].receive_count, 1, "the message became visible while its lease was held");
+    let metrics = engine.stats().metrics;
+    assert!(metrics["lease_extension_failures"] >= 1);
+    assert!(metrics["lease_extensions"] >= 10);
     delivery.lease.ack().await.unwrap();
     engine.close(true).await;
 }
