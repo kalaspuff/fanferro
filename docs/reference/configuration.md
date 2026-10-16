@@ -120,7 +120,7 @@ constructors `exponential()`, `constant()`, `immediate()`.
 
 `DeadLetterQueue`: `name` (without the prefix), `max_receive_count` (5), `attributes` (14 days of
 retention), `tags` (`{}`), `provisioning` (the queue's), `prefixed` (`True`: the client's
-`queue_prefix` applies).
+`queue_prefix` applies). Queues may share one; its first declaration sets its attributes.
 
 `ShutdownPolicy`: `drain_timeout` (30.0; `None` = wait forever), `cancel_timeout` (10.0),
 `progress_interval` (5.0), `release_unfinished` (`True`), `release_prefetched` (`True`),

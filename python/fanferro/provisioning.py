@@ -416,6 +416,10 @@ class TopicAttributes:
         return out
 
 
+DEFAULT_DEAD_LETTER_ATTRIBUTES = QueueAttributes(message_retention=timedelta(days=14))
+"""The attributes of a :class:`DeadLetterQueue` that sets none: messages are kept for 14 days."""
+
+
 @dataclass(frozen=True, slots=True)
 class DeadLetterQueue:
     """The dead-letter queue of a queue (provisioned first and wired up with a ``RedrivePolicy``).
@@ -424,18 +428,19 @@ class DeadLetterQueue:
         name: Dead-letter queue name without the client's ``queue_prefix`` (FIFO queues need a
             FIFO dead-letter queue).
         max_receive_count: Receives after which SQS moves a message to the dead-letter queue.
-        attributes: Attributes of the dead-letter queue (e.g. a long ``message_retention``).
+        attributes: Attributes of the dead-letter queue (default: a 14-day ``message_retention``).
         tags: Tags of the dead-letter queue.
         provisioning: Policy for the dead-letter queue (defaults to the queue's policy).
         prefixed: Prepend the client's ``queue_prefix`` to ``name`` (``False`` for a dead-letter
             queue shared by several environments).
+
+    Several queues can share a dead-letter queue: the first declaration of it (as a dead-letter
+    queue, or with ``client.queue(...)``) sets its attributes; later ones may only repeat them.
     """
 
     name: str
     max_receive_count: int = 5
-    attributes: QueueAttributes | Mapping[str, str] | None = field(
-        default_factory=lambda: QueueAttributes(message_retention=timedelta(days=14))
-    )
+    attributes: QueueAttributes | Mapping[str, str] | None = DEFAULT_DEAD_LETTER_ATTRIBUTES
     tags: Mapping[str, str] = field(default_factory=dict)
     provisioning: Provisioning | None = None
     prefixed: bool = True

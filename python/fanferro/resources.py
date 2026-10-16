@@ -26,6 +26,7 @@ from fanferro.messages import (
 )
 from fanferro.middleware import PublishContext, chain_publish
 from fanferro.provisioning import (
+    DEFAULT_DEAD_LETTER_ATTRIBUTES,
     DeadLetterQueue,
     Provisioning,
     ProvisioningReport,
@@ -474,6 +475,19 @@ class Topic(_Destination):
             "policy": self.provisioning.to_core(),
         }
 
+    def _settings(self) -> dict[str, Any]:
+        """What the declaration set (compared when the topic is declared again)."""
+        return {
+            "arn": self._arn,
+            "attributes": self.attributes,
+            "tags": self.tags,
+            "provisioning": self._provisioning,
+            "envelope": self._envelope,
+            "group_id": self._group_id,
+            "codec": self._codec,
+            "large_payloads": self._large_payloads,
+        }
+
     async def _provision(self) -> TopicInfo | None:
         report = await self._client._ensure("topic", self._spec())
         self.last_report = report
@@ -567,18 +581,46 @@ class Queue(_Destination):
                 raise ConfigurationError(
                     f"the dead-letter queue of {name!r} must be {'FIFO' if self.fifo else 'standard'}"
                 )
-            self._dead_letter_queue = client.queue(
-                dead_letter.name,
-                prefixed=dead_letter.prefixed,
-                attributes=dead_letter.attributes,
-                tags=dead_letter.tags,
-                provisioning=dead_letter.provisioning or provisioning,
-            )
+            if client._declared_queue(dead_letter.name, prefixed=dead_letter.prefixed) is not None:
+                # Shared with another queue, or declared on its own: that declaration stands, and only
+                # what this one sets explicitly has to agree with it.
+                self._dead_letter_queue = client.queue(
+                    dead_letter.name,
+                    prefixed=dead_letter.prefixed,
+                    attributes=None
+                    if dead_letter.attributes is DEFAULT_DEAD_LETTER_ATTRIBUTES
+                    else dead_letter.attributes,
+                    tags=dead_letter.tags or None,
+                    provisioning=dead_letter.provisioning,
+                )
+            else:
+                self._dead_letter_queue = client.queue(
+                    dead_letter.name,
+                    prefixed=dead_letter.prefixed,
+                    attributes=dead_letter.attributes,
+                    tags=dead_letter.tags,
+                    provisioning=dead_letter.provisioning or provisioning,
+                )
 
     @property
     def dead_letter_queue(self) -> Queue | None:
         """The declared dead-letter queue (consume it to inspect or redrive failed messages)."""
         return self._dead_letter_queue
+
+    def _settings(self) -> dict[str, Any]:
+        """What the declaration set (compared when the queue is declared again)."""
+        return {
+            "url": self._url,
+            "owner_account_id": self.owner_account_id,
+            "attributes": self.attributes,
+            "tags": self.tags,
+            "dead_letter": self.dead_letter,
+            "provisioning": self._provisioning,
+            "envelope": self._envelope,
+            "group_id": self._group_id,
+            "codec": self._codec,
+            "large_payloads": self._large_payloads,
+        }
 
     def _spec(self) -> dict[str, Any]:
         spec: dict[str, Any] = {
@@ -725,6 +767,17 @@ class Subscription(_Resource):
         self.filter_policy_scope = filter_policy_scope
         self.dead_letter_queue = dead_letter_queue
         self.manage_queue_policy = manage_queue_policy
+
+    def _settings(self) -> dict[str, Any]:
+        """What the declaration set (compared when the subscription is declared again)."""
+        return {
+            "raw_message_delivery": self.raw_message_delivery,
+            "filter_policy": self.filter_policy,
+            "filter_policy_scope": self.filter_policy_scope,
+            "dead_letter_queue": self.dead_letter_queue,
+            "manage_queue_policy": self.manage_queue_policy,
+            "provisioning": self._provisioning,
+        }
 
     def _attributes(self, dead_letter_arn: str | None) -> dict[str, str]:
         import json
