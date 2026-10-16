@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
+
 import fanferro
 from fanferro.idempotency import idempotent
 from tests.conftest import ClientFactory
@@ -267,6 +269,62 @@ async def test_an_immediate_fifo_retry_hands_the_group_back_once(client_factory:
         await consume_until(consumer, lambda: len(seen) == 4)
     assert seen == [(0, 1), (0, 2), (1, 2), (2, 2)]
     assert consumer.stats()["engine"]["messages_released"] == 2
+
+
+class _RejectedDelete:
+    """A delivery whose delete SQS rejects: the message comes back (at once here, instead of after
+    its visibility timeout), and an awaited ack raises."""
+
+    def __init__(self, delivery: Any) -> None:
+        self._delivery = delivery
+        self._released: Any = None
+
+    def __getattr__(self, attribute: str) -> Any:
+        return getattr(self._delivery, attribute)
+
+    def ack_in_background(self) -> None:
+        self._released = asyncio.ensure_future(self._delivery.release())
+
+    async def ack(self) -> None:
+        await self._delivery.release()
+        raise fanferro.FanferroError("DeleteMessageBatch failed")
+
+
+@pytest.mark.parametrize(("strict", "order"), [(True, [0, 0, 1, 2]), (False, [0, 1, 2, 0])])
+async def test_a_failed_delete_keeps_the_fifo_group_in_order(
+    client_factory: ClientFactory, name: Any, monkeypatch: pytest.MonkeyPatch, strict: bool, order: list[int]
+) -> None:
+    """With strict_ordering, a message whose delete failed comes back before the rest of its group."""
+    client = client_factory()
+    queue = client.queue(f"{name('rejected')}.fifo")
+    seen: list[int] = []
+    failures: list[fanferro.Event] = []
+    client.on("message.ack_failed", failures.append)
+    consumer = client.consumer(queue, wait_time=1, strict_ordering=strict)
+
+    @consumer.route(OrderCreated)
+    async def handle(order_created: OrderCreated) -> None:
+        seen.append(order_created.order_id)
+
+    build = consumer._build_message
+    rejected: list[str] = []
+
+    def build_message(delivery: Any) -> fanferro.Message[Any]:
+        message = build(delivery)
+        if not rejected:  # the first message's delete fails
+            rejected.append(delivery.sqs_message_id)
+            message.delivery = _RejectedDelete(delivery)  # type: ignore[assignment]
+        return message
+
+    monkeypatch.setattr(consumer, "_build_message", build_message)
+    async with client:
+        await queue.send_batch(
+            [fanferro.OutgoingMessage(body=OrderCreated(order_id=i), group_id="g") for i in range(3)]
+        )
+        await consume_until(consumer, lambda: len(seen) == 4)
+    assert seen == order
+    if strict:
+        assert [event.message for event in failures] == ["failed to ack message"]
 
 
 async def test_attempts_beyond_limit_skip_the_handler(client_factory: ClientFactory, name: Any) -> None:

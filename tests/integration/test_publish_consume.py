@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import json
+import time
 from typing import Any
 
 import pytest
@@ -183,6 +184,31 @@ async def test_fifo_order_and_deduplication(client_factory: ClientFactory, name:
         ids = [order for g, order in seen if g == group]
         assert ids == sorted(ids), f"group {group} out of order: {ids}"
     assert len(seen) == 12, "the duplicate send was deduplicated"
+
+
+@pytest.mark.parametrize(("strict", "acked_before"), [(True, [0, 1, 2]), (False, [0, 0, 0])])
+async def test_fifo_groups_wait_for_each_ack(
+    client_factory: ClientFactory, name: Any, strict: bool, acked_before: list[int]
+) -> None:
+    """A group's next message starts once the previous delete is confirmed (strict_ordering)."""
+    client = client_factory()
+    queue = client.queue(f"{name('strict')}.fifo")
+    # Background acks wait for this long linger; an awaited delete goes out at once when nothing
+    # else could join its batch.
+    consumer = client.consumer(queue, wait_time=1, settle_linger=0.5, strict_ordering=strict)
+    started: list[tuple[float, int]] = []
+
+    @consumer.route(OrderCreated)
+    async def handle(order: OrderCreated) -> None:
+        started.append((time.monotonic(), consumer.stats()["engine"]["messages_acked"]))
+
+    async with client:
+        await queue.send_batch(
+            [fanferro.OutgoingMessage(body=OrderCreated(order_id=i), group_id="g") for i in range(3)]
+        )
+        await consume_until(consumer, lambda: len(started) == 3)
+    assert [acked for _, acked in started] == acked_before
+    assert started[-1][0] - started[0][0] < 0.5, "the confirmed deletes waited for settle_linger"
 
 
 async def test_protobuf_envelope_and_codec(client_factory: ClientFactory, name: Any) -> None:
