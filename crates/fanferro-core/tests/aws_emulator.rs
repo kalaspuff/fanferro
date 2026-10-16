@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use bytes::Bytes;
-use fanferro_core::backend::aws::{AwsConfig, StaticCredentials};
+use fanferro_core::backend::aws::{AwsConfig, StaticCredentials, TimeoutSettings};
 use fanferro_core::backend::{ReceiveRequest, SendRequest, StringMap};
 use fanferro_core::consumer::{ConsumerConfig, ConsumerEngine, Delivery};
 use fanferro_core::provision::{
@@ -27,8 +27,8 @@ fn unique(prefix: &str) -> String {
     format!("{prefix}-{}", &uuid::Uuid::new_v4().simple().to_string()[..12])
 }
 
-async fn client(config: ClientConfig) -> Client {
-    let aws = AwsConfig {
+fn aws_config() -> AwsConfig {
+    AwsConfig {
         region: Some("us-east-1".into()),
         endpoint_url: endpoint(),
         credentials: Some(StaticCredentials {
@@ -37,8 +37,11 @@ async fn client(config: ClientConfig) -> Client {
             session_token: None,
         }),
         ..AwsConfig::default()
-    };
-    Client::connect(&aws, config).await.expect("connect")
+    }
+}
+
+async fn client(config: ClientConfig) -> Client {
+    Client::connect(&aws_config(), config).await.expect("connect")
 }
 
 fn create() -> ProvisionPolicy {
@@ -383,4 +386,42 @@ async fn errors_are_classified() {
         .await
         .unwrap_err();
     assert!(err.is_retryable() || err.aws().is_some(), "{err:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn long_polls_outlast_a_configured_operation_timeout() {
+    if endpoint().is_none() {
+        eprintln!("skipping: FANFERRO_TEST_ENDPOINT_URL is not set");
+        return;
+    }
+    let aws =
+        AwsConfig { timeouts: TimeoutSettings { operation: Some(1.0), ..TimeoutSettings::default() }, ..aws_config() };
+    let client = Client::connect(&aws, ClientConfig::default()).await.expect("connect");
+    let queue = client
+        .ensure_queue(&QueueSpec { name: Some(unique("e2e-timeout")), policy: create(), ..QueueSpec::default() })
+        .await
+        .unwrap()
+        .resource
+        .unwrap();
+    let sender = client.clone();
+    let url = queue.url.clone();
+    let send = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        sender.backend().sqs.send_message(&url, SendRequest { body: "late".into(), ..SendRequest::default() }).await
+    });
+    let received = client
+        .backend()
+        .sqs
+        .receive_messages(ReceiveRequest {
+            queue_url: queue.url.clone(),
+            max_messages: 1,
+            wait_time: Duration::from_secs(4),
+            visibility_timeout: None,
+            attempt_id: None,
+        })
+        .await
+        .expect("the long poll outlasts the 1 s operation timeout");
+    send.await.unwrap().unwrap();
+    assert_eq!(received.iter().map(|m| m.body.as_str()).collect::<Vec<_>>(), ["late"]);
+    client.delete_queue(&queue.url).await.unwrap();
 }

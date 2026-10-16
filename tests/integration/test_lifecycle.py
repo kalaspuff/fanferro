@@ -119,6 +119,27 @@ async def test_stop_returns_immediately_when_idle(client_factory: ClientFactory,
     assert elapsed < 0.25, f"stop() took {elapsed:.3f} s"
 
 
+async def test_long_polls_outlast_a_configured_operation_timeout(client_factory: ClientFactory, name: Any) -> None:
+    # An operation timeout meant for publishing must not cut long polls short.
+    client = client_factory(timeouts=fanferro.Timeouts(operation=1.0))
+    queue = client.queue(name("operation-timeout"))
+    failures: list[fanferro.Event] = []
+    client.on("receive.failed", failures.append)
+    received: list[int] = []
+    consumer = client.consumer(queue, wait_time=3)
+
+    @consumer.route(OrderCreated)
+    async def handle(order: OrderCreated) -> None:
+        received.append(order.order_id)
+
+    async with client:
+        await consumer.start()
+        await asyncio.sleep(1.5)
+        await queue.send(OrderCreated(order_id=1))
+        await consume_until(consumer, lambda: received == [1])
+    assert not failures, failures[0].message
+
+
 async def test_stop_waits_for_running_handlers(client_factory: ClientFactory, name: Any) -> None:
     client = client_factory()
     queue = client.queue(name("busy-stop"))

@@ -10,6 +10,7 @@ use aws_sdk_sqs::types::{
     SendMessageBatchRequestEntry,
 };
 use aws_smithy_types::Blob;
+use aws_smithy_types::timeout::TimeoutConfig;
 use bytes::Bytes;
 use time::OffsetDateTime;
 
@@ -235,14 +236,15 @@ impl SqsApi for AwsSqs {
 
     async fn receive_messages(&self, request: ReceiveRequest) -> Result<Vec<ReceivedMessage>> {
         let wait = request.wait_time.min(Duration::from_secs(20));
-        // Long polls must not be cut short by user-configured read/attempt timeouts.
+        // Long polls must not be cut short by user-configured read, attempt or operation timeouts
+        // (unset fields of an override inherit the client's): a poll cut short stays open on the
+        // server, where it may still take messages that then stay invisible.
         let budget = wait + Duration::from_secs(15);
-        let override_config = aws_sdk_sqs::config::Builder::default().timeout_config(
-            aws_config::timeout::TimeoutConfig::builder()
-                .read_timeout(budget)
-                .operation_attempt_timeout(budget)
-                .build(),
-        );
+        let mut timeouts = TimeoutConfig::builder().read_timeout(budget).operation_attempt_timeout(budget);
+        if let Some(configured) = self.client.config().timeout_config().and_then(TimeoutConfig::operation_timeout) {
+            timeouts = timeouts.operation_timeout(configured.max(budget));
+        }
+        let override_config = aws_sdk_sqs::config::Builder::default().timeout_config(timeouts.build());
         let output = self
             .client
             .receive_message()
