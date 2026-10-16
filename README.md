@@ -1,4 +1,9 @@
-# fanferro
+<h1>
+  <picture>
+    <img src="https://raw.githubusercontent.com/kalaspuff/fanferro/main/docs/assets/logo/fanferro.svg" alt="" width="44" height="44" align="absmiddle">
+  </picture>
+  fanferro
+</h1>
 
 **Fast, robust SNS + SQS messaging for Python, powered by a Rust core.**
 
