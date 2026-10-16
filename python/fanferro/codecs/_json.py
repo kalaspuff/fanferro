@@ -8,7 +8,14 @@ import typing
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from fanferro.codecs._base import JSON_CONTENT_TYPE, EncodedBody, is_json_content_type, media_type, to_jsonable
+from fanferro.codecs._base import (
+    JSON_CONTENT_TYPE,
+    EncodedBody,
+    is_json_content_type,
+    loads_json,
+    media_type,
+    to_jsonable,
+)
 from fanferro.errors import DecodeError, EncodeError
 
 __all__ = ["JsonCodec"]
@@ -16,8 +23,12 @@ __all__ = ["JsonCodec"]
 _PLAIN_TARGETS: tuple[Any, ...] = (Any, object, dict, list, str, int, float, bool, type(None), None)
 
 
+_ENCODER = json.JSONEncoder(separators=(",", ":"), ensure_ascii=False, default=to_jsonable)
+
+
 def _default_dumps(value: Any) -> bytes:
-    return json.dumps(value, separators=(",", ":"), ensure_ascii=False, default=to_jsonable).encode()
+    # One encoder for every call: json.dumps would create one per call for these options.
+    return _ENCODER.encode(value).encode()
 
 
 class JsonCodec:
@@ -39,7 +50,7 @@ class JsonCodec:
         content_type: str = JSON_CONTENT_TYPE,
     ) -> None:
         self._dumps = dumps or _default_dumps
-        self._loads = loads or json.loads
+        self._loads = loads or loads_json
         self.content_type = content_type
 
     def can_encode(self, value: object) -> bool:
