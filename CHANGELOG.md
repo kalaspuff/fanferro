@@ -8,6 +8,8 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-16
+
 ### Faster publishing and consuming
 
 Awaitables, publishing and consuming cost much less per message (`scripts/benchmark.py` measures
@@ -18,6 +20,21 @@ it). Behaviour is unchanged, except:
 - A panic in the Rust core raises `FanferroError` instead of `pyo3_async_runtimes.RustPanic`.
 - `publish_batch()` and `send_batch()` send up to eight batch calls at once to standard queues and
   topics; FIFO destinations still get one call after another.
+
+### Performance
+
+- **consumer:** Pipelined settlement batches and fewer wake-ups (#15) (#15)
+- **memory:** Indexed queues in the memory broker (#16) (#16)
+- A leaner bridge between the Rust runtime and asyncio (#17) (#17)
+- **codecs:** Faster JSON and dataclass codecs (#18) (#18)
+- **consumer:** Less work per message on the event loop (#19) (#19)
+- **publish:** A lighter publish path and concurrent batch calls (#20) (#20)
+- **telemetry:** No span work without an OpenTelemetry SDK (#21) (#21)
+- Build the HTTP client for presigned URLs on first use (#22) (#22)
+
+### Tests
+
+- A benchmark of publishing and consuming throughput (#14) (#14)
 
 ## [0.3.0] - 2026-10-15
 
