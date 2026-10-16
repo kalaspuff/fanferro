@@ -328,6 +328,19 @@ async def test_publish_options_are_not_mutated(client_factory: ClientFactory, na
     assert (message.attributes, message.headers) == ({}, {})
 
 
+async def test_out_of_range_options_are_validation_errors(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory()
+    queue = client.queue(name("invalid-options"))
+    topic = client.topic(name("invalid-options"))
+    async with client:
+        with pytest.raises(fanferro.ValidationError, match="out of range"):
+            await queue.send({"n": 1}, delay=1e30)
+        for destination in (queue, topic):
+            with pytest.raises(fanferro.ValidationError, match="trace_header"):
+                await destination.publish({"n": 1}, trace_header="Root=1-5759e988-bd862e3fe1be46a994272793\nX=1")
+        assert (await queue.approximate_count())["visible"] == 0
+
+
 async def test_reserved_attributes_are_rejected(client_factory: ClientFactory, name: Any) -> None:
     client = client_factory()
     queue = client.queue(name("reserved"))

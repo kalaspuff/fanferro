@@ -190,6 +190,11 @@ def test_policies() -> None:
     assert all(2 <= jittered.delay(1) <= 4 for _ in range(50))
     assert fanferro.Backoff.constant(3).delay(9) == 3
     assert fanferro.Backoff.immediate().delay(3) == 0
+    # Retrying forever (max_attempts=None) reaches attempt numbers whose power overflows a float.
+    assert backoff.delay(5000) == 10
+    assert fanferro.Backoff(initial=0, maximum=10, jitter=False).delay(5000) == 0
+    assert 150 <= fanferro.Backoff().delay(10**6) <= 300
+    assert fanferro.Backoff(initial=1.5, maximum=10, multiplier=2, jitter=False).delay(10**9) == 10
     with pytest.raises(ValueError, match="multiplier"):
         fanferro.Backoff(multiplier=0.5)
 
