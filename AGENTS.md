@@ -25,7 +25,7 @@ docs/                          Guides, reference (events/attributes generated), 
 skills/fanferro/SKILL.md       Skill for agents of applications using fanferro (copy into a project)
 .claude/skills/                Skills for agents developing fanferro (this repository)
 scripts/                       check_consistency.py, generate_reference.py, release.py, release_notes.py,
-                               smoke_test.py (run against every built wheel)
+                               smoke_test.py (run against every built wheel), benchmark.py
 .github/workflows/             ci.yml, prepare-release.yml, tag-release.yml, release.yml, pr-title.yml
 ```
 
@@ -48,6 +48,7 @@ Requirements: Rust (stable, see `rust-toolchain.toml`), [uv](https://docs.astral
 | Regenerate event/attribute reference | `uv run python scripts/generate_reference.py` |
 | Release wheels for all Linux targets | `make wheels` (maturin + zig, `--profile dist`, like release.yml; `make wheels-fast` uses `build-wheels`) |
 | Smoke-test an installed wheel | `python -I scripts/smoke_test.py` |
+| Throughput per message (wall and CPU time) | `uv run python scripts/benchmark.py` (`--endpoint` for MiniStack) |
 | Lint GitHub workflows | `uvx --from actionlint-py actionlint` (part of `make lint`) |
 | Run MiniStack manually | `uv run ministack` (port 4566) |
 

@@ -1,8 +1,9 @@
-"""The repository scripts (consistency checks, release helper, wheel smoke test) keep working."""
+"""The repository scripts (consistency checks, release helper, wheel smoke test, benchmark) keep working."""
 
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 import tomllib
@@ -19,6 +20,7 @@ def load(name: str) -> ModuleType:
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module  # dataclasses look up their module there (Python 3.12)
     spec.loader.exec_module(module)
     return module
 
@@ -46,6 +48,20 @@ def test_release_version_bumps(current: str, requested: str, expected: str) -> N
 def test_release_rejects_invalid_versions() -> None:
     with pytest.raises(SystemExit, match="invalid version"):
         load("release").next_version("0.1.0", "v0.2")
+
+
+def test_benchmark_runs() -> None:
+    result = subprocess.run(
+        [sys.executable, "-I", str(SCRIPTS / "benchmark.py"), "-n", "30", "--json"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    rows = [json.loads(line) for line in result.stdout.splitlines()]
+    assert [row["scenario"] for row in rows] == list(load("benchmark").SCENARIOS)
+    assert all(row["messages"] == 30 and row["wall_us_per_message"] > 0 for row in rows)
 
 
 def test_wheel_smoke_test_passes() -> None:
