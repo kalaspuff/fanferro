@@ -87,13 +87,18 @@ impl Default for RetrySettings {
     }
 }
 
-/// Timeouts for AWS API calls (seconds). `None` keeps the SDK default.
+/// Timeouts for AWS API calls (seconds). `None` keeps the SDK default (no timeout, except for
+/// connecting).
+///
+/// Long polls get at least their wait time plus 15 seconds for `read`, `attempt` and `operation`,
+/// and requests that upload a large body (payload objects, big messages) one more second per
+/// 64 KiB. Transfers that stall are cut off by the SDK's stalled-stream protection.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TimeoutSettings {
     /// TCP/TLS connect timeout.
     pub connect: Option<f64>,
-    /// Time to wait for response data.
+    /// Time until the response starts to arrive, counted from when the request is sent.
     pub read: Option<f64>,
     /// Total time for a call including retries.
     pub operation: Option<f64>,
@@ -103,8 +108,32 @@ pub struct TimeoutSettings {
 
 impl Default for TimeoutSettings {
     fn default() -> Self {
-        Self { connect: Some(3.1), read: None, operation: None, attempt: None }
+        Self { connect: Some(3.1), read: Some(10.0), operation: None, attempt: None }
     }
+}
+
+/// Upload rate the timeouts of a request with a large body allow for: one more second per this
+/// many bytes, so that a slow but working upload is not cut short.
+const UPLOAD_BYTES_PER_SECOND: usize = 64 * 1024;
+
+/// The configured read, attempt and operation timeouts, extended for a request that uploads
+/// `bytes`. `None` when the request is small or has no such timeouts.
+pub(crate) fn upload_timeouts(configured: Option<&TimeoutConfig>, bytes: usize) -> Option<TimeoutConfig> {
+    let extra = Duration::from_secs(u64::try_from(bytes / UPLOAD_BYTES_PER_SECOND).unwrap_or(u64::MAX));
+    let configured = configured.filter(|_| !extra.is_zero())?;
+    // Only what is configured: unset fields of an override inherit the client's.
+    let mut builder = TimeoutConfig::builder();
+    if let Some(timeout) = configured.read_timeout() {
+        builder = builder.read_timeout(timeout.saturating_add(extra));
+    }
+    if let Some(timeout) = configured.operation_attempt_timeout() {
+        builder = builder.operation_attempt_timeout(timeout.saturating_add(extra));
+    }
+    if let Some(timeout) = configured.operation_timeout() {
+        builder = builder.operation_timeout(timeout.saturating_add(extra));
+    }
+    let timeouts = builder.build();
+    timeouts.has_timeouts().then_some(timeouts)
 }
 
 /// How to connect to AWS (or an AWS-compatible emulator).
@@ -335,6 +364,71 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
+    use crate::error::AwsErrorKind;
+
+    #[test]
+    fn calls_have_a_read_timeout_by_default() {
+        let timeouts = timeout_config(&TimeoutSettings::default()).unwrap();
+        assert_eq!(timeouts.read_timeout(), Some(Duration::from_secs(10)));
+        assert_eq!(timeouts.connect_timeout(), Some(Duration::from_millis(3100)));
+        let off = timeout_config(&TimeoutSettings { read: None, ..TimeoutSettings::default() }).unwrap();
+        assert_eq!(off.read_timeout(), None);
+    }
+
+    #[test]
+    fn large_uploads_get_more_time() {
+        let seconds = Duration::from_secs;
+        let configured = TimeoutConfig::builder().read_timeout(seconds(10)).build();
+        assert!(upload_timeouts(Some(&configured), 64 * 1024 - 1).is_none(), "small requests keep the timeouts");
+        let extended = upload_timeouts(Some(&configured), 1024 * 1024).unwrap();
+        assert_eq!(extended.read_timeout(), Some(seconds(26)), "one more second per 64 KiB");
+        assert_eq!(extended.operation_attempt_timeout(), None, "unset timeouts are left to the client's");
+        let all = TimeoutConfig::builder()
+            .read_timeout(seconds(10))
+            .operation_attempt_timeout(seconds(30))
+            .operation_timeout(seconds(60))
+            .build();
+        let extended = upload_timeouts(Some(&all), 640 * 1024).unwrap();
+        assert_eq!(extended.operation_attempt_timeout(), Some(seconds(40)));
+        assert_eq!(extended.operation_timeout(), Some(seconds(70)));
+        assert!(upload_timeouts(Some(&TimeoutConfig::builder().build()), 1024 * 1024).is_none());
+        assert!(upload_timeouts(None, 1024 * 1024).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_call_without_a_response_times_out() {
+        // The server takes requests and never answers: without a read timeout, the call would wait
+        // for as long as the connection stays open.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut connections = Vec::new();
+            while let Ok((connection, _)) = listener.accept().await {
+                connections.push(connection);
+            }
+        });
+        let config = AwsConfig {
+            region: Some("us-east-1".into()),
+            endpoint_url: Some(format!("http://{address}")),
+            credentials: Some(StaticCredentials {
+                access_key_id: "test".into(),
+                secret_access_key: "test".into(),
+                session_token: None,
+            }),
+            retry: RetrySettings { max_attempts: 1, ..RetrySettings::default() },
+            timeouts: TimeoutSettings { read: Some(0.5), ..TimeoutSettings::default() },
+            ..AwsConfig::default()
+        };
+        let backend = connect(&config).await.unwrap();
+        let queue_url = format!("http://{address}/000000000000/q");
+        let delete = backend.sqs.delete_message_batch(&queue_url, vec!["h".into()]);
+        let error = tokio::time::timeout(Duration::from_secs(10), delete)
+            .await
+            .expect("the call times out instead of waiting for a response")
+            .unwrap_err();
+        assert_eq!(error.aws().map(|aws| aws.kind), Some(AwsErrorKind::Timeout), "{error:?}");
+        server.abort();
+    }
 
     #[test]
     fn expired_presigned_urls_say_when_they_expired() {

@@ -74,7 +74,10 @@ to the originals plus the metadata attribute.
 ## Robustness built in
 
 * Every AWS call is retried by the AWS SDK (standard mode, jittered exponential backoff;
-  `AwsRetry`), with per-call timeouts (`Timeouts`).
+  `AwsRetry`) and has timeouts (`Timeouts`): a call whose response does not start within 10 s
+  (a dead connection) fails and is retried, instead of waiting for as long as the connection
+  stays open. Long polls get at least their wait time plus 15 s, large uploads more time per
+  64 KiB.
 * Failed batch entries are retried individually; MD5 digests of sent and received messages are
   verified (standard queues).
 * The receive loop backs off on errors (1 s → 30 s) and recovers by itself (`receive.failed`).

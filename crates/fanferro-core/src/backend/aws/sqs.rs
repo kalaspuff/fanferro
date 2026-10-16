@@ -15,11 +15,13 @@ use bytes::Bytes;
 use time::OffsetDateTime;
 
 use super::errors::map_sdk_error;
+use super::upload_timeouts;
 use crate::backend::{
     BatchEntryError, BatchResult, ReceiveRequest, ReceivedMessage, SendOutput, SendRequest, SqsApi, StringMap,
     SystemAttributes, VisibilityChange,
 };
 use crate::error::{Error, Result};
+use crate::types::attributes::attributes_encoded_len;
 use crate::types::{AttributeData, AttributeValue, MessageAttributes};
 use crate::util::whole_seconds;
 
@@ -172,6 +174,7 @@ fn to_queue_attributes(attributes: &StringMap) -> Option<HashMap<QueueAttributeN
 #[async_trait]
 impl SqsApi for AwsSqs {
     async fn send_message(&self, queue_url: &str, request: SendRequest) -> Result<SendOutput> {
+        let size = request.body.len() + attributes_encoded_len(&request.attributes);
         let mut call = self
             .client
             .send_message()
@@ -187,7 +190,14 @@ impl SqsApi for AwsSqs {
                 trace_header_attribute(header)?,
             );
         }
-        let output = call.send().await.map_err(|err| map_sdk_error("sqs", "SendMessage", err))?;
+        let output = match upload_timeouts(self.client.config().timeout_config(), size) {
+            Some(timeouts) => {
+                let timeouts = aws_sdk_sqs::config::Builder::default().timeout_config(timeouts);
+                call.customize().config_override(timeouts).send().await
+            }
+            None => call.send().await,
+        }
+        .map_err(|err| map_sdk_error("sqs", "SendMessage", err))?;
         Ok(SendOutput {
             message_id: output.message_id().unwrap_or_default().to_string(),
             sequence_number: output.sequence_number().map(str::to_string),
@@ -198,6 +208,7 @@ impl SqsApi for AwsSqs {
 
     async fn send_message_batch(&self, queue_url: &str, entries: Vec<SendRequest>) -> Result<BatchResult<SendOutput>> {
         let count = entries.len();
+        let size = entries.iter().map(|entry| entry.body.len() + attributes_encoded_len(&entry.attributes)).sum();
         let mut sdk_entries = Vec::with_capacity(count);
         for (index, entry) in entries.into_iter().enumerate() {
             let mut builder = SendMessageBatchRequestEntry::builder()
@@ -215,14 +226,15 @@ impl SqsApi for AwsSqs {
             }
             sdk_entries.push(builder.build().map_err(|err| Error::validation(format!("invalid batch entry: {err}")))?);
         }
-        let output = self
-            .client
-            .send_message_batch()
-            .queue_url(queue_url)
-            .set_entries(Some(sdk_entries))
-            .send()
-            .await
-            .map_err(|err| map_sdk_error("sqs", "SendMessageBatch", err))?;
+        let call = self.client.send_message_batch().queue_url(queue_url).set_entries(Some(sdk_entries));
+        let output = match upload_timeouts(self.client.config().timeout_config(), size) {
+            Some(timeouts) => {
+                let timeouts = aws_sdk_sqs::config::Builder::default().timeout_config(timeouts);
+                call.customize().config_override(timeouts).send().await
+            }
+            None => call.send().await,
+        }
+        .map_err(|err| map_sdk_error("sqs", "SendMessageBatch", err))?;
         Ok(collect_batch(
             count,
             output.successful().iter().map(|entry| {
@@ -246,9 +258,13 @@ impl SqsApi for AwsSqs {
         // (unset fields of an override inherit the client's): a poll cut short stays open on the
         // server, where it may still take messages that then stay invisible.
         let budget = wait + Duration::from_secs(15);
-        let mut timeouts = TimeoutConfig::builder().read_timeout(budget).operation_attempt_timeout(budget);
-        if let Some(configured) = self.client.config().timeout_config().and_then(TimeoutConfig::operation_timeout) {
-            timeouts = timeouts.operation_timeout(configured.max(budget));
+        let configured = self.client.config().timeout_config();
+        let at_least_budget = |timeout: Option<Duration>| timeout.map_or(budget, |timeout| timeout.max(budget));
+        let mut timeouts = TimeoutConfig::builder()
+            .read_timeout(at_least_budget(configured.and_then(TimeoutConfig::read_timeout)))
+            .operation_attempt_timeout(at_least_budget(configured.and_then(TimeoutConfig::operation_attempt_timeout)));
+        if let Some(operation) = configured.and_then(TimeoutConfig::operation_timeout) {
+            timeouts = timeouts.operation_timeout(operation.max(budget));
         }
         let override_config = aws_sdk_sqs::config::Builder::default().timeout_config(timeouts.build());
         let output = self

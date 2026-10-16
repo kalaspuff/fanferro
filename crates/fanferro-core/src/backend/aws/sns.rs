@@ -7,10 +7,12 @@ use aws_sdk_sns::types::{MessageAttributeValue, PublishBatchRequestEntry, Tag};
 use aws_smithy_types::Blob;
 
 use super::errors::map_sdk_error;
+use super::upload_timeouts;
 use crate::backend::{
     BatchEntryError, BatchResult, PublishOutput, PublishRequest, SnsApi, StringMap, SubscriptionInfo,
 };
 use crate::error::{Error, Result};
+use crate::types::attributes::attributes_encoded_len;
 use crate::types::{AttributeData, AttributeValue, MessageAttributes};
 
 /// SNS backed by the AWS SDK.
@@ -60,6 +62,8 @@ fn string_map(attributes: Option<&HashMap<String, String>>) -> StringMap {
 impl SnsApi for AwsSns {
     async fn publish(&self, topic_arn: &str, request: PublishRequest) -> Result<PublishOutput> {
         let trace_header = request.trace_header.clone();
+        let size = request.message.len() + attributes_encoded_len(&request.attributes);
+        let timeouts = upload_timeouts(self.client.config().timeout_config(), size);
         let call = self
             .client
             .publish()
@@ -69,17 +73,20 @@ impl SnsApi for AwsSns {
             .set_subject(request.subject)
             .set_message_group_id(request.group_id)
             .set_message_deduplication_id(request.deduplication_id);
-        let output = match trace_header {
-            Some(header) => {
-                call.customize()
-                    .mutate_request(move |http_request| {
-                        // Best effort: a value that is not a valid header is left out (no panic).
-                        let _ = http_request.headers_mut().try_insert("x-amzn-trace-id", header.clone());
-                    })
-                    .send()
-                    .await
+        let output = if trace_header.is_none() && timeouts.is_none() {
+            call.send().await
+        } else {
+            let mut call = call.customize();
+            if let Some(header) = trace_header {
+                call = call.mutate_request(move |http_request| {
+                    // Best effort: a value that is not a valid header is left out (no panic).
+                    let _ = http_request.headers_mut().try_insert("x-amzn-trace-id", header.clone());
+                });
             }
-            None => call.send().await,
+            if let Some(timeouts) = timeouts {
+                call = call.config_override(aws_sdk_sns::config::Builder::default().timeout_config(timeouts));
+            }
+            call.send().await
         }
         .map_err(|err| map_sdk_error("sns", "Publish", err))?;
         Ok(PublishOutput {
@@ -90,6 +97,7 @@ impl SnsApi for AwsSns {
 
     async fn publish_batch(&self, topic_arn: &str, entries: Vec<PublishRequest>) -> Result<BatchResult<PublishOutput>> {
         let count = entries.len();
+        let size = entries.iter().map(|entry| entry.message.len() + attributes_encoded_len(&entry.attributes)).sum();
         let mut sdk_entries = Vec::with_capacity(count);
         for (index, entry) in entries.into_iter().enumerate() {
             sdk_entries.push(
@@ -104,14 +112,16 @@ impl SnsApi for AwsSns {
                     .map_err(|err| Error::validation(format!("invalid batch entry: {err}")))?,
             );
         }
-        let output = self
-            .client
-            .publish_batch()
-            .topic_arn(topic_arn)
-            .set_publish_batch_request_entries(Some(sdk_entries))
-            .send()
-            .await
-            .map_err(|err| map_sdk_error("sns", "PublishBatch", err))?;
+        let call =
+            self.client.publish_batch().topic_arn(topic_arn).set_publish_batch_request_entries(Some(sdk_entries));
+        let output = match upload_timeouts(self.client.config().timeout_config(), size) {
+            Some(timeouts) => {
+                let timeouts = aws_sdk_sns::config::Builder::default().timeout_config(timeouts);
+                call.customize().config_override(timeouts).send().await
+            }
+            None => call.send().await,
+        }
+        .map_err(|err| map_sdk_error("sns", "PublishBatch", err))?;
         let mut results: Vec<Option<std::result::Result<PublishOutput, BatchEntryError>>> =
             (0..count).map(|_| None).collect();
         for entry in output.successful() {

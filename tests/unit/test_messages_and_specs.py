@@ -273,6 +273,8 @@ def test_aws_config_objects() -> None:
     with pytest.raises(ValueError, match="max_attempts"):
         fanferro.AwsRetry(max_attempts=0).to_core()
     assert fanferro.Timeouts(read=30).to_core()["read"] == 30.0
+    assert fanferro.Timeouts().to_core()["read"] == 10.0, "calls without a response time out"
+    assert fanferro.Timeouts(read=None).to_core()["read"] is None
 
 
 def test_message_data_follows_its_payload() -> None:

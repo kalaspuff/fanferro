@@ -64,19 +64,22 @@ class AwsRetry:
 
 @dataclass(frozen=True, slots=True)
 class Timeouts:
-    """Timeouts of AWS API calls (``None`` keeps the SDK default).
+    """Timeouts of AWS API calls (``None`` keeps the SDK default: no timeout, except for connecting).
 
-    Long polling receives automatically get enough time for their wait.
+    Long polling receives get at least their wait time plus 15 seconds for ``read``, ``attempt``
+    and ``operation``, and requests that upload a large body (offloaded payloads, big messages)
+    one more second per 64 KiB. Transfers that stall are cut off by the AWS SDK.
 
     Attributes:
         connect: TCP/TLS connect timeout.
-        read: Time to wait for response data.
+        read: Time until the response starts to arrive, counted from when the request is sent. A
+            call that gets no response (a dead connection) fails after it, and the SDK retries it.
         operation: Total time for a call including retries.
         attempt: Time for a single attempt.
     """
 
     connect: Duration | None = 3.1
-    read: Duration | None = None
+    read: Duration | None = 10.0
     operation: Duration | None = None
     attempt: Duration | None = None
 

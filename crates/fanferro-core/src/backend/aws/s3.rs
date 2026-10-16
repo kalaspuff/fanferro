@@ -9,6 +9,7 @@ use aws_sdk_s3::types::{BucketLocationConstraint, CreateBucketConfiguration, Ser
 use bytes::{Bytes, BytesMut};
 
 use super::errors::map_sdk_error;
+use super::upload_timeouts;
 use crate::backend::{ObjectEncryption, ObjectStoreApi, PutOptions};
 use crate::error::{AwsErrorKind, Error, Result};
 
@@ -28,6 +29,7 @@ impl AwsObjectStore {
 #[async_trait]
 impl ObjectStoreApi for AwsObjectStore {
     async fn put_object(&self, bucket: &str, key: &str, data: Bytes, options: &PutOptions) -> Result<()> {
+        let timeouts = upload_timeouts(self.client.config().timeout_config(), data.len());
         let mut call = self
             .client
             .put_object()
@@ -46,7 +48,14 @@ impl ObjectStoreApi for AwsObjectStore {
                 .set_ssekms_key_id(key_id.clone())
                 .bucket_key_enabled(*bucket_key),
         };
-        call.send().await.map_err(|err| map_sdk_error("s3", "PutObject", err))?;
+        match timeouts {
+            Some(timeouts) => {
+                let timeouts = aws_sdk_s3::config::Builder::default().timeout_config(timeouts);
+                call.customize().config_override(timeouts).send().await
+            }
+            None => call.send().await,
+        }
+        .map_err(|err| map_sdk_error("s3", "PutObject", err))?;
         Ok(())
     }
 
