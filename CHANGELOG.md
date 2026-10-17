@@ -8,6 +8,8 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-17
+
 ### Behaviour changes
 
 - Visibility timeouts and delays are rounded up to whole seconds, as SQS counts them: a visibility
@@ -35,6 +37,26 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   when the subscription is created (`ProvisioningError`), and values match by type, so a numeric
   condition no longer matches a `String` attribute that holds a number, nor a string condition a
   `Number` attribute.
+
+### Features
+
+- **memory:** The in-memory broker filters messages like SNS (#46) (#46)
+
+### Bug fixes
+
+- **idempotency:** Explicit retries are no longer skipped as duplicates (#25) (#25)
+- **idempotency:** The in-memory store forgets expired keys (#26) (#26)
+- **publish:** FIFO batches keep their order when failed entries are retried (#27) (#27)
+- **consumer:** A FIFO group's redelivery is no longer released again (#42) (#42)
+- **consumer:** FIFO message groups keep their order when a delete fails (#43) (#43)
+- **payloads:** Presigned URLs are valid for 24 hours by default (#44) (#44)
+- AWS calls time out when no response starts within 10 seconds (#45) (#45)
+
+### Documentation
+
+- Highlights, design and performance sections in the README (#41) (#41)
+- A shorter, easier README (#48) (#48)
+- The fanferro logo in the README (#49) (#49)
 
 ## [0.4.0] - 2026-10-16
 
