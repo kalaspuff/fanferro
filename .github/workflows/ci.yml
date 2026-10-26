@@ -32,7 +32,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: astral-sh/setup-uv@v10.3.2
         with:
           enable-cache: true
       - run: cargo fmt --all -- --check
@@ -52,7 +52,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: astral-sh/setup-uv@v10.3.2
       - run: cargo test --workspace
       - name: Start MiniStack
         run: |
@@ -77,7 +77,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: astral-sh/setup-uv@v10.3.2
         with:
           python-version: ${{ matrix.python }}
           enable-cache: true
@@ -102,7 +102,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: astral-sh/setup-uv@v10.3.2
         with:
           python-version: ${{ matrix.python }}
       - run: uv sync
@@ -118,7 +118,7 @@ jobs:
         with:
           targets: aarch64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: astral-sh/setup-uv@v10.3.2
       - run: uvx --from "maturin==$MATURIN_VERSION" maturin sdist --out dist
       - name: Cross-build an aarch64 musl wheel with zig (as the release does)
         run: uvx --from "maturin==$MATURIN_VERSION" --with "ziglang==$ZIG_VERSION" maturin build --locked --zig --target aarch64-unknown-linux-musl --compatibility musllinux_1_2 --out dist

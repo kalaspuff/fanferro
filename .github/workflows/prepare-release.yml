@@ -22,7 +22,7 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: astral-sh/setup-uv@v10.3.2
       - id: release
         run: uv run --no-project scripts/release.py "${{ inputs.version }}" --github-output "$GITHUB_OUTPUT"
       - uses: peter-evans/create-pull-request@v8
