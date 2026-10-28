@@ -32,6 +32,6 @@ description: Default workflow for any change to the fanferro library (Rust core,
    ```
    (`make check` runs all of them.)
 7. **Commit** with a conventional commit message (`feat(consumer): ...`, `fix(transport): ...`);
-   breaking changes use `feat!:` and an explanation - they feed the changelog. Open the pull
-   request (or a stack of them, or a publish kit when you cannot push) with
-   `fanferro-pull-requests`.
+   breaking changes use `feat!:` and an explanation - they feed the changelog. Push and open the
+   pull request (or a stack of them) yourself with `fanferro-pull-requests`; only an agent that
+   cannot push hands over a publish kit.

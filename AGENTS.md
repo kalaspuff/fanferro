@@ -137,10 +137,16 @@ docstrings everywhere. README stays short and links to the docs.
   `feat!:`/`BREAKING CHANGE:` for breaking changes). PR titles are checked; squash merges use them;
   the changelog is generated from them by git-cliff (`cliff.toml`).
 * Pull requests are squash-merged: the title becomes the subject of the commit on main and its
-  changelog line, the description its body. Write descriptions for that history: prose wrapped at
-  72 columns, no instructions for whoever merges. Split large changes into stacked pull requests
-  that each pass CI. `.claude/skills/fanferro-pull-requests` covers stacks, restacking after
-  merges, fixing failed checks, and publish kits for agents that cannot push.
+  changelog line, the description its body. Write descriptions for that history, with no
+  instructions for whoever merges, and each paragraph and list item on a single line: GitHub wraps
+  them at 72 columns in the squash commit. Split large changes into stacked pull requests that each
+  pass CI.
+* Agents that can push to GitHub work like any contributor: they branch, commit, push, open their
+  pull requests with `gh pr create`, follow the checks and answer reviews themselves, without
+  handing anything over. Pushed commits are never amended, rebased or force-pushed; branches are
+  brought up to date by merging. `.claude/skills/fanferro-pull-requests` covers pull requests,
+  stacks, updates after reviews and merges, and failed checks; an agent that cannot push hands
+  over a publish kit instead (`kits.md` in that skill).
 * Versions: one version for the workspace (`Cargo.toml` `[workspace.package]`) - the Python package
   takes it from the binding crate. 0.x: breaking changes bump the minor version.
 * Release: run the "Prepare release" workflow (or `uv run --no-project scripts/release.py <version>`)
