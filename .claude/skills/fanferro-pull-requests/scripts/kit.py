@@ -40,7 +40,8 @@ SCRIPTS = Path(__file__).resolve().parent
 DEFAULT_TYPES = ("feat", "fix", "perf", "refactor", "docs", "test", "ci", "build", "chore", "revert")
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
-WIDTH = 72  # GitHub rewraps longer lines of a description when it builds the squash commit
+WIDTH = 72  # GitHub wraps longer lines of a description at this width when it builds the squash commit
+BLOCK_START = re.compile(r"\s*(?:$|```|~~~|\||#|>|[-*+]\s|\d+[.)]\s)")  # a line that starts a new block
 IDENTITY = {
     "GIT_AUTHOR_NAME": "publish kit",
     "GIT_AUTHOR_EMAIL": "kit@localhost",
@@ -334,14 +335,24 @@ def describe(numbers: list[int]) -> str:
     )
 
 
-def long_prose_lines(text: str) -> list[int]:
-    """Lines longer than WIDTH that GitHub would rewrap (outside code blocks and tables)."""
+def ragged_prose_lines(text: str) -> list[int]:
+    """Prose lines longer than WIDTH that GitHub would wrap into ragged lines (outside code and tables)."""
+    # Text wrapped at a greater width: the paragraph goes on in the next line. A paragraph or a list
+    # item on a single line is fine, GitHub wraps it evenly.
     found, fenced = [], False
-    for number, line in enumerate(text.splitlines(), 1):
+    lines = text.splitlines()
+    for number, line in enumerate(lines, 1):
         stripped = line.strip()
         if stripped.startswith(("```", "~~~")):
             fenced = not fenced
-        elif not fenced and len(line) > WIDTH and not stripped.startswith("|") and " " in stripped:
+        elif (
+            not fenced
+            and len(line) > WIDTH
+            and not stripped.startswith("|")
+            and " " in stripped
+            and number < len(lines)
+            and not BLOCK_START.match(lines[number])
+        ):
             found.append(number)
     return found
 
@@ -377,10 +388,10 @@ def check_kit(kit: Path, repo: Path | None) -> Report:
             body = body_path.read_text(encoding="utf-8")
             if "{{" in body:
                 report.warnings.append(f"prs/{index}.md has a '{{{{' placeholder; descriptions are used as they are")
-            if long := long_prose_lines(body):
+            if ragged := ragged_prose_lines(body):
                 report.warnings.append(
-                    f"prs/{index}.md: {describe(long)} longer than {WIDTH} characters;"
-                    " GitHub rewraps them in the squash commit"
+                    f"prs/{index}.md: {describe(ragged)} longer than {WIDTH} characters and wrapped;"
+                    " GitHub wraps them again in the squash commit: write each paragraph on one line"
                 )
     ignore = kit / ".gitignore"
     if not ignore.is_file() or ignore.read_text(encoding="utf-8") != "*\n":

@@ -111,6 +111,16 @@ printf 'fix(app): line 2 says what it means\n' >"$T/broken/messages/1.txt"
 if python3 "$SCRIPTS/kit.py" check --repo "$AGENT" "$T/broken" >"$OUT" 2>&1; then fail "check accepted a broken patch"; fi
 grep -q "patches: patch 2 does not apply" "$OUT" || fail "check missed the patch"
 
+step "kit.py check: paragraphs on one line pass, paragraphs wrapped wider than 72 columns do not"
+cp -R "$WS/.stacks/demo" "$T/widths"
+WORDS=$(lines word 30 | tr '\n' ' ')
+printf '## Summary\n\n%s\n\n- %s\n  - %s\n' "$WORDS" "$WORDS" "$WORDS" >"$T/widths/prs/1.md"
+python3 "$SCRIPTS/kit.py" check "$T/widths" >"$OUT" 2>&1 || fail "check failed on long one-line paragraphs"
+grep -q "prs/1.md" "$OUT" && fail "a warning for paragraphs on one line"
+printf '%s\n%s\n' "$(printf '%s' "$WORDS" | cut -c1-98)" "and the rest of the paragraph." >"$T/widths/prs/2.md"
+python3 "$SCRIPTS/kit.py" check "$T/widths" >"$OUT" 2>&1 || fail "check failed on a paragraph wrapped at 98"
+grep -q "prs/2.md: line 1 is longer than 72 characters and wrapped" "$OUT" || fail "check missed the wrapped paragraph"
+
 step "kit.py build: a single pull request"
 python3 "$SCRIPTS/kit.py" build --repo "$AGENT" --base main --tip single --prefix docs/ --names demo-readme \
   --bodies "$T/single-body" "$WS/.stacks/single" >"$OUT" 2>&1 || fail "build of the single pull request failed"
