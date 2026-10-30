@@ -124,10 +124,12 @@ impl ObjectStoreApi for AwsObjectStore {
             Ok(_) => Ok(true),
             Err(err) => {
                 let error = map_sdk_error("s3", "HeadBucket", err);
-                match error.aws().map(|aws| aws.kind) {
-                    Some(AwsErrorKind::NotFound) => Ok(false),
-                    // The bucket exists but belongs to someone else / we lack ListBucket.
-                    Some(AwsErrorKind::AccessDenied) => Ok(true),
+                match error.aws().map(|aws| (aws.kind, aws.status)) {
+                    Some((AwsErrorKind::NotFound, _)) => Ok(false),
+                    // S3 answered 403: the bucket exists but belongs to someone else / we lack
+                    // ListBucket. Credentials that could not be loaded are access denied without an
+                    // answer: nothing was checked.
+                    Some((AwsErrorKind::AccessDenied, Some(_))) => Ok(true),
                     _ => Err(error),
                 }
             }
