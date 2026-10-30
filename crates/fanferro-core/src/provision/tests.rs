@@ -160,6 +160,27 @@ async fn assumed_subscriptions_make_no_calls() {
 }
 
 #[tokio::test]
+async fn assumed_queue_urls_use_the_partition_of_the_region() {
+    for (region, url) in [
+        ("eu-west-1", "https://sqs.eu-west-1.amazonaws.com/000000000000/ghost"),
+        ("cn-north-1", "https://sqs.cn-north-1.amazonaws.com.cn/000000000000/ghost"),
+        ("eusc-de-east-1", "https://sqs.eusc-de-east-1.amazonaws.eu/000000000000/ghost"),
+    ] {
+        let mut backend = MemoryBroker::new(region, "000000000000").backend();
+        backend.kind = crate::backend::BackendKind::Aws;
+        let client = Client::with_backend(backend, ClientConfig::default()).unwrap();
+        let spec = QueueSpec {
+            name: Some("ghost".into()),
+            policy: ProvisionPolicy { lookup: false, ..ProvisionPolicy::default() },
+            ..QueueSpec::default()
+        };
+        let queue = client.ensure_queue(&spec).await.unwrap().resource.unwrap();
+        assert_eq!(queue.url, url);
+        assert_eq!(queue.arn, crate::types::arn::queue_arn(region, "000000000000", "ghost"));
+    }
+}
+
+#[tokio::test]
 async fn queue_tags() {
     let client = client();
     let mut spec = QueueSpec {

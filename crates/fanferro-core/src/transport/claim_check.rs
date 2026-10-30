@@ -24,6 +24,7 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::backend::{Backend, BackendKind, ObjectEncryption, PutOptions};
 use crate::error::{Error, Result};
+use crate::types::arn;
 use crate::util::duration_from_secs;
 
 /// Pointer format marker (fanferro format).
@@ -424,7 +425,11 @@ pub fn check_url_allowed(url: &str, settings: &FetchSettings, backend: &Backend)
     }
     let allowed = is_endpoint_host
         || if settings.allowed_url_hosts.is_empty() {
-            host.ends_with(".amazonaws.com") || host.ends_with(".amazonaws.com.cn")
+            // AWS hosts: those of the commercial and China partitions, and of the client's own.
+            let partition_suffix = arn::dns_suffix(arn::partition_for_region(&backend.region));
+            host.ends_with(".amazonaws.com")
+                || host.ends_with(".amazonaws.com.cn")
+                || host.strip_suffix(partition_suffix).is_some_and(|rest| rest.ends_with('.'))
         } else {
             settings.allowed_url_hosts.iter().any(|pattern| host_matches(pattern, &host))
         };
@@ -529,5 +534,14 @@ mod tests {
         let custom = FetchSettings { allowed_url_hosts: vec!["*.example.com".into()], ..FetchSettings::default() };
         assert!(check_url_allowed("https://cdn.example.com/x", &custom, &backend).is_ok());
         assert!(check_url_allowed("https://bucket.s3.amazonaws.com/k", &custom, &backend).is_err());
+        // Presigned URLs of the client's own partition, whichever it is.
+        let sovereign_url = "https://bucket.s3.eusc-de-east-1.amazonaws.eu/k?X-Amz-Signature=1";
+        assert!(check_url_allowed(sovereign_url, &defaults, &backend).is_err(), "another partition");
+        let mut sovereign = MemoryBroker::new("eusc-de-east-1", "000000000000").backend();
+        sovereign.kind = BackendKind::Aws;
+        assert!(check_url_allowed(sovereign_url, &defaults, &sovereign).is_ok());
+        let mut iso = MemoryBroker::new("us-iso-east-1", "000000000000").backend();
+        iso.kind = BackendKind::Aws;
+        assert!(check_url_allowed("https://bucket.s3.us-iso-east-1.c2s.ic.gov/k", &defaults, &iso).is_ok());
     }
 }
