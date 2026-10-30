@@ -3,8 +3,9 @@
 `reference_convert` (end of this file) is the converter of fanferro 0.3: it inspected the target
 type for every value and built every JSON path eagerly. The compiled converters must give the same
 results and the same errors, messages included, except where the reference was wrong: it returned
-parametrized generic dataclasses (`Box[int]`) and type aliases unconverted, and refused the string
-keys of `dict[int, ...]` that encoding writes (tested separately below).
+parametrized generic dataclasses (`Box[int]`) and type aliases unconverted, could not resolve the
+hints of `Box` itself on Python 3.12.3, and refused the string keys of `dict[int, ...]` that
+encoding writes (tested separately below).
 """
 
 from __future__ import annotations
@@ -118,7 +119,6 @@ TARGETS: list[Any] = [
     Order,
     Node,
     list[Node],
-    Box,
     dict[str, list[Item]],
 ]
 
@@ -251,6 +251,8 @@ def test_type_aliases_and_generic_dataclasses_are_converted() -> None:
         convert({**value, "boxes": [{"value": {"sku": "b", "qty": "2"}}]}, Shipment)
     with pytest.raises(DecodeError, match=r"^\$\.owner: expected an integer, got str$"):
         convert({**value, "owner": "7"}, Shipment)
+    # Without arguments, a type parameter accepts anything.
+    assert convert({"value": {"sku": "b"}}, Box) == Box({"sku": "b"})
 
 
 def test_recursive_type_aliases_are_converted() -> None:
