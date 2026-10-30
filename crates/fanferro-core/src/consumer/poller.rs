@@ -31,6 +31,13 @@ pub(crate) async fn poll_loop(inner: Arc<EngineInner>) {
             }
         }
         let requested = permits.len();
+        if inner.is_paused() {
+            // Paused while waiting for free slots (or for the rate limiter): wait for the resume.
+            if let Some(limiter) = &inner.rate_limiter {
+                limiter.refund(u32::try_from(requested).unwrap_or(0));
+            }
+            continue;
+        }
         let request = ReceiveRequest {
             queue_url: inner.settings.queue_url.clone(),
             max_messages: u8::try_from(requested).unwrap_or(10),
