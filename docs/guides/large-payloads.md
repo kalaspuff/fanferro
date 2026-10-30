@@ -17,7 +17,9 @@ Publishing a message whose encoded size exceeds the threshold (or the destinatio
 that is lower: 256 KiB for SNS topics by default, a queue's `max_message_size`) uploads the body to
 `s3://bucket/{prefix}{message_id}/{sha256 of the body}` and sends a small pointer instead. Consumers
 resolve pointers before your handler runs; handlers never notice. Per destination:
-`client.topic("x", large_payloads=LargePayloads(...))` or `large_payloads=None` to disable.
+`client.topic("x", large_payloads=LargePayloads(...))` or `large_payloads=None` to disable. The
+pointer takes one of the 10 message attributes, so an offloaded message can carry at most 9: a
+message with more fails before anything is uploaded.
 
 ## Bucket + key or presigned URL
 

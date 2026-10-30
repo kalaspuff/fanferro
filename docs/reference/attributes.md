@@ -24,6 +24,7 @@ and hidden from `message.attributes` (they remain in `message.raw_attributes`).
 Typical budget: a raw message (the default envelope) uses 1-2 attributes (`fanferro.id`, plus
 `fanferro.type` for typed messages and `content-type` for non-JSON payloads); a CloudEvents message
 uses 2 (`content-type`, `fanferro.type`). Trace context with message-attribute propagation adds 1-2,
-leaving 6-7 for application attributes. Disable what you do not need
+leaving 6-7 for application attributes; a message whose payload is offloaded uses one more for
+the pointer (`fanferro.claim-check` or `ExtendedPayloadSize`). Disable what you do not need
 (`Raw(type_attribute=None)`, `CloudEvents(content_type_attribute=False, type_attribute=None)`,
 `Propagation(inject=(Carrier.AWS_TRACE_HEADER,))`).
