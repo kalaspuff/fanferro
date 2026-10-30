@@ -155,6 +155,8 @@ async def test_assumed_subscriptions_are_not_looked_up(client_factory: ClientFac
     assert subscription.last_report is not None
     assert subscription.last_report.status == "assumed"
     assert subscription.last_report.actions == ()
+    with pytest.raises(fanferro.ConfigurationError, match=r"assumed .* ARN is unknown"):
+        await subscription.delete()
 
 
 async def test_tags_and_attributes(client_factory: ClientFactory, name: Any) -> None:
