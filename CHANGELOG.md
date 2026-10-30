@@ -15,6 +15,9 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   released at once when its delivery was garbage-collected (and redelivered in a loop), or extended
   for up to 12 hours while the application kept a reference to it. Settle such a message before
   its visibility timeout runs out, or extend it with `message.extend()`.
+- Dicts keyed by members of `(str, Enum)` or `(int, Enum)` classes are encoded with the members'
+  values as keys (`{"dark": 3}`) instead of their names (`{"Shade.DARK": 3}`), as for other enums;
+  the dataclass codec reads both.
 
 ## [0.5.0] - 2026-10-17
 

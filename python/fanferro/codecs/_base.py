@@ -107,6 +107,14 @@ _DATE_TIMES = (datetime.datetime, datetime.date, datetime.time)
 _SEQUENCES = (list, tuple, set, frozenset)
 
 
+def _json_key(key: Any) -> str:
+    """A JSON object key; enum members by their value.
+
+    ``str()`` of a member of a ``(str, Enum)`` class is its qualified name, not its value.
+    """
+    return str(to_jsonable(key.value if isinstance(key, enum.Enum) else key))
+
+
 def to_jsonable(value: Any) -> Any:
     """Converts common Python values into JSON-compatible structures.
 
@@ -129,7 +137,7 @@ def to_jsonable(value: Any) -> Any:
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return {f.name: to_jsonable(getattr(value, f.name)) for f in dataclasses.fields(value)}
     if isinstance(value, dict):
-        return {str(to_jsonable(key)): to_jsonable(item) for key, item in value.items()}
+        return {_json_key(key): to_jsonable(item) for key, item in value.items()}
     if hasattr(value, "_asdict"):
         return to_jsonable(value._asdict())
     if isinstance(value, _SEQUENCES):
