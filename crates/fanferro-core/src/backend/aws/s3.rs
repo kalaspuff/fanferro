@@ -6,12 +6,13 @@ use async_trait::async_trait;
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{BucketLocationConstraint, CreateBucketConfiguration, ServerSideEncryption, StorageClass};
+use aws_smithy_types::error::display::DisplayErrorContext;
 use bytes::{Bytes, BytesMut};
 
 use super::errors::map_sdk_error;
 use super::upload_timeouts;
 use crate::backend::{ObjectEncryption, ObjectStoreApi, PutOptions};
-use crate::error::{AwsErrorKind, Error, Result};
+use crate::error::{AwsError, AwsErrorKind, Error, Result};
 
 /// S3 backed by the AWS SDK.
 #[derive(Clone, Debug)]
@@ -75,9 +76,16 @@ impl ObjectStoreApi for AwsObjectStore {
         }
         let mut body = output.body;
         let mut buffer = BytesMut::new();
-        while let Some(chunk) =
-            body.try_next().await.map_err(|err| Error::Payload(format!("failed to read payload object: {err}")))?
-        {
+        while let Some(chunk) = body.try_next().await.map_err(|err| {
+            // The connection broke off (or the SDK cut off a stalled transfer): like a request
+            // that failed, retrying may succeed.
+            Error::from(AwsError::new(
+                "s3",
+                "GetObject",
+                AwsErrorKind::Network,
+                format!("failed to read the payload object: {}", DisplayErrorContext(&err)),
+            ))
+        })? {
             if buffer.len() + chunk.len() > max_bytes {
                 return Err(Error::Payload(format!("payload exceeds the limit of {max_bytes} bytes")));
             }
