@@ -43,7 +43,9 @@ queue never revokes a subscription's permission.
 | `Provisioning.assume()` | | | | |
 
 `assume()` makes no API calls: URLs/ARNs are derived from names, region and account id (pass
-`account_id=` to the client to avoid an STS call). Use it for least-privilege deployments.
+`account_id=` to the client to avoid an STS call). Subscriptions are assumed to exist as declared
+(their ARN stays unknown, so `subscription.delete()` needs another policy). Use it for
+least-privilege deployments.
 
 ## Failure modes
 
