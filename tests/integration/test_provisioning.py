@@ -134,6 +134,31 @@ async def test_assume_mode(client_factory: ClientFactory, name: Any, backend: st
     assert len(await drain_queue(client, queue)) == 1
 
 
+async def test_assumed_subscriptions_are_not_looked_up(client_factory: ClientFactory, name: Any) -> None:
+    # assume() makes no API calls: a subscription managed elsewhere (or one the credentials may not
+    # list) must not fail the consumer that declares it.
+    topic_name, queue_name = name("assumed-topic"), name("assumed-sub")
+    creator = client_factory()
+    await creator.topic(topic_name).resolve()
+    await creator.queue(queue_name).resolve()
+    client = client_factory(provisioning=fanferro.Provisioning.assume())
+    queue = client.queue(queue_name)
+    subscription = client.subscription(client.topic(topic_name), queue)
+
+    async def handle(message: fanferro.Message[bytes]) -> None:
+        pass
+
+    consumer = client.consumer(queue, handle, wait_time=1)
+    async with client:
+        await consumer.start()
+        await consumer.stop()
+    assert subscription.last_report is not None
+    assert subscription.last_report.status == "assumed"
+    assert subscription.last_report.actions == ()
+    with pytest.raises(fanferro.ConfigurationError, match=r"assumed .* ARN is unknown"):
+        await subscription.delete()
+
+
 async def test_tags_and_attributes(client_factory: ClientFactory, name: Any) -> None:
     client = client_factory()
     queue = client.queue(

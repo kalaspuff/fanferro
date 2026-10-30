@@ -11,7 +11,7 @@ use crate::events::EventKind;
 /// A resolved subscription.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SubscriptionInfo {
-    /// Subscription ARN.
+    /// Subscription ARN (empty when assumed: it cannot be derived from the topic and queue).
     pub arn: String,
     /// Topic ARN.
     pub topic_arn: String,
@@ -26,6 +26,17 @@ impl Client {
     pub async fn ensure_subscription(&self, spec: &SubscriptionSpec) -> Result<Report<SubscriptionInfo>> {
         let name = format!("{} -> {}", spec.topic_arn, spec.queue_arn);
         let mut report: Report<SubscriptionInfo> = Report::new(ResourceKind::Subscription, name.clone());
+        if !spec.policy.lookup {
+            // No API calls (not even for the queue policy): the subscription ARN stays unknown.
+            report.status = ProvisionStatus::Assumed;
+            report.resource = Some(SubscriptionInfo {
+                arn: String::new(),
+                topic_arn: spec.topic_arn.clone(),
+                queue_arn: spec.queue_arn.clone(),
+                attributes: spec.attributes.clone(),
+            });
+            return Ok(report);
+        }
         let existing = match self.backend().sns.list_subscriptions_by_topic(&spec.topic_arn).await {
             Ok(subscriptions) => subscriptions.into_iter().find(|s| {
                 s.protocol == "sqs" && s.endpoint == spec.queue_arn && s.subscription_arn.starts_with("arn:")

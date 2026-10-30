@@ -138,6 +138,28 @@ async fn assumed_queues_make_no_calls() {
 }
 
 #[tokio::test]
+async fn assumed_subscriptions_make_no_calls() {
+    // Neither the topic nor the queue exists: any call would fail.
+    let client = client();
+    let spec = SubscriptionSpec {
+        topic_arn: "arn:aws:sns:us-east-1:000000000000:ghost".into(),
+        queue_arn: "arn:aws:sqs:us-east-1:000000000000:ghost".into(),
+        queue_url: "memory://us-east-1/000000000000/ghost".into(),
+        attributes: attrs(&[("RawMessageDelivery", "true")]),
+        manage_queue_policy: true,
+        dead_letter_queue_url: None,
+        dead_letter_queue_arn: None,
+        policy: ProvisionPolicy { lookup: false, ..ProvisionPolicy::default() },
+    };
+    let report = client.ensure_subscription(&spec).await.unwrap();
+    assert_eq!(report.status, ProvisionStatus::Assumed);
+    assert!(report.error.is_none() && report.actions.is_empty() && report.drift.is_empty());
+    let subscription = report.resource.unwrap();
+    assert_eq!(subscription.topic_arn, spec.topic_arn);
+    assert_eq!(subscription.attributes, spec.attributes);
+}
+
+#[tokio::test]
 async fn queue_tags() {
     let client = client();
     let mut spec = QueueSpec {
