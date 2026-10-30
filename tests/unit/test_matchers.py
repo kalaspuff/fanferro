@@ -34,6 +34,24 @@ def test_attributes() -> None:
     assert (m.attribute("blob") == b"\x01")(msg)
 
 
+def test_fractional_numbers_compare_by_value() -> None:
+    # Number attributes arrive as Decimal, and Decimal("0.1") != 0.1 in Python: equality, is_in and
+    # != missed what the ordering comparisons matched.
+    from decimal import Decimal
+
+    msg = message(attributes={"rate": 0.1, "price": Decimal("19.99"), "count": 3})
+    assert (m.attribute("rate") == 0.1)(msg)
+    assert not (m.attribute("rate") != 0.1)(msg)
+    assert (m.attribute("rate") != 0.2)(msg)
+    assert (m.attribute("rate").is_in(0.1, 0.2))(msg)
+    assert (m.attribute("price") == 19.99)(msg)
+    assert (m.attribute("price") == Decimal("19.990"))(msg)
+    assert (m.attribute("count") == 3.0)(msg)
+    assert not (m.attribute("count") == True)(msg)  # noqa: E712 - a boolean is not the number 1
+    assert (m.body("order.total") == Decimal("12.5"))(msg)
+    assert not (m.attribute("rate") == float("nan"))(msg)
+
+
 def test_headers_body_and_type() -> None:
     msg = message()
     assert (m.header("schema") == "v3")(msg)

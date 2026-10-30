@@ -105,6 +105,15 @@ def _coerce_equal(left: Any, right: Any) -> bool:
     if left == right:
         return True
     numeric = (int, float, Decimal)
+    if (
+        isinstance(left, numeric)
+        and isinstance(right, numeric)
+        and not isinstance(left, bool)
+        and not isinstance(right, bool)
+    ):
+        # By value, as the ordering comparisons: Number attributes are Decimals, and
+        # Decimal("0.1") == 0.1 is false in Python (the float is not exactly 0.1).
+        return bool(_number(left) == _number(right))
     if isinstance(left, str) and isinstance(right, numeric) and not isinstance(right, bool):
         return left == str(right)
     if isinstance(right, str) and isinstance(left, numeric) and not isinstance(left, bool):
