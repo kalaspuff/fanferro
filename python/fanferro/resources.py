@@ -108,7 +108,7 @@ class _Resource:
                 )
             try:
                 info = await self._provision()
-            except BaseException as error:
+            except Exception as error:  # not a cancellation: the caller went away, nothing failed
                 self._note_failure(error)
                 raise
             if info is None:
