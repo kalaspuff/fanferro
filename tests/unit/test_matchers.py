@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -50,6 +51,25 @@ def test_fractional_numbers_compare_by_value() -> None:
     assert not (m.attribute("count") == True)(msg)  # noqa: E712 - a boolean is not the number 1
     assert (m.body("order.total") == Decimal("12.5"))(msg)
     assert not (m.attribute("rate") == float("nan"))(msg)
+
+
+def test_topics_match_by_name_or_arn() -> None:
+    # `== "orders"` accepted the topic's name; `!=` and `is_in` compared the full ARN only, so
+    # `m.topic() != "orders"` matched messages from orders and `is_in("orders")` never matched.
+    orders: Any = SimpleNamespace(topic_arn="arn:aws:sns:us-east-1:123456789012:orders")
+    returns: Any = SimpleNamespace(topic_arn="arn:aws:sns:us-east-1:123456789012:returns")
+    direct: Any = SimpleNamespace(topic_arn=None)  # sent to the queue, not through SNS
+    assert (m.topic() == "orders")(orders)
+    assert not (m.topic() == "orders")(returns)
+    assert not (m.topic() != "orders")(orders)
+    assert (m.topic() != "orders")(returns)
+    assert (m.topic().is_in("orders", "payments"))(orders)
+    assert not (m.topic().is_in("payments"))(orders)
+    assert (m.topic() == orders.topic_arn)(orders)
+    assert (m.topic().is_in(orders.topic_arn))(orders)
+    assert not (m.topic() == "orders")(direct)
+    assert not (m.topic() != "orders")(direct)
+    assert not (m.topic().is_in("orders"))(direct)
 
 
 def test_headers_body_and_type() -> None:

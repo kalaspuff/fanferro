@@ -67,7 +67,7 @@ with a single handler uses it as the default route, so it receives everything.
 
 Matchers (all in `fanferro.matchers`): `attribute(name)`, `header(name)` (falls back to attributes),
 `body("dotted.path.0.field")` (JSON bodies), `message_type()`, `content_type()`, `source()`,
-`subject()`, `envelope()`, `topic()` (ARN, or `== "name"` with the AWS name: `== orders.name`
+`subject()`, `envelope()`, `topic()` (ARN, or the AWS name with `==`, `!=` and `.is_in()`: `== orders.name`
 when the client has a `topic_prefix`), `group_id()`; comparisons `==`, `!=`, `<`, `<=`, `>`,
 `>=`, `.is_in()`, `.exists()`, `.missing()`, `.startswith()`, `.endswith()`, `.contains()`,
 `.matches(regex)`, `.test(fn)`; combine with `&`, `|`, `~` (parenthesize comparisons:

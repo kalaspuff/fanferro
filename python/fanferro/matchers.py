@@ -304,23 +304,30 @@ def group_id() -> Field:
     return Field(lambda message: message.group_id if message.group_id is not None else MISSING, "group_id()")
 
 
+def _is_topic(value: Any, topic: object) -> bool:
+    """Whether the topic ARN ``value`` is ``topic``, given as an ARN or as the topic's name."""
+    return isinstance(value, str) and (value == topic or value.rsplit(":", 1)[-1] == topic)
+
+
 class _TopicField(Field):
-    """Topic ARN; ``==`` also accepts the bare topic name."""
+    """Topic ARN; ``==``, ``!=`` and ``is_in`` also accept bare topic names."""
 
     def __eq__(self, other: object) -> Matcher:  # type: ignore[override]
-        def test(value: Any) -> bool:
-            if not isinstance(value, str):
-                return False
-            return value == other or value.rsplit(":", 1)[-1] == other
+        return self._matcher(lambda value: _is_topic(value, other), f"== {other!r}")
 
-        return self._matcher(test, f"== {other!r}")
+    def __ne__(self, other: object) -> Matcher:  # type: ignore[override]
+        return self._matcher(lambda value: value is not MISSING and not _is_topic(value, other), f"!= {other!r}")
+
+    def is_in(self, *values: Any) -> Matcher:
+        """The topic is one of ``values`` (ARNs or names)."""
+        return self._matcher(lambda value: any(_is_topic(value, topic) for topic in values), f"in {values!r}")
 
 
 def topic() -> Field:
     """The SNS topic ARN the message was published to.
 
-    ``== "name"`` matches the topic's AWS name too, which includes a ``topic_prefix``: compare with
-    ``topic.name`` of the declared topic.
+    ``== "name"``, ``!= "name"`` and ``.is_in("name", ...)`` match the topic's AWS name too, which
+    includes a ``topic_prefix``: compare with ``topic.name`` of the declared topic.
     """
     return _TopicField(lambda message: message.topic_arn if message.topic_arn is not None else MISSING, "topic()")
 
