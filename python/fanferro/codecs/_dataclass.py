@@ -40,7 +40,15 @@ __all__ = ["DataclassCodec", "convert"]
 
 @functools.cache
 def _hints(cls: type) -> dict[str, Any]:
-    return typing.get_type_hints(cls)
+    try:
+        return typing.get_type_hints(cls)
+    except NameError:
+        parameters = getattr(cls, "__type_params__", ())
+        if not parameters:
+            raise
+        # Early Python 3.12 releases (3.12.3, for one) do not resolve the type parameters of
+        # `class Box[T]` in string annotations (`from __future__ import annotations`).
+        return typing.get_type_hints(cls, localns={parameter.__name__: parameter for parameter in parameters})
 
 
 # Converters are compiled once per target type: a function per type that checks and converts a
