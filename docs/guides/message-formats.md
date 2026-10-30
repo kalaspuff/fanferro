@@ -80,7 +80,8 @@ CloudEvents SDKs, at the cost of a larger body and an extra attribute.
 
 Consumers try envelopes in order (default: CloudEvents JSON, CloudEvents protobuf, raw), so a
 queue can receive a mix of formats, including CloudEvents from fanferro 0.1 producers. CloudEvents
-are recognised by their `content-type` attribute or, without it, a `specversion` key; `Raw`
+are recognised by their `content-type` attribute or, without it, a `specversion` key (except in
+messages with the raw envelope's `fanferro.id` attribute, whose body may be a relayed event); `Raw`
 accepts anything, so messages from producers that do not use fanferro (boto3, the console, other
 frameworks) are consumable: route them with a default route or `when=` matchers and annotate the
 type you expect.

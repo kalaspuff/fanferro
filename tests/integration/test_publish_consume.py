@@ -93,6 +93,26 @@ async def test_default_raw_envelope(client_factory: ClientFactory, name: Any) ->
     assert all(m.envelope == "raw" and m.id for m in untyped)
 
 
+async def test_raw_messages_whose_body_is_a_cloudevent(client_factory: ClientFactory, name: Any) -> None:
+    # A relayed CloudEvent published with the default raw envelope: default consumers tried the
+    # CloudEvents envelope first and unwrapped the relayed event (its id, type and data).
+    client = client_factory()
+    queue = client.queue(name("relay"))
+    received: list[fanferro.Message[Any]] = []
+    consumer = client.consumer(queue, wait_time=1)
+
+    @consumer.route("relay.v1")
+    async def handle(message: fanferro.Message[dict]) -> None:
+        received.append(message)
+
+    event = {"specversion": "1.0", "id": "evt-1", "source": "upstream", "type": "relayed", "data": {"x": 1}}
+    async with client:
+        result = await queue.send(event, type="relay.v1")
+        await consume_until(consumer, lambda: len(received) == 1)
+    message = received[0]
+    assert (message.envelope, message.id, message.type, message.body) == ("raw", result.message_id, "relay.v1", event)
+
+
 async def test_topic_fanout_raw_and_wrapped(client_factory: ClientFactory, name: Any) -> None:
     client = client_factory()
     topic = client.topic(name("events"))
