@@ -15,3 +15,4 @@ Status values: Accepted, Superseded by NNNN, Deprecated.
 | [0007](0007-shutdown-and-orphaned-long-polls.md) | Shutdown waits for the last long poll by default (default superseded by 0008) |
 | [0008](0008-lean-defaults.md) | Lean defaults: raw messages, opt-in CloudEvents and MD5 checks, immediate stop |
 | [0009](0009-results-reach-asyncio-in-batches.md) | Results of Rust futures reach asyncio in batches, without runtime threads taking the GIL |
+| [0010](0010-payload-keys-include-the-body-hash.md) | Offloaded payload keys include the body's hash (amends 0003) |

@@ -22,6 +22,10 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   retrying cannot fix, through the new `OutboxStore.mark_abandoned()`, instead of retrying it
   forever ahead of every record behind it. Implement `mark_abandoned` in your store (keep the
   record, never claim it again); without it the relay warns and keeps retrying, as before.
+- Offloaded payloads are stored under `{prefix}{message_id}/{sha256 of the body}` instead of
+  `{prefix}{message_id}`, so that publishing a message again with another body cannot replace the
+  payload an earlier copy points to. Consumers read the key from the pointer, so messages published
+  before the change stay readable; S3 lifecycle rules on the prefix keep working.
 
 ## [0.5.0] - 2026-10-17
 

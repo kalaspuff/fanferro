@@ -16,7 +16,8 @@ Python ones) should not need to care about either.
   always and for writing on request, for interoperability with Java/Python services.
 * Receiving resolves pointers before envelopes see the message. URL fetches are restricted to an
   allow-list of hosts (AWS by default) to prevent SSRF via crafted messages, and size-capped.
-* The S3 key is `{prefix}{message_id}`, so publish retries overwrite the same object.
+* The S3 key is `{prefix}{message_id}`, so publish retries overwrite the same object (amended by
+  [0010](0010-payload-keys-include-the-body-hash.md): `{prefix}{message_id}/{sha256 of the body}`).
 
 ## Consequences
 

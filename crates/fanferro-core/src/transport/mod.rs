@@ -195,6 +195,8 @@ fn base64_len(len: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
+
     use crate::backend::memory::MemoryBroker;
     use crate::transport::claim_check::{EncryptionSettings, ReferenceMode};
 
@@ -260,7 +262,8 @@ mod tests {
             assert!(!out.attributes.contains_key(reserved::ENCODING));
             let decoded = transport.decode(&out.body, out.attributes).await.unwrap();
             assert_eq!(decoded.wire, wire, "{format:?}");
-            assert_eq!(decoded.pointer.unwrap().key.as_deref(), Some("x/msg-1"));
+            let key = decoded.pointer.unwrap().key.unwrap();
+            assert_eq!(key, format!("x/msg-1/{}", hex::encode(Sha256::digest(&wire.body))), "{format:?}");
         }
     }
 
@@ -277,6 +280,23 @@ mod tests {
         assert_eq!(transport.decode(&out.body, out.attributes).await.unwrap().wire, wire);
         let inline = transport.encode(&wire, "under-limit", 800).await.unwrap();
         assert!(inline.offloaded.is_none(), "under both the limit and the threshold");
+    }
+
+    #[tokio::test]
+    async fn a_message_published_again_with_another_body_keeps_the_first_payload() {
+        // A publish retried with the same message id but other bytes (CloudEvents stamp the time):
+        // replacing the first object broke the copy that points to it (its SHA-256 no longer fit).
+        let (transport, backend) = transport(Some(offload(10, PointerFormat::Fanferro)));
+        backend.objects.create_bucket("payloads").await.unwrap();
+        let first = WireMessage::new(Bytes::from(vec![b'a'; 64]), MessageAttributes::new());
+        let second = WireMessage::new(Bytes::from(vec![b'b'; 64]), MessageAttributes::new());
+        let first_out = transport.encode(&first, "same-id", 1000).await.unwrap();
+        let second_out = transport.encode(&second, "same-id", 1000).await.unwrap();
+        assert_eq!(transport.decode(&first_out.body, first_out.attributes).await.unwrap().wire, first);
+        assert_eq!(transport.decode(&second_out.body, second_out.attributes).await.unwrap().wire, second);
+        // The same bytes again share the object (retries do not pile up objects).
+        let again = transport.encode(&first, "same-id", 1000).await.unwrap();
+        assert_eq!(again.offloaded.unwrap().key, first_out.offloaded.unwrap().key);
     }
 
     #[tokio::test]

@@ -11,6 +11,7 @@ from google.protobuf import timestamp_pb2
 
 import fanferro
 from fanferro import matchers as m
+from fanferro.envelopes import CloudEvents
 from fanferro.outbox import InMemoryOutbox, OutboxRelay
 from tests.conftest import ClientFactory
 from tests.helpers import OrderCancelled, OrderCreated, consume_until, drain_queue
@@ -353,6 +354,24 @@ async def test_large_payloads(client_factory: ClientFactory, name: Any) -> None:
     assert bodies == [{"blob": "tiny"}, big]
     offloaded = [message for message in messages if message.pointer is not None]
     assert len(offloaded) == 1
+
+
+async def test_a_message_published_again_keeps_its_offloaded_payload(client_factory: ClientFactory, name: Any) -> None:
+    # Sending a message again with the same id (an application retry): the FIFO queue deduplicates
+    # it, but its CloudEvent has a new time, and its payload replaced the first one's, which then
+    # failed its integrity check, so the only stored copy was dead-lettered.
+    client = client_factory(large_payloads=fanferro.LargePayloads(name("payloads"), threshold=1024, create_bucket=True))
+    queue = client.queue(f"{name('resent')}.fifo", envelope=CloudEvents())
+    message = fanferro.OutgoingMessage(body={"blob": "x" * 5000}, id="order-1", group_id="g")
+    async with client:
+        first = await queue.send(message)
+        second = await queue.send(message)
+        assert first.message_id == second.message_id == "order-1"
+        assert first.offloaded is not None
+        assert second.offloaded is not None
+        assert first.offloaded.key != second.offloaded.key
+        received = await drain_queue(client, queue)
+    assert [(m.id, m.json()) for m in received] == [("order-1", {"blob": "x" * 5000})]
 
 
 async def test_messages_over_the_queue_limit_are_offloaded_below_the_threshold(
