@@ -13,7 +13,8 @@ client = fanferro.Client(
 )
 ```
 
-Publishing a message whose encoded size exceeds the threshold uploads the body to
+Publishing a message whose encoded size exceeds the threshold (or the destination's size limit, when
+that is lower: 256 KiB for SNS topics by default, a queue's `max_message_size`) uploads the body to
 `s3://bucket/{prefix}{message_id}` and sends a small pointer instead. Consumers resolve pointers
 before your handler runs; handlers never notice. Per destination: `client.topic("x",
 large_payloads=LargePayloads(...))` or `large_payloads=None` to disable.

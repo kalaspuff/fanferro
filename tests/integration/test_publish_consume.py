@@ -335,6 +335,22 @@ async def test_large_payloads(client_factory: ClientFactory, name: Any) -> None:
     assert len(offloaded) == 1
 
 
+async def test_messages_over_the_queue_limit_are_offloaded_below_the_threshold(
+    client_factory: ClientFactory, name: Any
+) -> None:
+    # The queue takes at most 2 KiB, less than the offload threshold: offloading is enabled, so the
+    # message is offloaded instead of refused with MessageTooLargeError.
+    bucket = name("payloads")
+    client = client_factory(large_payloads=fanferro.LargePayloads(bucket, create_bucket=True))
+    queue = client.queue(name("small-limit"), attributes=fanferro.QueueAttributes(max_message_size=2048))
+    body = {"blob": "x" * 5000}
+    async with client:
+        result = await queue.send(body)
+        assert result.offloaded is not None
+        messages = await drain_queue(client, queue)
+    assert [message.json() for message in messages] == [body]
+
+
 async def test_outbox_prepare_and_relay(client_factory: ClientFactory, name: Any) -> None:
     client = client_factory()
     topic = client.topic(name("outbox"))
