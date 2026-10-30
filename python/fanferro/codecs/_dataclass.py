@@ -130,17 +130,35 @@ def _substitute(hint: Any, types_by_parameter: Mapping[Any, Any]) -> Any:
     return hint
 
 
+def _lazy(resolve: Callable[[], Any]) -> _Converter:
+    """The converter of the type ``resolve()`` returns, compiled on first use.
+
+    A type alias may refer to itself (``type Json = dict[str, Json] | list[Json] | str | ...``): its
+    converter is cached before that reference is compiled.
+    """
+    compiled: _Converter | None = None
+
+    def convert_resolved(value: Any, path: _Path) -> Any:
+        nonlocal compiled
+        if compiled is None:
+            compiled = _converter(resolve())
+        return compiled(value, path)
+
+    return convert_resolved
+
+
 def _type_converter(target: Any) -> _Converter:
     if target is Any or target is object:
         return _identity
     if isinstance(target, typing.TypeAliasType):  # `type When = datetime` (PEP 695)
-        return _converter(target.__value__)
+        return _lazy(lambda: target.__value__)
     if isinstance(target, typing.NewType):
         return _converter(target.__supertype__)
     origin = typing.get_origin(target)
     args = typing.get_args(target)
     if isinstance(origin, typing.TypeAliasType):  # a generic alias: `type Pair[T] = ...` as `Pair[int]`
-        return _converter(_substitute(origin.__value__, dict(zip(origin.__type_params__, args, strict=False))))
+        parameters = dict(zip(origin.__type_params__, args, strict=False))
+        return _lazy(lambda: _substitute(origin.__value__, parameters))
     if origin is typing.Annotated:
         return _converter(args[0])
     if origin in (typing.Union, types.UnionType):
@@ -223,7 +241,9 @@ def _key_converter(target: Any) -> _Converter:
     convert_key = _converter(target)
     parse = _KEY_PARSERS.get(target) if isinstance(target, type) else None
     if isinstance(target, type) and issubclass(target, enum.Enum):
-        parse = {str(member.value): member for member in target}.__getitem__
+        # By value; fanferro 0.5 wrote members of (str, Enum) and (int, Enum) classes by name.
+        by_text = {str(member): member for member in target} | {str(member.value): member for member in target}
+        parse = by_text.__getitem__
     if parse is None:
         return convert_key
 
