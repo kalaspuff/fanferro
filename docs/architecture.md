@@ -48,7 +48,7 @@ Python  obj ─ codec ─▶ Payload(data, content_type, type, id, time, source,
         Envelope.wrap ─▶ WireMessage(body bytes, attributes)     [builtin = Rust, custom = Python]
         user attributes merged (fanferro.* is reserved)            ─▶ PreparedMessage (outbox-ready)
 Rust    transport: non-text body → base64 + fanferro.encoding
-                   size > threshold → S3 + pointer + fanferro.claim-check   (or AWS extended format)
+                   size > threshold or limit → S3 + pointer + fanferro.claim-check   (or AWS extended format)
                    size > limit without offloading → MessageTooLargeError (fail fast)
         FIFO: group id required, dedup id defaults to the message id
         SendMessage/Publish (+ batches, partial-failure retries, optional MD5 verification)
