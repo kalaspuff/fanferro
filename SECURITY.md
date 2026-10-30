@@ -13,7 +13,8 @@ During 0.x only the latest minor release receives fixes.
 
 * **Payload URLs**: claim-check pointers may contain presigned URLs. Consumers only fetch URLs on an
   allow-list (AWS hosts and the configured `endpoint_url` by default; `PayloadFetch.allowed_url_hosts`)
-  over HTTPS, with a size cap, to prevent server-side request forgery through crafted messages.
+  over HTTPS, with a size cap and without following redirects, to prevent server-side request
+  forgery through crafted messages.
 * **Integrity**: offloaded payloads are verified against the size and SHA-256 recorded in the pointer;
   SQS MD5 digests of message bodies and attributes are verified.
 * **Secrets**: fanferro never logs message bodies or credentials; presigned URLs are redacted from

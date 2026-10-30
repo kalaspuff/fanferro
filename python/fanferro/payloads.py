@@ -105,7 +105,7 @@ class PayloadFetch:
         prefer: Try ``"s3"`` (``GetObject``) or ``"url"`` (presigned URL) first.
         allowed_url_hosts: Hosts presigned URLs may point to (``*.example.com`` wildcards allowed).
             Empty means AWS hosts plus the configured ``endpoint_url`` - this blocks server-side
-            request forgery through crafted messages.
+            request forgery through crafted messages. Redirects are not followed.
         allow_http: Allow plain ``http://`` URLs (always allowed for the ``endpoint_url`` host).
         verify_checksum: Verify the recorded size and SHA-256.
     """
