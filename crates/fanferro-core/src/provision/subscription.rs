@@ -94,7 +94,16 @@ impl Client {
         };
 
         if report.status != ProvisionStatus::Created && (spec.policy.verify || spec.policy.update) {
-            for item in compare(&spec.attributes, &attributes) {
+            let mut drift = compare(&spec.attributes, &attributes);
+            // SNS validates the filter policy against the current scope: a nested policy needs the
+            // message body scope first, and the scope goes back to attributes after the policy.
+            let body_scope = spec.attributes.get("FilterPolicyScope").map(String::as_str) == Some("MessageBody");
+            drift.sort_by_key(|item| match item.attribute.as_str() {
+                "FilterPolicyScope" if body_scope => 0,
+                "FilterPolicyScope" => 2,
+                _ => 1,
+            });
+            for item in drift {
                 if spec.policy.update {
                     if let Err(err) = self
                         .backend()
