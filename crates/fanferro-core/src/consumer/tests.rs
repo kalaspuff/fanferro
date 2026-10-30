@@ -587,6 +587,31 @@ async fn nack_release_and_extend() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn heartbeats_do_not_shorten_an_explicit_extension() {
+    let fx = fixture(ClientConfig::default()).await;
+    fx.send("long").await;
+    let engine = fx.engine(|c| {
+        c.visibility_timeout = 3.0;
+        c.heartbeat.interval = Some(1.0);
+    });
+    let delivery = collect(&engine, 1).await.remove(0);
+    delivery.lease.mark_active();
+    delivery.lease.extend(Duration::from_secs(600)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let remaining = delivery.lease.remaining_visibility();
+    assert!(remaining > Duration::from_secs(590), "a heartbeat cut the extension short: {remaining:?}");
+    // Heartbeats take over again before the extension runs out.
+    delivery.lease.extend(Duration::from_secs(20)).await.unwrap();
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(delivery.lease.remaining_visibility() >= Duration::from_secs(1));
+        assert!(fx.stored()[0].in_flight);
+    }
+    delivery.lease.ack().await.unwrap();
+    engine.close(true).await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn dead_letter_and_requeue() {
     let fx = fixture(ClientConfig::default()).await;
     let dlq = fx.client.backend().sqs.create_queue("work-dlq", &StringMap::new(), &StringMap::new()).await.unwrap();
