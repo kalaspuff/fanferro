@@ -655,6 +655,24 @@ async fn dropped_leases_release_messages() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_idle_consumer_does_not_poll_continuously() {
+    let fx = fixture(ClientConfig::default()).await;
+    // Under a second rounds up to whole seconds (SQS has no shorter long poll; truncating made it a
+    // short poll), and short polls of an empty queue pause between calls.
+    for (wait_time, at_most) in [(0.5, 10), (0.0, 10), (1.0, 10)] {
+        let engine = fx.engine(|c| c.wait_time = wait_time);
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let receives = receives(&engine);
+        assert!(receives <= at_most, "wait_time={wait_time}: {receives} receive calls in 10 s");
+        engine.close(true).await;
+    }
+    fx.send("message").await;
+    let engine = fx.engine(|c| c.wait_time = 0.0);
+    assert_eq!(collect_within(&engine, 1, Duration::from_secs(2)).await.len(), 1);
+    engine.close(true).await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn left_leases_time_out_and_can_still_be_settled() {
     let fx = fixture(ClientConfig::default()).await;
     fx.send("left").await;

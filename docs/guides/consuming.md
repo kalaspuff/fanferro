@@ -106,7 +106,7 @@ slot to the next message right away; the automatic ack completes in the backgrou
 | `batch_size` | 10 | messages per `ReceiveMessage` (1-10) |
 | `min_receive_batch` | `batch_size` (FIFO: 1) | free slots a poller waits for before receiving |
 | `receive_batch_wait` | 0.1 | seconds to wait for `min_receive_batch` free slots before receiving fewer |
-| `wait_time` | 20 | long polling wait (0-20 s) |
+| `wait_time` | 20 | long polling wait (0-20 s; fractions round up to whole seconds, as SQS counts them; `0` short-polls and pauses a second while the queue is empty) |
 | `pollers` | 1 | concurrent receive loops (raise for high-throughput queues) |
 | `rate_limit` | `None` | `RateLimit(per_second, burst)` or a number: max messages received per second |
 | `handler_timeout` | `None` | cancel handlers after N seconds (`HandlerTimeoutError`, retried) |

@@ -7,7 +7,7 @@ use serde::Deserialize;
 use crate::error::{Error, Result};
 use crate::retry::{Backoff, RetrySettings};
 use crate::transport::sns_notification::SnsUnwrap;
-use crate::util::duration_from_secs;
+use crate::util::{duration_from_secs, whole_seconds};
 
 /// Maximum visibility timeout SQS allows.
 pub const MAX_VISIBILITY: Duration = Duration::from_secs(12 * 3600);
@@ -116,7 +116,8 @@ pub struct ConsumerConfig {
     /// before it receives with fewer (0-20).
     #[serde(default = "d_receive_batch_wait")]
     pub receive_batch_wait: f64,
-    /// Long polling wait time in seconds (0-20).
+    /// Long polling wait time in seconds (0-20; fractions round up to whole seconds). With 0
+    /// (short polling), an empty receive pauses a second before the next one.
     #[serde(default = "d20")]
     pub wait_time: f64,
     /// Concurrent receive loops.
@@ -218,7 +219,8 @@ impl ConsumerConfig {
         if !(1..=64).contains(&self.pollers) {
             return Err(Error::config("pollers must be between 1 and 64"));
         }
-        let wait_time = duration_from_secs(self.wait_time, "wait_time")?;
+        // SQS waits whole seconds: a fraction rounds up (truncated, it would be a short poll).
+        let wait_time = whole_seconds(duration_from_secs(self.wait_time, "wait_time")?);
         if wait_time > Duration::from_secs(20) {
             return Err(Error::config("wait_time must be at most 20 seconds"));
         }
@@ -373,6 +375,16 @@ mod tests {
         assert!(ConsumerConfig { batch_size: 5, min_receive_batch: Some(6), ..base.clone() }.validate().is_err());
         assert!(ConsumerConfig { receive_batch_wait: 21.0, ..base.clone() }.validate().is_err());
         assert!(ConsumerConfig { receive_batch_wait: -1.0, ..base }.validate().is_err());
+    }
+
+    #[test]
+    fn wait_times_are_whole_seconds() {
+        let base = ConsumerConfig::new("u");
+        let wait = |wait_time: f64| ConsumerConfig { wait_time, ..base.clone() }.validate().unwrap().wait_time;
+        assert_eq!(wait(0.5), Duration::from_secs(1));
+        assert_eq!(wait(19.2), Duration::from_secs(20));
+        assert_eq!(wait(0.0), Duration::ZERO);
+        assert_eq!(wait(20.0), Duration::from_secs(20));
     }
 
     #[test]

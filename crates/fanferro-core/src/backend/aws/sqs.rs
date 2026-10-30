@@ -42,7 +42,8 @@ fn duration_secs_i32(duration: Duration) -> i32 {
     i32::try_from(duration.as_secs()).unwrap_or(i32::MAX)
 }
 
-/// A visibility timeout or delay in whole seconds, rounded up (never shorter than requested).
+/// A visibility timeout, delay or wait time in whole seconds, rounded up (never shorter than
+/// requested).
 fn timeout_secs_i32(duration: Duration) -> i32 {
     duration_secs_i32(whole_seconds(duration))
 }
@@ -272,7 +273,7 @@ impl SqsApi for AwsSqs {
             .receive_message()
             .queue_url(&request.queue_url)
             .max_number_of_messages(i32::from(request.max_messages.clamp(1, 10)))
-            .wait_time_seconds(duration_secs_i32(wait))
+            .wait_time_seconds(timeout_secs_i32(wait))
             .set_visibility_timeout(request.visibility_timeout.map(timeout_secs_i32))
             .set_receive_request_attempt_id(request.attempt_id)
             .message_system_attribute_names(MessageSystemAttributeName::All)

@@ -10,6 +10,9 @@ use crate::retry::sleep_or_cancel;
 
 use super::EngineInner;
 
+/// How long a poller with `wait_time` 0 (short polling) waits after an empty receive.
+const EMPTY_SHORT_POLL_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// One receive loop. Runs until the engine's receive token is cancelled.
 pub(crate) async fn poll_loop(inner: Arc<EngineInner>) {
     let mut consecutive_failures: u32 = 0;
@@ -73,6 +76,12 @@ pub(crate) async fn poll_loop(inner: Arc<EngineInner>) {
                         Event::new(EventKind::ReceiveEmpty, "no messages received")
                             .field("queue", &inner.settings.queue_url)
                     });
+                    // A short poll of an empty queue returns at once: do not call again right away.
+                    if inner.settings.wait_time.is_zero()
+                        && !sleep_or_cancel(EMPTY_SHORT_POLL_PAUSE, &inner.receive_token).await
+                    {
+                        break;
+                    }
                     continue;
                 }
                 if messages.len() > requested {
