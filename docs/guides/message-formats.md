@@ -8,7 +8,9 @@ A message passes through two independent layers:
 ## Codecs
 
 Built in, tried in this order: protobuf messages, pydantic models (and `list[Model]`, discriminated
-unions, `TypedDict` through `TypeAdapter`), `msgspec.Struct`, dataclasses (nested, typed: enums,
+unions, `TypedDict` through `TypeAdapter`; bodies use field names unless the model serializes by
+alias or `PydanticCodec(by_alias=True)`, and decoding accepts names and aliases with pydantic 2.11
+or later), `msgspec.Struct`, dataclasses (nested, typed: enums,
 datetimes, UUIDs, Decimals, optionals, literals...), `bytes`, `str`, JSON data. Library codecs only
 activate when the library is imported by your application.
 
