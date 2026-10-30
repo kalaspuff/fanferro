@@ -1,8 +1,9 @@
 """Large payloads (claim checks): store big messages in S3 and send a pointer.
 
 SQS accepts messages of up to 1 MiB, SNS of up to 256 KiB by default. With :class:`LargePayloads`,
-messages whose encoded size exceeds ``threshold`` (256 KiB by default) are uploaded to S3 and
-replaced by a small pointer; consumers download them transparently (the handler never notices).
+messages whose encoded size exceeds ``threshold`` (256 KiB by default), or the destination's size
+limit when that is lower, are uploaded to S3 and replaced by a small pointer; consumers download
+them transparently (the handler never notices).
 
 The pointer can contain:
 
@@ -41,7 +42,8 @@ class LargePayloads:
     Attributes:
         bucket: Bucket for payload objects.
         prefix: Key prefix; the object key is ``{prefix}{message_id}`` (idempotent across retries).
-        threshold: Offload when the encoded message (body plus attributes) exceeds this many bytes.
+        threshold: Offload when the encoded message (body plus attributes) exceeds this many bytes,
+            or the destination's size limit when that is lower.
         always: Offload every message regardless of size.
         reference: What the pointer contains: ``"s3"``, ``"url"`` (presigned) or ``"both"``.
         presign_ttl: Lifetime of presigned URLs (24 hours by default, at most 7 days). A URL signed

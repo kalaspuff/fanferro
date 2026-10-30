@@ -2,8 +2,8 @@
 //!
 //! Outgoing ([`Transport::encode`]):
 //! 1. bodies that are not valid SQS text are base64 encoded (`fanferro.encoding=base64`);
-//! 2. messages larger than the offload threshold (or all, with `always`) are stored in S3
-//!    and replaced by a pointer ([`claim_check`]);
+//! 2. messages larger than the offload threshold or the destination limit (or all, with
+//!    `always`) are stored in S3 and replaced by a pointer ([`claim_check`]);
 //! 3. messages still over the destination limit fail fast with [`Error::MessageTooLarge`];
 //! 4. attributes are validated (names, values, at most 10).
 //!
@@ -108,8 +108,10 @@ impl Transport {
         }
         let size = inline_body_len + attributes_encoded_len(&attributes);
 
+        // Offloading also takes messages the destination could not take inline, however high the
+        // threshold is (an SNS topic's 256 KiB, a queue's lower MaximumMessageSize).
         if let Some(settings) = self.offload.as_deref()
-            && (settings.always || size > settings.threshold)
+            && (settings.always || size > settings.threshold.min(limit))
         {
             attributes.remove(reserved::ENCODING);
             let pointer = claim_check::offload(&self.backend, settings, message_id, wire.body.clone()).await?;
@@ -260,6 +262,21 @@ mod tests {
             assert_eq!(decoded.wire, wire, "{format:?}");
             assert_eq!(decoded.pointer.unwrap().key.as_deref(), Some("x/msg-1"));
         }
+    }
+
+    #[tokio::test]
+    async fn bodies_over_the_destination_limit_are_offloaded_below_the_threshold() {
+        // A queue with a smaller MaximumMessageSize, or an SNS topic (256 KiB) when the threshold
+        // was raised for SQS (1 MiB): offloading is enabled, so the message must not be refused.
+        let (transport, backend) = transport(Some(offload(1000, PointerFormat::Fanferro)));
+        backend.objects.create_bucket("payloads").await.unwrap();
+        let wire = WireMessage::new(Bytes::from(vec![b'a'; 600]), MessageAttributes::new());
+        let out = transport.encode(&wire, "over-limit", 500).await.unwrap();
+        assert!(out.offloaded.is_some());
+        assert!(out.encoded_len() <= 500);
+        assert_eq!(transport.decode(&out.body, out.attributes).await.unwrap().wire, wire);
+        let inline = transport.encode(&wire, "under-limit", 800).await.unwrap();
+        assert!(inline.offloaded.is_none(), "under both the limit and the threshold");
     }
 
     #[tokio::test]
