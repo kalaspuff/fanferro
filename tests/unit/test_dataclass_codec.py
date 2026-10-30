@@ -2,7 +2,9 @@
 
 `reference_convert` (end of this file) is the converter of fanferro 0.3: it inspected the target
 type for every value and built every JSON path eagerly. The compiled converters must give the same
-results and the same errors, messages included.
+results and the same errors, messages included, except where the reference was wrong: it returned
+parametrized generic dataclasses (`Box[int]`) and type aliases unconverted, and refused the string
+keys of `dict[int, ...]` that encoding writes (tested separately below).
 """
 
 from __future__ import annotations
@@ -88,7 +90,6 @@ TARGETS: list[Any] = [
     frozenset[int],
     Sequence[int],
     dict[str, int],
-    dict[int, str],
     Mapping[str, Any],
     typing.List[int],  # noqa: UP006 - old spellings must keep working
     typing.Optional[int],  # noqa: UP045
@@ -116,7 +117,6 @@ TARGETS: list[Any] = [
     Order,
     Node,
     list[Node],
-    Box[int],
     Box,
     dict[str, list[Item]],
 ]
@@ -144,14 +144,12 @@ KNOWN: list[tuple[Any, Any]] = [
     ({"name": "root", "children": [{"name": "a", "children": [{"name": "b"}]}]}, Node),
     ({"name": "root", "children": [{"name": 1}]}, Node),
     ({"name": "a", "parent": {"name": "b", "parent": 3}}, Node),
-    ({"value": 1}, Box[int]),
     ([1, "a"], tuple[int, str]),
     ([1, "a", 2], tuple[int, str]),
     ([1, 2, 3], tuple[int, ...]),
     ([], tuple[()]),
     ([1, 2], set[str]),
     (["a", "a"], set[str]),
-    ({"1": "a"}, dict[int, str]),
     ({"a": [{"sku": "x"}]}, dict[str, list[Item]]),
     ({"a": [{"sku": "x"}, {"sku": "y", "qty": "no"}]}, dict[str, list[Item]]),
     ("blue", Color),
@@ -198,6 +196,69 @@ def test_known_values_convert_as_before(value: Any, target: Any) -> None:
 @given(json_values, st.sampled_from(TARGETS))
 def test_any_value_converts_as_before(value: Any, target: Any) -> None:
     assert outcome(convert, value, target) == outcome(reference_convert, value, target)
+
+
+type When = datetime.datetime
+type Items = list[Item]
+type Pair[T] = tuple[T, T]
+UserId = typing.NewType("UserId", int)
+
+
+@dataclasses.dataclass
+class Shipment:
+    placed: When
+    items: Items
+    route: Pair[str]
+    boxes: list[Box[Item]]
+    owner: UserId
+    labels: typing.Iterable[str] = ()
+    extra: typing.MutableMapping[str, Item] = dataclasses.field(default_factory=dict)
+
+
+def test_type_aliases_and_generic_dataclasses_are_converted() -> None:
+    # They were returned as the JSON data (strings, dicts) without an error.
+    value = {
+        "placed": "2026-01-01T10:00:00+00:00",
+        "items": [{"sku": "a"}],
+        "route": ["here", "there"],
+        "boxes": [{"value": {"sku": "b", "qty": 2}}],
+        "owner": 7,
+        "labels": ["x"],
+        "extra": {"e": {"sku": "e"}},
+    }
+    shipment = convert(value, Shipment)
+    assert shipment == Shipment(
+        placed=datetime.datetime(2026, 1, 1, 10, tzinfo=datetime.UTC),
+        items=[Item("a")],
+        route=("here", "there"),
+        boxes=[Box(Item("b", 2))],
+        owner=UserId(7),
+        labels=["x"],
+        extra={"e": Item("e")},
+    )
+    with pytest.raises(DecodeError, match=r"^\$\.boxes\[0\]\.value\.qty: expected an integer, got str$"):
+        convert({**value, "boxes": [{"value": {"sku": "b", "qty": "2"}}]}, Shipment)
+    with pytest.raises(DecodeError, match=r"^\$\.owner: expected an integer, got str$"):
+        convert({**value, "owner": "7"}, Shipment)
+
+
+def test_keys_that_encoding_writes_as_strings_are_converted_back() -> None:
+    @dataclasses.dataclass
+    class Counts:
+        by_id: dict[int, str]
+        by_ratio: dict[float, int]
+        by_flag: dict[bool, int]
+        by_level: dict[Level, int]
+        by_color: dict[Color, int]
+
+    counts = Counts({1: "a"}, {0.5: 1}, {True: 1, False: 0}, {Level.HIGH: 2}, {Color.RED: 1})
+    from fanferro.codecs import CodecRegistry
+
+    registry = CodecRegistry()
+    encoded = registry.encode(counts)
+    assert registry.decode(encoded.data, Counts, encoded.content_type) == counts
+    with pytest.raises(DecodeError, match=r"^\$\.by_id\.x: expected an integer, got str$"):
+        convert({"by_id": {"x": "a"}, "by_ratio": {}, "by_flag": {}, "by_level": {}, "by_color": {}}, Counts)
 
 
 def test_errors_name_the_json_path() -> None:

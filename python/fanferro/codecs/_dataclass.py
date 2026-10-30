@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import datetime
 import decimal
@@ -11,7 +12,17 @@ import json
 import types
 import typing
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import (
+    Callable,
+    Collection,
+    Iterable,
+    Mapping,
+    MutableMapping,
+    MutableSequence,
+    MutableSet,
+    Sequence,
+)
+from collections.abc import Set as AbstractSet
 from typing import Any
 
 from fanferro.codecs._base import (
@@ -88,21 +99,60 @@ def _identity(value: Any, path: _Path) -> Any:
     return value
 
 
+# Abstract collection types are decoded into the concrete type JSON arrays and objects map to.
+_ABSTRACT_SEQUENCES: dict[Any, Any] = {
+    Sequence: list,
+    MutableSequence: list,
+    Collection: list,
+    Iterable: list,
+    AbstractSet: set,
+    MutableSet: set,
+}
+
+
+def _type_parameters(cls: Any) -> tuple[Any, ...]:
+    """The type parameters of a generic class (``class Box[T]`` or ``Generic[T]``)."""
+    return getattr(cls, "__type_params__", ()) or getattr(cls, "__parameters__", ())
+
+
+def _substitute(hint: Any, types_by_parameter: Mapping[Any, Any]) -> Any:
+    """``hint`` with the type variables of a generic type replaced by its arguments."""
+    if not types_by_parameter:
+        return hint
+    if isinstance(hint, typing.TypeVar):
+        return types_by_parameter.get(hint, hint)
+    parameters = getattr(hint, "__parameters__", ())
+    if parameters:
+        try:
+            return hint[tuple(types_by_parameter.get(parameter, parameter) for parameter in parameters)]
+        except TypeError:
+            return hint
+    return hint
+
+
 def _type_converter(target: Any) -> _Converter:
     if target is Any or target is object:
         return _identity
+    if isinstance(target, typing.TypeAliasType):  # `type When = datetime` (PEP 695)
+        return _converter(target.__value__)
+    if isinstance(target, typing.NewType):
+        return _converter(target.__supertype__)
     origin = typing.get_origin(target)
     args = typing.get_args(target)
+    if isinstance(origin, typing.TypeAliasType):  # a generic alias: `type Pair[T] = ...` as `Pair[int]`
+        return _converter(_substitute(origin.__value__, dict(zip(origin.__type_params__, args, strict=False))))
     if origin is typing.Annotated:
         return _converter(args[0])
     if origin in (typing.Union, types.UnionType):
         return _union_converter(target, args)
     if origin is typing.Literal:
         return _literal_converter(args)
-    if origin in (list, Sequence, set, frozenset, tuple):
-        return _sequence_converter(origin, args)
-    if origin in (dict, Mapping):
+    if origin in (list, set, frozenset, tuple) or origin in _ABSTRACT_SEQUENCES:
+        return _sequence_converter(_ABSTRACT_SEQUENCES.get(origin, origin), args)
+    if origin in (dict, Mapping, MutableMapping):
         return _mapping_converter(args)
+    if isinstance(origin, type) and dataclasses.is_dataclass(origin):  # a generic dataclass: `Box[Item]`
+        return _dataclass_converter(origin, dict(zip(_type_parameters(origin), args, strict=False)))
     if isinstance(target, type):
         return _class_converter(target)
     return _identity
@@ -161,9 +211,34 @@ def _sequence_converter(origin: Any, args: tuple[Any, ...]) -> _Converter:
     return convert_items
 
 
+# JSON object keys are strings (the codecs write other keys with str()): parsed back for these types.
+_KEY_PARSERS: dict[type, Callable[[str], Any]] = {
+    int: int,
+    float: float,
+    bool: {"True": True, "False": False, "true": True, "false": False}.__getitem__,
+}
+
+
+def _key_converter(target: Any) -> _Converter:
+    convert_key = _converter(target)
+    parse = _KEY_PARSERS.get(target) if isinstance(target, type) else None
+    if isinstance(target, type) and issubclass(target, enum.Enum):
+        parse = {str(member.value): member for member in target}.__getitem__
+    if parse is None:
+        return convert_key
+
+    def convert_string_key(value: Any, path: _Path) -> Any:
+        if isinstance(value, str):
+            with contextlib.suppress(KeyError, ValueError):  # not parseable: reported by `convert_key`
+                value = parse(value)
+        return convert_key(value, path)
+
+    return convert_string_key
+
+
 def _mapping_converter(args: tuple[Any, ...]) -> _Converter:
     key_type, value_type = args or (Any, Any)
-    key, item = _converter(key_type), _converter(value_type)
+    key, item = _key_converter(key_type), _converter(value_type)
 
     def convert_mapping(value: Any, path: _Path) -> Any:
         if not isinstance(value, dict):
@@ -173,7 +248,7 @@ def _mapping_converter(args: tuple[Any, ...]) -> _Converter:
     return convert_mapping
 
 
-def _dataclass_converter(target: type) -> _Converter:
+def _dataclass_converter(target: type, types_by_parameter: Mapping[Any, Any] | None = None) -> _Converter:
     compiled: list[tuple[str, str, _Converter, bool]] | None = None
 
     def fields() -> list[tuple[str, str, _Converter, bool]]:
@@ -184,7 +259,8 @@ def _dataclass_converter(target: type) -> _Converter:
         for f in dataclasses.fields(target):
             if f.init:
                 required = f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING
-                result.append((f.name, f".{f.name}", _converter(hints.get(f.name, Any)), required))
+                hint = _substitute(hints.get(f.name, Any), types_by_parameter or {})
+                result.append((f.name, f".{f.name}", _converter(hint), required))
         compiled = result
         return result
 
@@ -286,8 +362,9 @@ _ENCODER = json.JSONEncoder(separators=(",", ":"), ensure_ascii=False)
 class DataclassCodec:
     """Encodes dataclass instances as JSON and decodes JSON into dataclasses.
 
-    Nested dataclasses, lists, dicts, tuples, sets, optionals/unions, literals, enums, datetimes,
-    dates, UUIDs and Decimals are converted according to the field type hints.
+    Nested dataclasses (generic ones too), lists, dicts (with int, float, bool or enum keys too),
+    tuples, sets, optionals/unions, literals, enums, datetimes, dates, UUIDs, Decimals, ``NewType``
+    and ``type`` aliases are converted according to the field type hints.
     """
 
     name = "dataclass"
