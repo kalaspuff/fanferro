@@ -80,6 +80,22 @@ impl Client {
                 report.status = ProvisionStatus::Missing;
                 return Ok(report);
             }
+            if let Some(declared) = &spec.arn {
+                // Creating it here would make a topic in the client's account and region instead,
+                // which its publishes would then silently go to.
+                let declared = Arn::parse(declared)?;
+                let account = match self.account_id().await {
+                    Ok(account) => account,
+                    Err(err) => return Ok(report.failed(err)),
+                };
+                if declared.account != account || declared.region != self.region() {
+                    return Ok(report.failed(Error::config(format!(
+                        "topic {topic_arn} does not exist, and it cannot be created by a client of account {account} \
+                         in {} (create it in its own account and region)",
+                        self.region()
+                    ))));
+                }
+            }
             let created_arn = match self.backend().sns.create_topic(&name, &desired, &spec.tags).await {
                 Ok(created_arn) => created_arn,
                 Err(err) => return Ok(report.failed(err)),
