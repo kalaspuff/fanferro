@@ -1,5 +1,6 @@
 //! Mapping AWS SDK errors to [`AwsError`] with a retry-relevant classification.
 
+use aws_credential_types::provider::error::CredentialsError;
 use aws_smithy_runtime_api::client::result::SdkError;
 use aws_smithy_runtime_api::http::Response as HttpResponse;
 use aws_smithy_types::error::display::DisplayErrorContext;
@@ -21,7 +22,11 @@ where
         }
         SdkError::TimeoutError(_) => (AwsErrorKind::Timeout, None, Some(DisplayErrorContext(&err).to_string())),
         SdkError::DispatchFailure(failure) => {
-            let kind = if failure.is_timeout() { AwsErrorKind::Timeout } else { AwsErrorKind::Network };
+            let kind = if failure.is_timeout() {
+                AwsErrorKind::Timeout
+            } else {
+                credentials_failure(&err).unwrap_or(AwsErrorKind::Network)
+            };
             (kind, None, Some(DisplayErrorContext(&err).to_string()))
         }
         SdkError::ResponseError(_) => (AwsErrorKind::Transient, None, Some(DisplayErrorContext(&err).to_string())),
@@ -34,6 +39,27 @@ where
         _ => (AwsErrorKind::Service, None, Some(DisplayErrorContext(&err).to_string())),
     };
     Error::from(AwsError { service, operation, kind, code, message, request_id, status })
+}
+
+/// How a call failed because no credentials could be loaded. The SDK resolves them before it sends
+/// the request and reports a failure as a dispatch failure, like a connection error; without
+/// credentials, or with an invalid configuration, retrying cannot help.
+fn credentials_failure(error: &(dyn std::error::Error + 'static)) -> Option<AwsErrorKind> {
+    let mut source = Some(error);
+    while let Some(error) = source {
+        if let Some(credentials) = error.downcast_ref::<CredentialsError>() {
+            return match credentials {
+                CredentialsError::CredentialsNotLoaded(_) | CredentialsError::InvalidConfiguration(_) => {
+                    Some(AwsErrorKind::AccessDenied)
+                }
+                CredentialsError::ProviderTimedOut(_) => Some(AwsErrorKind::Timeout),
+                // The provider could not reach its source (IMDS, STS, SSO), or failed unexpectedly.
+                _ => None,
+            };
+        }
+        source = error.source();
+    }
+    None
 }
 
 /// Classifies a service error code (and message/status as fallbacks).
@@ -126,7 +152,55 @@ pub(crate) fn classify(code: Option<&str>, message: Option<&str>, status: Option
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use aws_config::BehaviorVersion;
+    use aws_config::retry::RetryConfig;
+    use aws_credential_types::provider::{ProvideCredentials, future};
+    use aws_types::region::Region;
+
     use super::*;
+
+    /// A credentials provider that fails like the default chain without credentials.
+    #[derive(Debug)]
+    struct FailingCredentials(fn() -> CredentialsError);
+
+    impl ProvideCredentials for FailingCredentials {
+        fn provide_credentials<'a>(&'a self) -> future::ProvideCredentials<'a>
+        where
+            Self: 'a,
+        {
+            future::ProvideCredentials::ready(Err((self.0)()))
+        }
+    }
+
+    async fn call_with(credentials: FailingCredentials) -> Error {
+        let config = aws_sdk_sqs::Config::builder()
+            .behavior_version(BehaviorVersion::latest())
+            .region(Region::new("us-east-1"))
+            .endpoint_url("http://127.0.0.1:9") // never reached: the request is not signed
+            .credentials_provider(credentials)
+            .retry_config(RetryConfig::disabled())
+            .build();
+        let error = aws_sdk_sqs::Client::from_conf(config).get_queue_url().queue_name("q").send().await.unwrap_err();
+        map_sdk_error("sqs", "GetQueueUrl", error)
+    }
+
+    #[tokio::test]
+    async fn missing_credentials_are_access_denied() {
+        let error = call_with(FailingCredentials(|| CredentialsError::not_loaded("no credentials"))).await;
+        assert_eq!(error.aws().map(|aws| aws.kind), Some(AwsErrorKind::AccessDenied), "{error:?}");
+        assert!(!error.is_retryable());
+        let error = call_with(FailingCredentials(|| CredentialsError::invalid_configuration("bad profile"))).await;
+        assert_eq!(error.aws().map(|aws| aws.kind), Some(AwsErrorKind::AccessDenied), "{error:?}");
+        let error =
+            call_with(FailingCredentials(|| CredentialsError::provider_timed_out(Duration::from_secs(5)))).await;
+        assert_eq!(error.aws().map(|aws| aws.kind), Some(AwsErrorKind::Timeout), "{error:?}");
+        assert!(error.is_retryable());
+        // A provider that could not reach its source (IMDS, STS) may succeed when retried.
+        let error = call_with(FailingCredentials(|| CredentialsError::provider_error("connection refused"))).await;
+        assert_eq!(error.aws().map(|aws| aws.kind), Some(AwsErrorKind::Network), "{error:?}");
+    }
 
     #[test]
     fn classifies_common_codes() {
