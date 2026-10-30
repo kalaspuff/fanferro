@@ -9,6 +9,8 @@ from typing import Any
 import pytest
 
 import fanferro
+import fanferro.client as client_module
+import fanferro.consumer as consumer_module
 from tests.conftest import ClientFactory
 from tests.helpers import OrderCreated, consume_until, wait_for
 
@@ -172,6 +174,20 @@ async def test_a_busy_consumer_releases_unfinished_messages_at_once(client_facto
     assert counts["visible"] == 1, counts
 
 
+# Stopping wakes the dispatcher's and the event pump's waits and aborts the long poll in flight: it
+# takes milliseconds. Bounds tight enough to notice a stop that waited for the dispatcher's 0.5 s or
+# the pump's 1 s wait instead failed on loaded CI runners, so the tests lengthen both waits: a stop
+# that waits for them runs into their 5 s fallbacks, far above a bound that a slow runner keeps to.
+STOPPED_WITHOUT_WAITING = 3.0
+
+
+@pytest.fixture
+def long_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(consumer_module, "_DELIVERY_WAIT", 30.0)
+    monkeypatch.setattr(client_module, "_EVENTS_WAIT", 30.0)
+
+
+@pytest.mark.usefixtures("long_waits")
 async def test_stop_returns_immediately_when_idle(client_factory: ClientFactory, name: Any) -> None:
     client = client_factory()
     queue = client.queue(name("idle-stop"))
@@ -188,7 +204,7 @@ async def test_stop_returns_immediately_when_idle(client_factory: ClientFactory,
         await consumer.stop()
         elapsed = time.monotonic() - began
     assert consumer.state == "stopped"
-    assert elapsed < 0.25, f"stop() took {elapsed:.3f} s"
+    assert elapsed < STOPPED_WITHOUT_WAITING, f"stop() took {elapsed:.3f} s"
 
 
 async def test_long_polls_outlast_a_configured_operation_timeout(client_factory: ClientFactory, name: Any) -> None:
@@ -293,6 +309,7 @@ async def test_stop_can_wait_for_the_last_long_poll(client_factory: ClientFactor
     assert time.monotonic() - began < 5
 
 
+@pytest.mark.usefixtures("long_waits")
 async def test_client_close_is_immediate_and_keeps_events(memory_client: fanferro.Client, name: Any) -> None:
     queue = memory_client.queue(name("close"))
     kinds: list[str] = []
@@ -309,7 +326,7 @@ async def test_client_close_is_immediate_and_keeps_events(memory_client: fanferr
     await memory_client.close()  # stops the consumer and the event pump
     elapsed = time.monotonic() - began
     assert consumer.state == "stopped"
-    assert elapsed < 0.25, f"close() took {elapsed:.3f} s"
+    assert elapsed < STOPPED_WITHOUT_WAITING, f"close() took {elapsed:.3f} s"
     assert "consumer.stopped" in kinds, "the engine's last event is dispatched before close() returns"
 
 
