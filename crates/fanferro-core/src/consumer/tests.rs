@@ -771,6 +771,55 @@ async fn an_abort_during_a_graceful_stop_still_guards_against_the_orphaned_poll(
     engine.close(true).await;
 }
 
+async fn aws_fixture() -> Fixture {
+    // The memory broker playing AWS: aborted long polls are guarded against only there.
+    let broker = MemoryBroker::new("us-east-1", "000000000000");
+    let mut backend = broker.backend();
+    backend.kind = crate::backend::BackendKind::Aws;
+    let client = Client::with_backend(backend, ClientConfig::default()).unwrap();
+    let url = client.backend().sqs.create_queue("work", &StringMap::new(), &StringMap::new()).await.unwrap();
+    Fixture { broker, client, url }
+}
+
+#[tokio::test(start_paused = true)]
+async fn without_a_poll_in_flight_an_abort_does_not_hide_released_messages() {
+    // A busy consumer: its poller waits for a free slot, no long poll is in flight. Messages it
+    // releases when stopping are visible again at once instead of after the poll's wait time.
+    let fx = aws_fixture().await;
+    fx.send("held").await;
+    let engine = fx.engine(|c| {
+        c.wait_time = 20.0;
+        c.max_in_flight = 1;
+        c.min_receive_batch = Some(1);
+    });
+    let delivery = collect(&engine, 1).await.remove(0);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    engine.stop_receiving(true).await;
+    delivery.lease.release().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!fx.stored()[0].in_flight, "the release waited for a long poll that was never sent");
+    engine.close(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_aborted_poll_hides_released_messages_until_its_wait_time_ends() {
+    let fx = aws_fixture().await;
+    fx.send("held").await;
+    let engine = fx.engine(|c| {
+        c.wait_time = 20.0;
+        c.min_receive_batch = Some(1);
+    });
+    let delivery = collect(&engine, 1).await.remove(0);
+    tokio::time::sleep(Duration::from_secs(15)).await; // the next long poll has 5 s to go
+    engine.stop_receiving(true).await;
+    delivery.lease.release().await.unwrap();
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert!(fx.stored()[0].in_flight, "released into the window of the aborted poll");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(!fx.stored()[0].in_flight, "visible once the aborted poll is over, not 20 s after the stop");
+    engine.close(true).await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn buffered_deliveries_are_returned_after_receiving_stops() {
     let fx = fixture(ClientConfig::default()).await;

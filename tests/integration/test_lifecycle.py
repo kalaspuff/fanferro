@@ -146,6 +146,32 @@ async def test_unfinished_messages_are_left_when_not_released(client_factory: Cl
     assert consumer.stats()["engine"]["messages_released"] == 0
 
 
+async def test_a_busy_consumer_releases_unfinished_messages_at_once(client_factory: ClientFactory, name: Any) -> None:
+    # No long poll is in flight while every slot is busy (the poller waits for a free one), so
+    # stopping has no aborted poll to guard against: the released message is visible right away
+    # instead of after the long poll's wait time (on SQS).
+    client = client_factory()
+    queue = client.queue(name("busy-stop"), attributes=fanferro.QueueAttributes(visibility_timeout=60))
+    started = asyncio.Event()
+    policy = fanferro.ShutdownPolicy(drain_timeout=0, cancel_timeout=2)
+    consumer = client.consumer(queue, wait_time=20, concurrency=1, prefetch=0, shutdown=policy)
+
+    @consumer.route(OrderCreated)
+    async def handle(order: OrderCreated) -> None:
+        started.set()
+        await asyncio.sleep(3600)
+
+    async with client:
+        await queue.send(OrderCreated(order_id=1))
+        await consumer.start()
+        await asyncio.wait_for(started.wait(), 15)
+        await asyncio.sleep(0.5)
+        await consumer.stop()
+        await asyncio.sleep(2)
+        counts = await queue.approximate_count()
+    assert counts["visible"] == 1, counts
+
+
 async def test_stop_returns_immediately_when_idle(client_factory: ClientFactory, name: Any) -> None:
     client = client_factory()
     queue = client.queue(name("idle-stop"))

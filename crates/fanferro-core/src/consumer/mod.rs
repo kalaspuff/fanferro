@@ -215,8 +215,8 @@ pub(crate) struct EngineInner {
     paused: watch::Sender<bool>,
     state: Mutex<EngineState>,
     pollers: Mutex<Vec<JoinHandle<()>>>,
-    /// Whether receive loops may still be running (set by `start`, cleared once they all ended).
-    polling: AtomicBool,
+    /// Receive calls in flight (see [`EngineInner::begin_receive`]).
+    receives: Mutex<ReceivesInFlight>,
     /// Leases dropped without a settlement are left to time out instead of released (see
     /// [`ConsumerEngine::leave_unsettled`]).
     pub(crate) leave_dropped: AtomicBool,
@@ -231,6 +231,23 @@ pub(crate) struct EngineInner {
     orphaned_receives_until: Mutex<Option<Instant>>,
     /// Envelopes applied while decoding (see [`ConsumerEngine::with_envelopes`]).
     envelopes: Option<EnvelopeSet>,
+}
+
+/// The `ReceiveMessage` calls in flight.
+#[derive(Debug, Default)]
+struct ReceivesInFlight {
+    count: usize,
+    /// When the latest call was sent.
+    latest_start: Option<Instant>,
+}
+
+/// A registered receive call (see [`EngineInner::begin_receive`]); unregisters it when dropped.
+pub(crate) struct ReceiveInFlight<'a>(&'a EngineInner);
+
+impl Drop for ReceiveInFlight<'_> {
+    fn drop(&mut self) {
+        self.0.receives.lock().count -= 1;
+    }
 }
 
 /// The receiving end of the delivery channel plus deliveries a smaller `next_batch` left over.
@@ -277,6 +294,19 @@ impl EngineInner {
             }
             None => timeout,
         }
+    }
+
+    /// Registers a `ReceiveMessage` call about to be sent, for as long as the returned guard lives;
+    /// `None` once receiving stopped (the call must not be sent then: a stop that aborts the
+    /// calls in flight guards against those it saw, see [`EngineInner::visibility_floor`]).
+    pub(crate) fn begin_receive(&self) -> Option<ReceiveInFlight<'_>> {
+        let mut receives = self.receives.lock();
+        if self.receive_token.is_cancelled() {
+            return None;
+        }
+        receives.count += 1;
+        receives.latest_start = Some(Instant::now());
+        Some(ReceiveInFlight(self))
     }
 
     /// Registers leases for received messages and decodes them in order.
@@ -550,7 +580,7 @@ impl ConsumerEngine {
                 paused: watch::Sender::new(false),
                 state: Mutex::new(EngineState::Created),
                 pollers: Mutex::new(Vec::new()),
-                polling: AtomicBool::new(false),
+                receives: Mutex::new(ReceivesInFlight::default()),
                 leave_dropped: AtomicBool::new(false),
                 background: Mutex::new(Vec::new()),
                 decoders: TaskTracker::new(),
@@ -601,7 +631,6 @@ impl ConsumerEngine {
             background.push(inner.runtime.spawn(heartbeat::heartbeat_loop(inner.clone())));
         }
         *inner.background.lock() = background;
-        inner.polling.store(true, Ordering::SeqCst);
         let pollers =
             (0..inner.settings.pollers).map(|_| inner.runtime.spawn(poller::poll_loop(inner.clone()))).collect();
         *inner.pollers.lock() = pollers;
@@ -691,24 +720,27 @@ impl ConsumerEngine {
                 *state = EngineState::Stopping;
             }
         }
+        // Cancelled before the calls in flight are looked at: pollers register a call only while
+        // receiving goes on (see `begin_receive`), so none is sent unseen.
+        self.inner.receive_token.cancel();
         if abort
             && !self.inner.abort_token.is_cancelled()
             && self.inner.client.backend().kind == crate::backend::BackendKind::Aws
-            && self.inner.polling.load(Ordering::SeqCst)
         {
-            *self.inner.orphaned_receives_until.lock() = Some(Instant::now() + self.inner.settings.wait_time);
+            let receives = self.inner.receives.lock();
+            if receives.count > 0
+                && let Some(started) = receives.latest_start
+            {
+                // The latest call is served the longest: up to its wait time after it was sent.
+                *self.inner.orphaned_receives_until.lock() = Some(started + self.inner.settings.wait_time);
+            }
         }
-        self.inner.receive_token.cancel();
         if abort {
             self.inner.abort_token.cancel();
         }
         let pollers: Vec<_> = self.inner.pollers.lock().drain(..).collect();
-        let joined = !pollers.is_empty();
         for poller in pollers {
             let _ = poller.await;
-        }
-        if joined {
-            self.inner.polling.store(false, Ordering::SeqCst);
         }
         self.inner.decoders.close();
         self.inner.decoders.wait().await;

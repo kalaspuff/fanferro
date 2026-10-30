@@ -35,6 +35,12 @@ pub(crate) async fn poll_loop(inner: Arc<EngineInner>) {
             visibility_timeout: Some(inner.settings.visibility_timeout),
             attempt_id: inner.settings.fifo.then(|| uuid::Uuid::new_v4().to_string()),
         };
+        let Some(receiving) = inner.begin_receive() else {
+            if let Some(limiter) = &inner.rate_limiter {
+                limiter.refund(u32::try_from(requested).unwrap_or(0));
+            }
+            break;
+        };
         inner.metrics.receive_requests.inc();
         let result = tokio::select! {
             () = inner.abort_token.cancelled() => {
@@ -45,6 +51,7 @@ pub(crate) async fn poll_loop(inner: Arc<EngineInner>) {
             }
             result = inner.client.backend().sqs.receive_messages(request) => result,
         };
+        drop(receiving);
         if inner.receive_token.is_cancelled() {
             // Receiving stopped while this poll was in flight: hand its messages straight back.
             if let Ok(messages) = result
@@ -140,12 +147,12 @@ async fn acquire_permits(inner: &EngineInner) -> Option<Vec<OwnedSemaphorePermit
     Some(permits)
 }
 
-/// Makes messages visible again right away (in batches of ten).
+/// Makes messages visible again right away (in batches of ten), or once an aborted long poll of
+/// another poller is over.
 async fn release_now(inner: &EngineInner, messages: Vec<ReceivedMessage>) {
-    let mut entries: Vec<VisibilityChange> = messages
-        .into_iter()
-        .map(|m| VisibilityChange { receipt_handle: m.receipt_handle, timeout: std::time::Duration::ZERO })
-        .collect();
+    let timeout = inner.visibility_floor(std::time::Duration::ZERO);
+    let mut entries: Vec<VisibilityChange> =
+        messages.into_iter().map(|m| VisibilityChange { receipt_handle: m.receipt_handle, timeout }).collect();
     while !entries.is_empty() {
         let rest = entries.split_off(entries.len().min(crate::publish::MAX_BATCH_ENTRIES));
         let count = entries.len();
