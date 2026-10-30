@@ -89,7 +89,9 @@ async def handle(message: fanferro.Message[Job]) -> None:
 ```
 
 Also `requeue(delay=...)`, `dead_letter(reason)`, `release()`, `discard(reason)`. With
-`auto_ack=False`, unsettled messages are left to time out (heartbeats stop when the handler ends).
+`auto_ack=False`, unsettled messages are left to time out: heartbeats stop and the handler slot is
+free when the handler ends, and the message can still be settled (by a task the handler started)
+until its visibility timeout runs out.
 
 An explicit `await message.ack()` (or any other settlement) inside a handler resolves once SQS
 confirmed it, and the handler keeps its concurrency slot until then. Returning instead hands the

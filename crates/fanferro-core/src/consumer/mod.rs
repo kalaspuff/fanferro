@@ -217,6 +217,9 @@ pub(crate) struct EngineInner {
     pollers: Mutex<Vec<JoinHandle<()>>>,
     /// Whether receive loops may still be running (set by `start`, cleared once they all ended).
     polling: AtomicBool,
+    /// Leases dropped without a settlement are left to time out instead of released (see
+    /// [`ConsumerEngine::leave_unsettled`]).
+    pub(crate) leave_dropped: AtomicBool,
     background: Mutex<Vec<JoinHandle<()>>>,
     decoders: TaskTracker,
     /// Settlements running in the background (see [`Delivery::ack_in_background`]).
@@ -548,6 +551,7 @@ impl ConsumerEngine {
                 state: Mutex::new(EngineState::Created),
                 pollers: Mutex::new(Vec::new()),
                 polling: AtomicBool::new(false),
+                leave_dropped: AtomicBool::new(false),
                 background: Mutex::new(Vec::new()),
                 decoders: TaskTracker::new(),
                 settlements: TaskTracker::new(),
@@ -710,10 +714,20 @@ impl ConsumerEngine {
         self.inner.decoders.wait().await;
     }
 
+    /// From now on, deliveries dropped without a settlement are left to time out instead of
+    /// released (a stop that does not release unfinished messages: handlers that are cancelled,
+    /// messages still waiting for one).
+    pub fn leave_unsettled(&self) {
+        self.inner.leave_dropped.store(true, Ordering::SeqCst);
+    }
+
     /// Closes the engine: releases (or abandons) unsettled messages, flushes pending
     /// settlements and stops the heartbeat. Call after [`ConsumerEngine::stop_receiving`]
     /// and after in-flight handlers finished or were cancelled.
     pub async fn close(&self, release_unsettled: bool) {
+        if !release_unsettled {
+            self.leave_unsettled();
+        }
         self.stop_receiving(false).await;
         // Background acks complete first: they need the settle loop, which stops below.
         self.inner.settlements.close();

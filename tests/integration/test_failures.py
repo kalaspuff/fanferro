@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 import pytest
@@ -8,7 +9,7 @@ import pytest
 import fanferro
 from fanferro.idempotency import idempotent
 from tests.conftest import ClientFactory
-from tests.helpers import OrderCreated, consume_until, drain_queue
+from tests.helpers import OrderCreated, consume_until, drain_queue, wait_for
 
 FAST_RETRY = fanferro.Backoff.constant(0)
 
@@ -123,6 +124,49 @@ async def test_explicit_settlement(client_factory: ClientFactory, name: Any) -> 
         await asyncio.sleep(0.2)
     assert seen == [1, 2]
     assert (await queue.approximate_count())["visible"] == 0
+
+
+async def test_unsettled_messages_are_left_to_time_out(client_factory: ClientFactory, name: Any) -> None:
+    # auto_ack=False: a message the handler does not settle comes back once its visibility timeout
+    # ran out. It was released at once (and redelivered in a loop) when its delivery was dropped,
+    # or kept invisible by heartbeats for as long as the delivery stayed referenced.
+    client = client_factory()
+    queue = client.queue(name("unsettled"), attributes=fanferro.QueueAttributes(visibility_timeout=3))
+    received: list[float] = []
+    consumer = client.consumer(queue, wait_time=1, auto_ack=False, heartbeat=fanferro.Heartbeat(interval=0.5))
+
+    @consumer.route(OrderCreated)
+    async def handle(message: fanferro.Message[OrderCreated]) -> None:
+        received.append(time.monotonic())
+        if len(received) == 2:
+            await message.ack()
+
+    async with client:
+        await queue.send(OrderCreated(order_id=1))
+        await consume_until(consumer, lambda: len(received) == 2, timeout=20)
+        assert (await queue.approximate_count())["visible"] == 0
+    assert received[1] - received[0] >= 2.5, received
+    assert consumer.stats()["engine"]["messages_released"] == 0
+
+
+async def test_unsettled_messages_can_be_settled_after_the_handler(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory()
+    queue = client.queue(name("settle-later"))
+    kept: list[fanferro.Message[Any]] = []
+    consumer = client.consumer(queue, wait_time=1, auto_ack=False)
+
+    @consumer.route(OrderCreated)
+    async def handle(message: fanferro.Message[OrderCreated]) -> None:
+        kept.append(message)
+
+    async with client:
+        await queue.send(OrderCreated(order_id=1))
+        await consumer.start()
+        await wait_for(lambda: len(kept) == 1 and consumer.stats()["processed"] == 1)
+        await kept[0].ack()
+        await consumer.stop()
+        assert await queue.approximate_count() == {"visible": 0, "in_flight": 0, "delayed": 0}
+    assert consumer.stats()["engine"]["messages_acked"] == 1
 
 
 async def test_unroutable_and_undecodable(client_factory: ClientFactory, name: Any) -> None:

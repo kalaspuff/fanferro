@@ -758,6 +758,9 @@ class Consumer:
         policy = self.shutdown_policy
         self._emit(EventKind.CONSUMER_STOPPING, f"consumer {self.name} stopping", in_flight=self._active)
         engine = self._engine
+        if not policy.release_unfinished:
+            # Also the messages of cancelled tasks and of FIFO groups that never reached a handler.
+            engine.leave_unsettled()
         stop_receiving = asyncio.ensure_future(engine.stop_receiving(self._aborting))
         try:
             # The dispatcher exits on its own: `next_batch` returns as soon as receiving stops.
@@ -1101,6 +1104,10 @@ class Consumer:
             except (LeaseError, FanferroError) as error:
                 self._emit(EventKind.MESSAGE_ACK_FAILED, "failed to ack message", message=message, exception=error)
                 return
+        elif not message.settled and message.delivery is not None:
+            # Left to time out: heartbeats stop and the slot is free, but the message can still be
+            # settled (by a task the handler started) until its visibility timeout runs out.
+            message.delivery.leave()
         self._stats.processed += 1
         if self._client.events.is_enabled(EventKind.MESSAGE_PROCESSED):
             self._emit(
