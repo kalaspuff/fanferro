@@ -206,6 +206,46 @@ async fn topics_lookup_create_update() {
 }
 
 #[tokio::test]
+async fn filter_policies_move_between_scopes() {
+    let client = client();
+    let topic = client
+        .ensure_topic(&TopicSpec { name: Some("events".into()), policy: create(), ..TopicSpec::default() })
+        .await
+        .unwrap()
+        .resource
+        .unwrap();
+    let queue = client
+        .ensure_queue(&QueueSpec { name: Some("listener".into()), policy: create(), ..QueueSpec::default() })
+        .await
+        .unwrap()
+        .resource
+        .unwrap();
+    let flat = (r#"{"type":["a"]}"#, "MessageAttributes");
+    let nested = (r#"{"detail":{"type":["a"]}}"#, "MessageBody");
+    let mut spec = SubscriptionSpec {
+        topic_arn: topic.arn.clone(),
+        queue_arn: queue.arn.clone(),
+        queue_url: queue.url.clone(),
+        attributes: StringMap::new(),
+        manage_queue_policy: false,
+        dead_letter_queue_url: None,
+        dead_letter_queue_arn: None,
+        policy: ensure(),
+    };
+    // A nested policy needs the message body scope: the scope changes first, and back last.
+    for (index, (filter_policy, scope)) in [flat, nested, flat].into_iter().enumerate() {
+        spec.attributes = attrs(&[("FilterPolicy", filter_policy), ("FilterPolicyScope", scope)]);
+        let report = client.ensure_subscription(&spec).await.unwrap();
+        assert!(report.error.is_none(), "step {index}: {:?}", report.error);
+        let attributes = report.resource.unwrap().attributes;
+        assert_eq!(
+            (attributes["FilterPolicy"].as_str(), attributes["FilterPolicyScope"].as_str()),
+            (filter_policy, scope)
+        );
+    }
+}
+
+#[tokio::test]
 async fn subscriptions_and_queue_policy() {
     let client = client();
     let topic = client
