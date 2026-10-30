@@ -137,3 +137,56 @@ def test_fork_child_gets_a_fresh_runtime() -> None:
         "child published",
         "child exit status 0",
     ], result.stdout + result.stderr
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux" or not hasattr(os, "fork"),
+    reason="fork() of a multi-threaded process is only dependable on Linux",
+)
+def test_fork_while_runtime_threads_complete_futures_does_not_hang_the_child() -> None:
+    # Regression: the child closed the event loop bridges it inherited, which takes a lock that a
+    # runtime thread of the parent may have held at fork() (it queues finished futures there). That
+    # thread does not exist in the child, so the child waited for the lock forever inside fork().
+    result = run_python("""
+        import asyncio
+        import os
+        import threading
+        import time
+        import warnings
+        from fanferro.testing import memory_client
+
+        warnings.simplefilter("ignore", DeprecationWarning)  # "multi-threaded process" fork warning
+        running = threading.Event()
+        stop = threading.Event()
+
+        async def complete_futures():
+            core = await memory_client()._core()
+            while not stop.is_set():
+                # Completed by runtime threads on their timers, whatever the main thread does.
+                await asyncio.gather(*(core.next_events(1, 0.0) for _ in range(200)))
+                running.set()
+
+        thread = threading.Thread(target=asyncio.run, args=(complete_futures(),), daemon=True)
+        thread.start()
+        running.wait(10)
+        forks = hung = 0
+        deadline = time.monotonic() + 5
+        while forks < 150 and time.monotonic() < deadline:
+            pid = os.fork()
+            if pid == 0:
+                os._exit(0)
+            forks += 1
+            waited = time.monotonic() + 2
+            while os.waitpid(pid, os.WNOHANG) == (0, 0):
+                if time.monotonic() > waited:
+                    hung += 1
+                    os.kill(pid, 9)
+                    os.waitpid(pid, 0)
+                    break
+                time.sleep(0.001)
+        stop.set()
+        thread.join(5)
+        print("forks", forks > 20, "hung", hung, flush=True)
+    """)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["forks", "True", "hung", "0"], result.stdout + result.stderr
