@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import sys
 import typing
 from typing import Any
 
-from fanferro.codecs._base import JSON_CONTENT_TYPE, EncodedBody, is_json_content_type, media_type
+from fanferro.codecs._base import JSON_CONTENT_TYPE, EncodedBody, is_json_content_type, media_type, referenced_types
 from fanferro.errors import DecodeError, EncodeError
 
 __all__ = ["PydanticCodec"]
@@ -36,6 +37,23 @@ def _names_and_aliases() -> dict[str, Any]:
 
     major, minor = (int(part) for part in pydantic.VERSION.split(".")[:2])
     return {"by_alias": True, "by_name": True} if (major, minor) >= (2, 11) else {}
+
+
+def _other_codec(target: Any) -> bool:
+    """Whether ``target`` is a dataclass or a msgspec struct (not one of pydantic's own)."""
+    if not isinstance(target, type):
+        return False
+    pydantic = _pydantic()
+    if pydantic is not None and issubclass(target, pydantic.BaseModel):
+        return False
+    if dataclasses.is_dataclass(target) and not _is_pydantic_dataclass(target):
+        return True
+    msgspec = sys.modules.get("msgspec")
+    return msgspec is not None and issubclass(target, msgspec.Struct)
+
+
+def _is_pydantic_dataclass(target: type) -> bool:
+    return "__pydantic_validator__" in vars(target)
 
 
 class PydanticCodec:
@@ -89,7 +107,11 @@ class PydanticCodec:
             if issubclass(target, pydantic.BaseModel):
                 return True
             return typing.is_typeddict(target)
-        return typing.get_origin(target) is not None
+        if typing.get_origin(target) is None:
+            return False
+        # Typing constructs, unless they contain dataclasses or msgspec structs, which their own
+        # codecs decode, whether pydantic is imported or not (and pydantic cannot build structs).
+        return not any(_other_codec(referenced) for referenced in referenced_types(target))
 
     def decode(self, data: bytes, target: Any, content_type: str | None) -> Any:
         import pydantic

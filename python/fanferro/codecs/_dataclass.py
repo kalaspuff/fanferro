@@ -31,6 +31,7 @@ from fanferro.codecs._base import (
     is_json_content_type,
     loads_json,
     media_type,
+    referenced_types,
     to_jsonable,
 )
 from fanferro.errors import DecodeError, EncodeError
@@ -383,6 +384,15 @@ def _class_converter(target: type) -> _Converter:
     return convert_instance
 
 
+def _converted(target: Any) -> bool:
+    """Whether the converter turns JSON data into something else for ``target``."""
+    if typing.get_origin(target) in (tuple, set, frozenset) or target in (tuple, set, frozenset):
+        return True
+    return isinstance(target, type) and (
+        dataclasses.is_dataclass(target) or issubclass(target, enum.Enum) or target in _PARSERS
+    )
+
+
 # One encoder for every call: json.dumps would create one per call for these options.
 _ENCODER = json.JSONEncoder(separators=(",", ":"), ensure_ascii=False)
 
@@ -417,7 +427,11 @@ class DataclassCodec:
             and media_type(content_type) != "text/plain"
         ):
             return False
-        return isinstance(target, type) and dataclasses.is_dataclass(target)
+        if isinstance(target, type) and dataclasses.is_dataclass(target):
+            return True
+        # Other targets built from what the converter makes of JSON (`list[Item]`, `Item | None`,
+        # enums, datetimes, tuples and sets): left to the JSON codec, they stayed plain data.
+        return any(_converted(referenced) for referenced in referenced_types(target))
 
     def decode(self, data: bytes, target: Any, content_type: str | None) -> Any:
         try:

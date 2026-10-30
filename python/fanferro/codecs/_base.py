@@ -7,6 +7,7 @@ import datetime
 import decimal
 import enum
 import json
+import typing
 import uuid
 from typing import Any, NamedTuple, Protocol, runtime_checkable
 
@@ -98,6 +99,30 @@ def loads_json(data: bytes | bytearray | str) -> Any:
     if type(data) is bytes and len(data) > 1 and data[0] not in _NOT_UTF8_LEADS and data[1]:
         return json.loads(data.decode("utf-8", "surrogatepass"))
     return json.loads(data)
+
+
+def referenced_types(target: Any) -> list[Any]:
+    """``target`` and everything its typing constructs refer to, each once.
+
+    That is the arguments of generic types and unions, the metadata of ``Annotated``, the values
+    of ``type`` aliases (recursive ones too) and the supertypes of ``NewType``.
+    """
+    seen: list[Any] = []
+    pending = [target]
+    while pending:
+        current = pending.pop()
+        if any(current is known for known in seen):
+            continue
+        seen.append(current)
+        if isinstance(current, typing.TypeAliasType):
+            pending.append(current.__value__)
+        elif isinstance(current, typing.NewType):
+            pending.append(current.__supertype__)
+        origin = typing.get_origin(current)
+        if origin is not None:
+            pending.append(origin)
+            pending.extend(typing.get_args(current))
+    return seen
 
 
 # Type checks of `to_jsonable`, built once (a `X | Y` union would be built anew for every value).

@@ -5,6 +5,9 @@ import datetime
 import decimal
 import enum
 import json
+import subprocess
+import sys
+import textwrap
 import uuid
 from collections.abc import Callable
 from typing import Annotated, Any, Literal, NamedTuple
@@ -145,6 +148,57 @@ def test_pydantic_models_with_aliases(registry: CodecRegistry) -> None:
     # The model's own serialization setting is kept unless the codec overrides it.
     assert json.loads(registry.encode(Renamed(uid=3)).data) == {"uid": 3}
     assert json.loads(PydanticCodec(by_alias=False).encode(Renamed(uid=3)).data) == {"user_id": 3}
+
+
+def test_containers_decode_into_their_item_types(registry: CodecRegistry) -> None:
+    # pydantic is imported here: containers of dataclasses still go to the dataclass codec (as when
+    # it is not, see below), and containers of msgspec structs to msgspec (pydantic failed on them).
+    assert registry.decode(b'[{"sku": "a", "qty": 2}]', list[Item], None) == [Item("a", 2)]
+    assert registry.decoder_for(list[Item], None).name == "dataclass"
+    assert registry.decode(b'{"x": {"sku": "b"}}', dict[str, Item], None) == {"x": Item("b")}
+    assert registry.decode(b"null", Item | None, None) is None
+    assert registry.decode(b'[{"x": 1, "y": 2}]', list[Point], None) == [Point(1, 2)]
+    assert registry.decoder_for(list[Point], None).name == "msgspec"
+    assert registry.decode(b'[{"id": 1, "name": "a"}]', list[Model], None) == [Model(id=1, name="a")]
+    positive = Annotated[int, pydantic.Field(gt=0)]
+    assert registry.decoder_for(positive, None).name == "pydantic"
+    with pytest.raises(fanferro.DecodeError):
+        registry.decode(b"0", positive, None)
+    assert registry.decode(b'"red"', Color, None) is Color.RED
+    assert registry.decode(b"[1, 2]", list[int], None) == [1, 2]
+
+
+def test_containers_of_dataclasses_without_pydantic() -> None:
+    # In a process that never imported pydantic, containers went to the JSON codec: dicts, not items.
+    code = """
+        import dataclasses, enum, sys
+        from fanferro.codecs import CodecRegistry
+
+        @dataclasses.dataclass
+        class Item:
+            sku: str
+
+        class Color(enum.Enum):
+            RED = "red"
+
+        registry = CodecRegistry()
+        print(registry.decode(b'[{"sku": "a"}]', list[Item], None))
+        print(registry.decode(b'{"sku": "b"}', Item | None, None))
+        print(registry.decode(b'["red"]', list[Color], None))
+        print(registry.decode(b'[1, "x"]', tuple[int, str], None))
+        print("pydantic" in sys.modules)
+    """
+    result = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(code)], capture_output=True, text=True, timeout=60, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "[Item(sku='a')]",
+        "Item(sku='b')",
+        "[<Color.RED: 'red'>]",
+        "(1, 'x')",
+        "False",
+    ]
 
 
 def test_msgspec(registry: CodecRegistry) -> None:

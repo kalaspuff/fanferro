@@ -1,11 +1,11 @@
-"""msgspec codec (``msgspec.Struct`` types)."""
+"""msgspec codec (``msgspec.Struct`` types, and containers of them)."""
 
 from __future__ import annotations
 
 import sys
 from typing import Any
 
-from fanferro.codecs._base import JSON_CONTENT_TYPE, EncodedBody, is_json_content_type, media_type
+from fanferro.codecs._base import JSON_CONTENT_TYPE, EncodedBody, is_json_content_type, media_type, referenced_types
 from fanferro.errors import DecodeError, EncodeError
 
 __all__ = ["MsgspecCodec"]
@@ -38,7 +38,13 @@ class MsgspecCodec:
 
     def can_decode(self, target: Any, content_type: str | None) -> bool:
         struct = _struct()
-        if struct is None or not (isinstance(target, type) and issubclass(target, struct)):
+        if struct is None:
+            return False
+        is_struct = isinstance(target, type) and issubclass(target, struct)
+        # Containers of structs too (`list[Point]`): msgspec decodes typing constructs.
+        if not is_struct and not any(
+            isinstance(referenced, type) and issubclass(referenced, struct) for referenced in referenced_types(target)
+        ):
             return False
         return content_type is None or is_json_content_type(content_type) or media_type(content_type) == "text/plain"
 
@@ -48,7 +54,7 @@ class MsgspecCodec:
         try:
             return msgspec.json.decode(data, type=target)
         except msgspec.DecodeError as error:
-            raise DecodeError(f"cannot decode {target.__name__}: {error}") from error
+            raise DecodeError(f"cannot decode {getattr(target, '__name__', target)}: {error}") from error
 
     def type_name(self, target: Any) -> str | None:
         return None
