@@ -15,6 +15,7 @@ import pytest
 from google.protobuf import struct_pb2, timestamp_pb2
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from pydantic.alias_generators import to_camel
 
 import fanferro
 from fanferro.codecs import (
@@ -113,6 +114,37 @@ def test_pydantic(registry: CodecRegistry) -> None:
     with pytest.raises(fanferro.DecodeError, match="validation failed"):
         registry.decode(b'{"id": "x"}', Model, "application/json")
     assert isinstance(registry.decoder_for(Model, None), PydanticCodec)
+
+
+class Account(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(alias_generator=to_camel)
+
+    user_id: int
+    display_name: str = ""
+
+
+class Renamed(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(serialize_by_alias=True)
+
+    user_id: int = pydantic.Field(alias="uid")
+
+
+def test_pydantic_models_with_aliases(registry: CodecRegistry) -> None:
+    # Bodies carry field names unless the codec or the model says otherwise; validation accepted
+    # only aliases, so a model with aliases could not decode its own messages.
+    encoded = registry.encode(Account(userId=7, displayName="Ada"))
+    assert json.loads(encoded.data) == {"user_id": 7, "display_name": "Ada"}
+    assert registry.decode(encoded.data, Account, encoded.content_type) == Account(userId=7, displayName="Ada")
+    by_alias = PydanticCodec(by_alias=True).encode(Account(userId=7))
+    assert json.loads(by_alias.data) == {"userId": 7, "displayName": ""}
+    assert registry.decode(by_alias.data, Account, "application/json") == Account(userId=7)
+    assert registry.decode(b'[{"userId": 1}, {"user_id": 2}]', list[Account], None) == [
+        Account(userId=1),
+        Account(userId=2),
+    ]
+    # The model's own serialization setting is kept unless the codec overrides it.
+    assert json.loads(registry.encode(Renamed(uid=3)).data) == {"uid": 3}
+    assert json.loads(PydanticCodec(by_alias=False).encode(Renamed(uid=3)).data) == {"user_id": 3}
 
 
 def test_msgspec(registry: CodecRegistry) -> None:
