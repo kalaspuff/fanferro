@@ -545,6 +545,8 @@ class Consumer:
             "heartbeat": heartbeat,
             "settle": {"linger": float(self.settle_linger)},
             "dead_letter_queue_url": self._dead_letter_url,
+            # It may be of the other type (DeadLetterPolicy(queue=...)): FIFO needs a group id.
+            "dead_letter_fifo": self._dead_letter_url.endswith(".fifo") if self._dead_letter_url else None,
             "sns_unwrap": "auto" if self.sns_unwrap else "never",
             "auto_confirm_subscriptions": self.auto_confirm_subscriptions,
             "verify_md5": client.verify_md5,

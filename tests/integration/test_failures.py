@@ -65,6 +65,32 @@ async def test_exhausted_retries_dead_letter_with_metadata(client_factory: Clien
     assert info["message_type"] == "test.order_created.v1"
 
 
+@pytest.mark.parametrize(("source", "target"), [("", ".fifo"), (".fifo", "")])
+async def test_dead_letter_queues_of_the_other_type(
+    client_factory: ClientFactory, name: Any, source: str, target: str
+) -> None:
+    # DeadLetterPolicy(queue=...) may name a FIFO queue for a standard one, or the reverse: the
+    # forward was sent as to a queue of the source's type, failed, and the message came back.
+    client = client_factory()
+    queue = client.queue(name("source") + source)
+    dlq = client.queue(name("dlq") + target)
+    policy = fanferro.DeadLetterPolicy(queue=dlq.name)
+    consumer = client.consumer(queue, wait_time=1, dead_letter=policy)
+    dead: list[fanferro.Event] = []
+    client.on("message.dead_lettered", dead.append)
+
+    @consumer.route(OrderCreated)
+    async def handle(order: OrderCreated) -> None:
+        raise fanferro.Reject("invalid order")
+
+    async with client:
+        await dlq.resolve()
+        await queue.send(OrderCreated(order_id=7), group_id="g" if source else None)
+        await consume_until(consumer, lambda: len(dead) == 1)
+        dead_messages = await drain_queue(client, dlq)
+    assert [message.json() for message in dead_messages] == [{"order_id": 7, "total": 0.0}]
+
+
 async def test_handler_actions(client_factory: ClientFactory, name: Any) -> None:
     client = client_factory()
     queue = queue_with_dlq(client, name("actions"))
