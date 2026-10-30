@@ -384,8 +384,14 @@ impl Lease {
         if result.is_ok()
             && let Some(entry) = self.inner.leases.lock().get_mut(&self.id)
         {
+            let settings = &self.inner.settings;
             entry.visible_until = started + timeout;
-            entry.next_heartbeat = started + self.inner.settings.heartbeat_interval.min(timeout / 2);
+            // A heartbeat sets the visibility to `extend_by`: it must not shorten a longer extension,
+            // so it takes over when as little is left as after its own extensions.
+            let takeover =
+                (started + timeout).checked_sub(settings.extend_by).map(|at| at + settings.heartbeat_interval);
+            entry.next_heartbeat =
+                (started + settings.heartbeat_interval.min(timeout / 2)).max(takeover.unwrap_or(started));
         }
         result
     }
