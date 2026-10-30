@@ -114,20 +114,34 @@ fn resource_matches(resource: Option<&Value>, queue_arn: &str) -> bool {
     }
 }
 
+/// Whether a statement's `Condition` lets SNS deliveries of `topic_arn` through. Conditions on the
+/// topic (`aws:SourceArn`) and its account (`aws:SourceAccount`, `aws:SourceOwner`) are evaluated;
+/// any other one is not known to hold, so the statement does not count: the statement fanferro
+/// adds instead is harmless, while counting a statement that does not allow the topic would make
+/// SNS drop its messages.
 fn condition_allows(condition: Option<&Value>, topic_arn: &str) -> bool {
     let Some(Value::Object(operators)) = condition else { return true };
+    let account = topic_arn.split(':').nth(4).unwrap_or_default();
     operators.iter().all(|(operator, clauses)| {
         let Value::Object(clauses) = clauses else { return false };
+        // SNS deliveries always carry these keys, so `...IfExists` is the operator itself.
+        let (negated, wildcard) = match operator.strip_suffix("IfExists").unwrap_or(operator) {
+            "ArnEquals" | "StringEquals" => (false, false),
+            "ArnLike" | "StringLike" => (false, true),
+            "ArnNotEquals" | "StringNotEquals" => (true, false),
+            "ArnNotLike" | "StringNotLike" => (true, true),
+            _ => return false,
+        };
         clauses.iter().all(|(key, values)| {
-            let key = key.to_ascii_lowercase();
-            if key != "aws:sourcearn" {
-                // Unknown conditions (e.g. aws:SourceAccount) are assumed to be satisfied.
-                return true;
-            }
-            let wildcard = operator.contains("Like");
-            as_list(values)
+            let actual = match key.to_ascii_lowercase().as_str() {
+                "aws:sourcearn" => topic_arn,
+                "aws:sourceaccount" | "aws:sourceowner" => account,
+                _ => return false,
+            };
+            let matched = as_list(values)
                 .iter()
-                .any(|v| v.as_str().is_some_and(|v| if wildcard { glob_match(v, topic_arn) } else { v == topic_arn }))
+                .any(|v| v.as_str().is_some_and(|v| if wildcard { glob_match(v, actual) } else { v == actual }));
+            matched != negated
         })
     })
 }
@@ -207,6 +221,36 @@ mod tests {
         let deny =
             serde_json::json!({"Statement": [{"Effect": "Deny", "Principal": "*", "Action": "sqs:SendMessage"}]});
         assert!(!allows_topic(&deny, QUEUE, TOPIC));
+    }
+
+    #[test]
+    fn conditions_on_the_source_account_and_negations_are_evaluated() {
+        let partner = "arn:aws:sns:us-east-1:222222222222:partner-orders";
+        let with = |condition: Value| {
+            serde_json::json!({"Statement": [{
+                "Effect": "Allow", "Principal": {"Service": "sns.amazonaws.com"}, "Action": "sqs:SendMessage",
+                "Resource": QUEUE, "Condition": condition
+            }]})
+        };
+        let own_account = with(serde_json::json!({"StringEquals": {"aws:SourceAccount": "111111111111"}}));
+        assert!(allows_topic(&own_account, QUEUE, TOPIC));
+        assert!(!allows_topic(&own_account, QUEUE, partner), "a topic of another account is not allowed");
+        let all_but_events = with(serde_json::json!({"ArnNotEquals": {"aws:SourceArn": TOPIC}}));
+        assert!(!allows_topic(&all_but_events, QUEUE, TOPIC));
+        assert!(allows_topic(&all_but_events, QUEUE, partner));
+        let not_like = with(serde_json::json!({"ArnNotLike": {"aws:SourceArn": "arn:aws:sns:*:111111111111:*"}}));
+        assert!(!allows_topic(&not_like, QUEUE, TOPIC));
+        assert!(allows_topic(&not_like, QUEUE, partner));
+        let if_exists = with(serde_json::json!({"ArnEqualsIfExists": {"aws:SourceArn": TOPIC}}));
+        assert!(allows_topic(&if_exists, QUEUE, TOPIC));
+        // A condition that cannot be evaluated here does not count as allowing the topic: the
+        // statement fanferro adds instead is harmless.
+        let organization = with(serde_json::json!({"StringEquals": {"aws:SourceOrgID": "o-1234567890"}}));
+        assert!(!allows_topic(&organization, QUEUE, TOPIC));
+        let unknown_operator = with(serde_json::json!({"ForAnyValue:StringEquals": {"aws:SourceArn": [TOPIC]}}));
+        assert!(!allows_topic(&unknown_operator, QUEUE, TOPIC));
+        let added = with_topic_permission(Some(&own_account.to_string()), QUEUE, partner).unwrap().unwrap();
+        assert!(allows_topic(&serde_json::from_str(&added).unwrap(), QUEUE, partner));
     }
 
     #[test]
