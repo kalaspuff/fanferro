@@ -655,6 +655,62 @@ async fn dropped_leases_release_messages() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn left_leases_time_out_and_can_still_be_settled() {
+    let fx = fixture(ClientConfig::default()).await;
+    fx.send("left").await;
+    fx.send("settled later").await;
+    let engine = fx.engine(|c| {
+        c.visibility_timeout = 3.0;
+        c.heartbeat.interval = Some(0.5);
+    });
+    let mut deliveries = collect(&engine, 2).await;
+    deliveries.sort_by_key(body);
+    let (left, later) = (deliveries.remove(0), deliveries.remove(0));
+    for delivery in [&left, &later] {
+        delivery.lease.leave();
+    }
+    assert_eq!(engine.stats().metrics["in_flight"], 0, "the slots are free");
+    drop(left);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(fx.stored().iter().all(|message| message.in_flight), "neither released nor visible yet");
+    later.lease.ack().await.unwrap();
+    // No heartbeat extended the message that was left: it comes back after its visibility timeout.
+    let again = collect_within(&engine, 1, Duration::from_secs(3)).await;
+    assert_eq!(again.iter().map(body).collect::<Vec<_>>(), ["left"]);
+    assert_eq!(engine.stats().metrics["messages_released"], 0);
+    assert_eq!(engine.stats().metrics["messages_acked"], 1);
+    again[0].lease.ack().await.unwrap();
+    engine.close(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn leases_dropped_while_leaving_unsettled_messages_are_not_released() {
+    let fx = fixture(ClientConfig::default()).await;
+    fx.send("unfinished").await;
+    let engine = fx.engine(|c| c.visibility_timeout = 60.0);
+    let delivery = collect(&engine, 1).await.remove(0);
+    engine.leave_unsettled();
+    drop(delivery);
+    engine.close(false).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(fx.stored()[0].in_flight, "left to time out");
+    assert_eq!(engine.stats().metrics["messages_released"], 0);
+    assert_eq!(engine.stats().metrics["in_flight"], 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn closing_without_releasing_leaves_buffered_messages() {
+    let fx = fixture(ClientConfig::default()).await;
+    fx.send("buffered").await;
+    let engine = fx.engine(|c| c.visibility_timeout = 60.0);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    engine.stop_receiving(false).await;
+    engine.close(false).await;
+    assert!(fx.stored()[0].in_flight, "the buffered message was left, not released");
+    assert_eq!(engine.stats().metrics["messages_released"], 0);
+}
+
+#[tokio::test(start_paused = true)]
 async fn next_batch_returns_as_soon_as_receiving_stops() {
     let fx = fixture(ClientConfig::default()).await;
     for abort in [true, false] {

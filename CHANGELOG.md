@@ -8,6 +8,14 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 
 ## [Unreleased]
 
+### Behaviour changes
+
+- With `auto_ack=False`, a message the handler leaves unsettled stops being extended by heartbeats
+  when the handler returns, as documented, and comes back after its visibility timeout. It was
+  released at once when its delivery was garbage-collected (and redelivered in a loop), or extended
+  for up to 12 hours while the application kept a reference to it. Settle such a message before
+  its visibility timeout runs out, or extend it with `message.extend()`.
+
 ## [0.5.0] - 2026-10-17
 
 ### Behaviour changes

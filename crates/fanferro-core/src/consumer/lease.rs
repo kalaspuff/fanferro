@@ -6,7 +6,9 @@
 //! which is what bounds how many unsettled messages a consumer holds at once. A settlement
 //! exchanges that permit for a settling permit (bounding the settlement backlog), so the
 //! poller can refill the slot during the settlement's round trip. Dropping an unsettled lease
-//! releases the message (makes it visible again immediately) as a safety net.
+//! releases the message (makes it visible again immediately) as a safety net, unless the lease
+//! was left ([`Lease::leave`]) or the engine stops without releasing unsettled messages
+//! ([`ConsumerEngine::leave_unsettled`](super::ConsumerEngine::leave_unsettled)).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -159,6 +161,20 @@ impl Lease {
             .lock()
             .get(&self.id)
             .map_or(Duration::ZERO, |entry| entry.visible_until.saturating_duration_since(Instant::now()))
+    }
+
+    /// Stops protecting the message without settling it: heartbeats stop, its in-flight slot is
+    /// freed, and it becomes visible again when its visibility timeout runs out (instead of right
+    /// away, as when an unsettled lease is dropped). Until then it can still be settled. Does
+    /// nothing once a settlement started.
+    pub fn leave(&self) {
+        if self.is_settled() {
+            return;
+        }
+        if self.inner.leases.lock().remove(&self.id).is_some() {
+            self.inner.metrics.in_flight.add(-1);
+        }
+        self.permit.lock().take();
     }
 
     /// Marks the message as being processed (stops counting it as buffered).
@@ -508,6 +524,10 @@ impl Drop for Lease {
         self.inner.metrics.in_flight.add(-1);
         if was_settled {
             // A settlement was interrupted (its future was dropped); nothing left to do.
+            return;
+        }
+        if self.inner.leave_dropped.load(Ordering::SeqCst) {
+            // Stopping without releasing unfinished messages: left to time out.
             return;
         }
         // Dropped without settlement: stop heartbeating and make the message visible again.

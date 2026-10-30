@@ -121,6 +121,31 @@ async def test_drain_timeout_cancels_and_releases(client_factory: ClientFactory,
     assert second == [2]
 
 
+async def test_unfinished_messages_are_left_when_not_released(client_factory: ClientFactory, name: Any) -> None:
+    # ShutdownPolicy(release_unfinished=False): messages whose handlers were cancelled stay invisible
+    # until their visibility timeout runs out (they were released as their deliveries were dropped).
+    client = client_factory()
+    queue = client.queue(name("leave-unfinished"), attributes=fanferro.QueueAttributes(visibility_timeout=60))
+    started: list[int] = []
+    policy = fanferro.ShutdownPolicy(drain_timeout=0, cancel_timeout=2, release_unfinished=False)
+    consumer = client.consumer(queue, wait_time=1, concurrency=3, prefetch=0, shutdown=policy)
+
+    @consumer.route(OrderCreated)
+    async def handle(order: OrderCreated) -> None:
+        started.append(order.order_id)
+        await asyncio.sleep(3600)
+
+    async with client:
+        await queue.send_batch([OrderCreated(order_id=index) for index in range(3)])
+        await consumer.start()
+        await wait_for(lambda: len(started) == 3)
+        await consumer.stop()
+        counts = await queue.approximate_count()
+    assert counts["visible"] == 0, counts
+    assert counts["in_flight"] == 3, counts
+    assert consumer.stats()["engine"]["messages_released"] == 0
+
+
 async def test_stop_returns_immediately_when_idle(client_factory: ClientFactory, name: Any) -> None:
     client = client_factory()
     queue = client.queue(name("idle-stop"))

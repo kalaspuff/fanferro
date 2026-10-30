@@ -77,7 +77,8 @@ These are relied upon across layers; tests cover each of them.
 
 1. **At-least-once, never silently dropped.** A received message is always settled: acked,
    retried (visibility), requeued, dead-lettered, released, or explicitly discarded with an event.
-   Dropping a `Delivery` without settling releases the message (Rust `Drop`).
+   Dropping a `Delivery` without settling releases the message (Rust `Drop`), unless it was left
+   to time out (`auto_ack=False`) or the consumer stops with `release_unfinished=False`.
 2. **Bounded in-flight.** A consumer never holds more than `concurrency + prefetch` unsettled
    messages; pollers acquire one in-flight permit per requested message before calling
    `ReceiveMessage`. A settlement exchanges the message's permit for one of `max_settling`

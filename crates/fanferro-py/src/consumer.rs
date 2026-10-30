@@ -111,6 +111,12 @@ impl PyConsumerEngine {
         })
     }
 
+    /// From now on, deliveries dropped without a settlement are left to time out instead of
+    /// released.
+    fn leave_unsettled(&self) {
+        self.engine.leave_unsettled();
+    }
+
     /// Closes the engine (awaitable); releases unsettled messages when requested.
     fn close<'py>(&self, py: Python<'py>, release_unsettled: bool) -> PyResult<Bound<'py, PyAny>> {
         let engine = self.engine()?;
@@ -342,6 +348,12 @@ impl PyDelivery {
     #[pyo3(signature = (waiting_handlers=None))]
     fn mark_awaited(&self, waiting_handlers: Option<usize>) {
         self.inner.lease.mark_awaited(waiting_handlers);
+    }
+
+    /// Stops protecting the message without settling it: heartbeats stop and it becomes visible
+    /// again when its visibility timeout runs out (it can still be settled until then).
+    fn leave(&self) {
+        self.inner.lease.leave();
     }
 
     /// Deletes the message in the background (not awaitable; the engine tracks the delete and
