@@ -49,6 +49,8 @@ type ConsumerState = Literal["created", "starting", "running", "stopping", "stop
 
 _MAX_VISIBILITY_DELAY = 12 * 3600 - 60
 _MAX_REQUEUE_DELAY = 900.0
+_DELIVERY_WAIT = 0.5
+"""Seconds the dispatcher waits for deliveries per call (stopping wakes it at once)."""
 _BUILTIN_ENVELOPES = (CloudEvents, CloudEventsProtobuf, Raw)
 
 
@@ -847,7 +849,7 @@ class Consumer:
         engine = self._engine
         while not self._stopping:
             try:
-                deliveries = await engine.next_batch(self.concurrency + self.prefetch, 0.5)
+                deliveries = await engine.next_batch(self.concurrency + self.prefetch, _DELIVERY_WAIT)
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # noqa: BLE001 - deliberate catch-all; the error is reported, never swallowed silently

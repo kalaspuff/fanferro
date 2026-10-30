@@ -49,6 +49,8 @@ _NAME_LIMITS = {"queue": ("SQS", 80), "topic": ("SNS", 256)}
 """Service and maximum length (``.fifo`` suffix included) of queue and topic names."""
 _VALID_NAME = re.compile(r"[A-Za-z0-9_-]+(?:\.fifo)?")
 _VALID_PREFIX = re.compile(r"[A-Za-z0-9_-]*")
+_EVENTS_WAIT = 1.0
+"""Seconds the event pump waits for events per call (stopping wakes it at once)."""
 
 
 def _register_fork_hook() -> None:
@@ -388,7 +390,7 @@ class Client:
         refreshed = monotonic()
         try:
             while self._pump_users > 0 and self._pump_task is current:
-                events = await core.next_events(256, 1.0)
+                events = await core.next_events(256, _EVENTS_WAIT)
                 self._dispatch_core(events)
                 self._report_dropped(core)
                 if monotonic() - refreshed > 10:
