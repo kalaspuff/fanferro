@@ -673,6 +673,28 @@ async fn an_idle_consumer_does_not_poll_continuously() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn pausing_stops_a_poller_that_waits_for_a_free_slot() {
+    let fx = fixture(ClientConfig::default()).await;
+    fx.send("first").await;
+    let engine = fx.engine(|c| {
+        c.max_in_flight = 1;
+        c.min_receive_batch = Some(1);
+    });
+    let first = collect(&engine, 1).await.remove(0);
+    tokio::time::sleep(Duration::from_secs(1)).await; // the poller waits for the busy slot
+    engine.pause();
+    fx.send("second").await;
+    first.lease.ack().await.unwrap();
+    assert!(engine.next_batch(1, Duration::from_secs(5)).await.is_empty(), "received while paused");
+    assert_eq!(receives(&engine), 1);
+    engine.resume();
+    let second = collect(&engine, 1).await;
+    assert_eq!(second.iter().map(body).collect::<Vec<_>>(), ["second"]);
+    ack_all(second).await;
+    engine.close(true).await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn left_leases_time_out_and_can_still_be_settled() {
     let fx = fixture(ClientConfig::default()).await;
     fx.send("left").await;

@@ -485,6 +485,10 @@ impl EngineInner {
         let _ = lease.ack().await;
     }
 
+    pub(crate) fn is_paused(&self) -> bool {
+        *self.paused.borrow()
+    }
+
     pub(crate) async fn wait_unpaused(&self) -> bool {
         let mut receiver = self.paused.subscribe();
         loop {
@@ -701,7 +705,7 @@ impl ConsumerEngine {
 
     /// Whether receiving is paused.
     pub fn is_paused(&self) -> bool {
-        *self.inner.paused.borrow()
+        self.inner.is_paused()
     }
 
     /// Stops receiving and waits until every received message has been decoded into the
