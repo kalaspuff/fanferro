@@ -814,8 +814,18 @@ class Subscription(_Resource):
         return await self._resolve(force=force)
 
     async def delete(self) -> None:
-        """Removes the subscription (teardown/tests)."""
+        """Removes the subscription (teardown/tests).
+
+        Raises:
+            ConfigurationError: The subscription is assumed (``Provisioning.assume()``), so its ARN
+                is unknown.
+        """
         info = await self.resolve()
+        if not info.arn:
+            raise ConfigurationError(
+                f"{self!r} is assumed (Provisioning.assume()), so its ARN is unknown: delete it through a "
+                "subscription declared with a provisioning policy that looks it up, such as Provisioning.existing()"
+            )
         core = await self._client._core()
         await core.unsubscribe(info.arn)
         self._reset()
