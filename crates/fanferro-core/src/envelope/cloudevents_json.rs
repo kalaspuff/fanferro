@@ -183,6 +183,9 @@ impl Envelope for CloudEventsJson {
         match text_attribute(&wire.attributes, reserved::CONTENT_TYPE) {
             Some(ct) if media_type_essence(ct) == CLOUDEVENTS_JSON_CONTENT_TYPE => parse_event(&wire.body).map(Some),
             Some(_) => Ok(None),
+            // The raw envelope's id attribute (never written with a CloudEvent): a raw message,
+            // even when its JSON body is a CloudEvent itself (a relayed event).
+            None if wire.attributes.contains_key(reserved::MESSAGE_ID) => Ok(None),
             None => {
                 // Without the attribute, only a JSON object with a `specversion` key can be a
                 // CloudEvent: other bodies (raw JSON, the default envelope) are not parsed here.
@@ -402,6 +405,25 @@ mod tests {
         attributes.insert("content-type".into(), AttributeValue::string("application/json"));
         let wire = WireMessage { body: Bytes::from_static(br#"{"specversion":"1.0"}"#), attributes };
         assert!(envelope.unwrap(&wire).unwrap().is_none());
+    }
+
+    #[test]
+    fn raw_messages_that_look_like_events_are_not_claimed() {
+        // A raw message whose JSON body is (or looks like) a CloudEvent, such as a relayed event:
+        // the raw envelope's id attribute says what it is, CloudEvents never write it.
+        let raw = super::super::raw::RawEnvelope::default();
+        let body = br#"{"specversion":"1.0","id":"evt-1","source":"upstream","type":"relayed","data":{"x":1}}"#;
+        let payload = Payload {
+            data: Bytes::from_static(body),
+            content_type: Some("application/json".into()),
+            message_type: Some("relay".into()),
+            id: Some("m-1".into()),
+            ..Payload::default()
+        };
+        let wire = raw.wrap(&payload).unwrap();
+        assert!(CloudEventsJson::default().unwrap(&wire).unwrap().is_none());
+        let unwrapped = raw.unwrap(&wire).unwrap().unwrap();
+        assert_eq!((unwrapped.id.as_deref(), &unwrapped.data[..]), (Some("m-1"), &body[..]));
     }
 
     #[test]
