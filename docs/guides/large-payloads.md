@@ -36,7 +36,8 @@ large_payloads=LargePayloads(...))` or `large_payloads=None` to disable.
 `PayloadFetch` (client option `payload_fetch=`) limits what consumers download:
 `max_bytes` (64 MiB), `allowed_url_hosts` (default: AWS hosts and your `endpoint_url`; blocks
 SSRF through crafted pointers), `allow_http`, and `verify_checksum` (size + SHA-256 recorded in the
-pointer).
+pointer). Redirects are not followed: a URL that answers with one fails to decode, so a pointer
+cannot lead a consumer to a host outside the list.
 
 ## Interoperability
 

@@ -274,6 +274,9 @@ impl IdentityApi for AwsIdentity {
 
 /// `reqwest`-based fetcher for presigned URLs. Its client is built on first use: building it loads
 /// the system's root certificates (milliseconds), which most applications never need.
+///
+/// Redirects are not followed: the transport checks the URL of a pointer against the allowed hosts
+/// before fetching it, and a redirect would lead the request to a host it never checked.
 #[derive(Debug, Default)]
 struct ReqwestFetch {
     client: OnceCell<reqwest::Client>,
@@ -286,6 +289,7 @@ impl ReqwestFetch {
                 reqwest::Client::builder()
                     .connect_timeout(Duration::from_secs(10))
                     .timeout(Duration::from_secs(300))
+                    .redirect(reqwest::redirect::Policy::none())
                     .user_agent(concat!("fanferro/", env!("CARGO_PKG_VERSION")))
                     .build()
                     .map_err(|err| Error::config(format!("cannot build HTTP client: {err}")))
@@ -300,6 +304,12 @@ impl HttpFetch for ReqwestFetch {
         let mut response =
             self.client().await?.get(url).send().await.map_err(|err| Error::Http(redact_url_error(&err)))?;
         let status = response.status();
+        if status.is_redirection() {
+            return Err(Error::Payload(format!(
+                "payload URL answered with a redirect (HTTP {status}); redirects are not followed, so that a \
+                 pointer cannot lead to a host outside the allowed hosts"
+            )));
+        }
         if !status.is_success() {
             return Err(if status.as_u16() == 404 || status.as_u16() == 403 {
                 inaccessible_url_error(url, status, OffsetDateTime::now_utc())
@@ -428,6 +438,51 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.aws().map(|aws| aws.kind), Some(AwsErrorKind::Timeout), "{error:?}");
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn payload_urls_are_not_redirected() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn answer(listener: tokio::net::TcpListener, response: String) {
+            let (mut connection, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = connection.read(&mut request).await.unwrap();
+            connection.write_all(response.as_bytes()).await.unwrap();
+        }
+
+        // An allowed host that redirects to another one: the transport checked only the first.
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_address = target.local_addr().unwrap();
+        let visited = Arc::new(AtomicBool::new(false));
+        let target = tokio::spawn({
+            let visited = visited.clone();
+            async move {
+                let (mut connection, _) = target.accept().await.unwrap();
+                visited.store(true, Ordering::SeqCst);
+                let mut request = [0u8; 1024];
+                let _ = connection.read(&mut request).await.unwrap();
+                let response = "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nsecret";
+                connection.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let redirecting = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = redirecting.local_addr().unwrap();
+        let redirect = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://{target_address}/latest/meta-data/\r\n\
+             Content-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        let server = tokio::spawn(answer(redirecting, redirect));
+        let result = ReqwestFetch::default().get(&format!("http://{address}/payload"), 1024).await;
+        server.await.unwrap();
+        target.abort();
+        assert!(!visited.load(Ordering::SeqCst), "the redirect target was requested");
+        let error = result.unwrap_err();
+        assert!(matches!(error, Error::Payload(_)), "{error:?}");
+        assert!(error.to_string().contains("HTTP 302"), "{error}");
+        assert!(!error.is_retryable(), "a redirect is not transient");
     }
 
     #[test]
