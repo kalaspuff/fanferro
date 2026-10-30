@@ -34,7 +34,8 @@ class SqliteOutbox:
         self.db = connection
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, message TEXT NOT NULL, "
-            "attempts INTEGER NOT NULL DEFAULT 0, published INTEGER NOT NULL DEFAULT 0)"
+            "attempts INTEGER NOT NULL DEFAULT 0, published INTEGER NOT NULL DEFAULT 0, "
+            "abandoned INTEGER NOT NULL DEFAULT 0)"
         )
 
     def add(self, cursor: sqlite3.Cursor, message: fanferro.PreparedMessage) -> None:
@@ -44,7 +45,8 @@ class SqliteOutbox:
     async def claim_batch(self, limit: int) -> Sequence[OutboxRecord]:
         def query() -> list[OutboxRecord]:
             rows = self.db.execute(
-                "SELECT id, message, attempts FROM outbox WHERE published = 0 ORDER BY rowid LIMIT ?", (limit,)
+                "SELECT id, message, attempts FROM outbox WHERE published = 0 AND abandoned = 0 ORDER BY rowid LIMIT ?",
+                (limit,),
             ).fetchall()
             return [OutboxRecord(row[0], fanferro.PreparedMessage.from_json(row[1]), row[2]) for row in rows]
 
@@ -61,6 +63,13 @@ class SqliteOutbox:
         def update() -> None:
             with self.db:
                 self.db.execute("UPDATE outbox SET attempts = attempts + 1 WHERE id = ?", (record.id,))
+
+        await asyncio.to_thread(update)
+
+    async def mark_abandoned(self, record: OutboxRecord, error: BaseException) -> None:
+        def update() -> None:
+            with self.db:
+                self.db.execute("UPDATE outbox SET attempts = attempts + 1, abandoned = 1 WHERE id = ?", (record.id,))
 
         await asyncio.to_thread(update)
 

@@ -14,7 +14,7 @@ from fanferro import _core
 from fanferro.__main__ import main
 from fanferro.consumer import Duplicate
 from fanferro.idempotency import Claim, InMemoryIdempotencyStore, idempotent
-from fanferro.outbox import InMemoryOutbox
+from fanferro.outbox import InMemoryOutbox, OutboxRelay
 from fanferro.testing import build_message
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -135,6 +135,36 @@ async def test_in_memory_outbox() -> None:
     await outbox.mark_published([first])
     assert outbox.published == [first]
     assert [r.attempts for r in outbox.pending] == [1]
+    retried = await outbox.claim_batch(10)
+    await outbox.mark_abandoned(retried[0], RuntimeError("x"))
+    assert outbox.pending == []
+    assert [(r.id, r.attempts) for r in outbox.abandoned] == [("custom", 2)]
+    assert await outbox.claim_batch(10) == []
+
+
+async def test_the_outbox_relay_never_gives_up_on_temporary_failures(
+    memory_client: fanferro.Client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue = memory_client.queue("outbox-throttled")
+    outbox = InMemoryOutbox()
+    throttled = fanferro.ThrottledError("Rate exceeded")
+    throttled.retryable = True  # as raised by the core
+
+    async def fail(messages: list[fanferro.PreparedMessage], **_: object) -> fanferro.BatchPublishResult:
+        return fanferro.BatchPublishResult(
+            tuple(fanferro.BatchFailure(i, m, throttled) for i, m in enumerate(messages))
+        )
+
+    async with memory_client:
+        outbox.add(await queue.prepare({"n": 1}))
+        relay = OutboxRelay(memory_client, outbox, max_attempts=2)
+        with monkeypatch.context() as patched:
+            patched.setattr(memory_client, "publish_prepared_batch", fail)
+            for _ in range(4):
+                assert await relay.run_once() == 0
+        assert outbox.abandoned == []
+        assert [r.attempts for r in outbox.pending] == [4]
+        assert await relay.run_once() == 1
 
 
 def test_cli(capsys: pytest.CaptureFixture[str]) -> None:

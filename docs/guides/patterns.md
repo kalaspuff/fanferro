@@ -17,9 +17,10 @@ CREATE TABLE outbox (
     message    jsonb NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     attempts   int NOT NULL DEFAULT 0,
-    published_at timestamptz
+    published_at timestamptz,
+    abandoned_at timestamptz
 );
-CREATE INDEX outbox_pending ON outbox (created_at) WHERE published_at IS NULL;
+CREATE INDEX outbox_pending ON outbox (created_at) WHERE published_at IS NULL AND abandoned_at IS NULL;
 ```
 
 ```python
@@ -31,7 +32,7 @@ class PostgresOutbox:   # implements fanferro.outbox.OutboxStore (asyncpg)
         # Run the relay in a transaction per round, or use a lease column; SKIP LOCKED lets
         # several relays work in parallel without publishing the same row twice.
         rows = await self.pool.fetch(
-            "SELECT id, message, attempts FROM outbox WHERE published_at IS NULL "
+            "SELECT id, message, attempts FROM outbox WHERE published_at IS NULL AND abandoned_at IS NULL "
             "ORDER BY created_at LIMIT $1 FOR UPDATE SKIP LOCKED", limit)
         return [OutboxRecord(r["id"], PreparedMessage.from_json(r["message"]), r["attempts"]) for r in rows]
 
@@ -40,12 +41,20 @@ class PostgresOutbox:   # implements fanferro.outbox.OutboxStore (asyncpg)
 
     async def mark_failed(self, record: OutboxRecord, error: BaseException) -> None:
         await self.pool.execute("UPDATE outbox SET attempts = attempts + 1 WHERE id = $1", record.id)
+
+    async def mark_abandoned(self, record: OutboxRecord, error: BaseException) -> None:
+        await self.pool.execute(
+            "UPDATE outbox SET attempts = attempts + 1, abandoned_at = now() WHERE id = $1", record.id)
 ```
 
 Delivery is at least once (a crash between publish and mark republishes). The message id is
 stable: FIFO destinations deduplicate it; standard destinations need idempotent consumers
 (below). FIFO rows are relayed one by one in order and a failure holds back the rest of its group.
-Runnable version: `examples/transactional_outbox.py`.
+A row that cannot be published (its topic was deleted, the destination refuses it) is given up
+after `OutboxRelay(max_attempts=10)` attempts with `mark_abandoned`, so that it does not hold back
+the rows behind it; a FIFO group then continues with its next row. Errors that may pass
+(throttling, timeouts, network errors) never give a row up. Inspect given-up rows, and reset
+`abandoned_at` (and `attempts`) to relay them again. Runnable version: `examples/transactional_outbox.py`.
 
 ## Idempotent consumer (inbox)
 
