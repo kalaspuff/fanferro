@@ -71,7 +71,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: astral-sh/setup-uv@v10.3.2
       - run: uvx --from "maturin==$MATURIN_VERSION" --with "ziglang==$ZIG_VERSION" maturin build --locked --profile dist --zig --target ${{ matrix.target }} --compatibility ${{ matrix.compatibility }} --out dist
       - uses: actions/upload-artifact@v7
         with:
@@ -93,7 +93,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: astral-sh/setup-uv@v10.3.2
       - run: uvx --from "maturin==$MATURIN_VERSION" maturin build --locked --profile dist --target ${{ matrix.target }} --out dist
         env:
           MACOSX_DEPLOYMENT_TARGET: "11.0"
@@ -111,7 +111,7 @@ jobs:
         with:
           ref: ${{ env.TAG }}
       - uses: dtolnay/rust-toolchain@stable
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: astral-sh/setup-uv@v10.3.2
       - run: uvx --from "maturin==$MATURIN_VERSION" maturin build --locked --profile dist --out dist
       - uses: actions/upload-artifact@v7
         with:
@@ -130,7 +130,7 @@ jobs:
         with:
           ref: ${{ env.TAG }}
       - uses: dtolnay/rust-toolchain@stable
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: astral-sh/setup-uv@v10.3.2
       - run: uvx --from "maturin==$MATURIN_VERSION" maturin build --locked --profile dist --out dist
       - name: Smoke test
         run: |
@@ -153,7 +153,7 @@ jobs:
         with:
           ref: ${{ env.TAG }}
       - uses: dtolnay/rust-toolchain@stable
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: astral-sh/setup-uv@v10.3.2
       - run: uvx --from "maturin==$MATURIN_VERSION" maturin sdist --out dist
       - name: Build and smoke-test a wheel from the sdist
         run: |
@@ -188,7 +188,7 @@ jobs:
         with:
           name: wheel-${{ matrix.platform.wheel }}
           path: dist
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: astral-sh/setup-uv@v10.3.2
       - name: Install the wheel and run the smoke test
         run: |
           uv venv --python ${{ matrix.python }} smoke
