@@ -120,6 +120,28 @@ async def test_fifo_resources(client_factory: ClientFactory, name: Any) -> None:
         client.queue(name("mixed"), dead_letter=fanferro.DeadLetterQueue("dlq.fifo"))
 
 
+async def test_a_cancelled_resolution_is_not_a_failure(memory_client: fanferro.Client, name: Any) -> None:
+    # A publish cancelled while its queue was being looked up (a request timeout, a client that went
+    # away): the next publishes must look the queue up again instead of failing for a while.
+    queue = memory_client.queue(name("cancelled"), provisioning=fanferro.Provisioning.create_missing())
+    lookup = queue._provision
+    looking_up = asyncio.Event()
+
+    async def slow_lookup() -> Any:
+        looking_up.set()
+        await asyncio.sleep(0.5)
+        return await lookup()
+
+    queue._provision = slow_lookup  # type: ignore[method-assign]
+    sending = asyncio.ensure_future(queue.send({"n": 1}))
+    await looking_up.wait()
+    sending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await sending
+    await queue.send({"n": 2})
+    assert (await queue.approximate_count())["visible"] == 1
+
+
 async def test_assume_mode(client_factory: ClientFactory, name: Any, backend: str) -> None:
     queue_name = name("assumed")
     creator = client_factory()
