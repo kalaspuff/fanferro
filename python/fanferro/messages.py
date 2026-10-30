@@ -158,6 +158,7 @@ class Message[T]:
     __slots__ = (
         "_body",
         "_data",
+        "_handed_back",
         "_json",
         "_settled",
         "_settlement_failed",
@@ -209,6 +210,7 @@ class Message[T]:
         self._body: Any = body
         self._data: tuple[Payload, bytes] | None = None  # (payload, its data): read once per payload
         self._json: Any = _UNSET
+        self._handed_back = 0  # receives that were hand-backs, not attempts (see the consumer)
 
     @classmethod
     def _received(
@@ -237,6 +239,7 @@ class Message[T]:
         message._body = _UNSET
         message._data = None
         message._json = _UNSET
+        message._handed_back = 0
         return message
 
     # -- payload ---------------------------------------------------------------------------
@@ -338,7 +341,12 @@ class Message[T]:
 
     @property
     def attempt(self) -> int:
-        """The processing attempt number across re-enqueues (requeues add to SQS' receive count)."""
+        """The processing attempt number across re-enqueues (requeues add to SQS' receive count).
+
+        Receives of a FIFO message that the consumer handed back unprocessed, because an earlier
+        message of its group was retried, are not attempts (they still count for SQS's
+        ``maxReceiveCount``, and in another consumer process that receives the group next).
+        """
         requeued = self.raw_attributes.get("fanferro.attempt")
         previous = 0
         if requeued is not None:
@@ -346,7 +354,7 @@ class Message[T]:
                 previous = int(str(requeued.value))
             except ValueError:
                 previous = 0
-        return previous + self.receive_count
+        return max(1, previous + self.receive_count - self._handed_back)
 
     @property
     def group_id(self) -> str | None:

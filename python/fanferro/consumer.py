@@ -49,6 +49,8 @@ type ConsumerState = Literal["created", "starting", "running", "stopping", "stop
 
 _MAX_VISIBILITY_DELAY = 12 * 3600 - 60
 _MAX_REQUEUE_DELAY = 900.0
+_MAX_HANDED_BACK = 10_000
+"""Messages whose hand-backs a consumer remembers (the oldest are forgotten first)."""
 _DELIVERY_WAIT = 0.5
 """Seconds the dispatcher waits for deliveries per call (stopping wakes it at once)."""
 _BUILTIN_ENVELOPES = (CloudEvents, CloudEventsProtobuf, Raw)
@@ -301,11 +303,15 @@ class _GroupSequencer:
                 delivery = queue.popleft()
                 was_counted, counted = counted, False
                 outcome = await self._consumer._run(delivery, counted=was_counted)
+                if outcome in ("acked", "discarded", "dead_lettered", "requeued"):  # gone from the queue
+                    self._consumer._forget_handed_back(delivery)
                 if outcome not in ("acked", "discarded", "dead_lettered"):
                     # The message comes back: hand back the rest of its batch, so that SQS
                     # redelivers the group in order. What arrives meanwhile is that redelivery.
                     later = list(queue)
                     queue.clear()
+                    for other in later:
+                        self._consumer._note_handed_back(other)
                     await asyncio.gather(*(self._consumer._release_quietly(other) for other in later))
         except Exception as error:  # noqa: BLE001 - deliberate catch-all; the error is reported, never swallowed silently
             self._consumer._task_failed(error)
@@ -414,6 +420,9 @@ class Consumer:
         self._unwrap_with: tuple[Envelope, ...] = ()  # envelopes tried (resolved on start)
         self._envelope_names: tuple[str, ...] = ()
         self._sequencer = _GroupSequencer(self)
+        # Receives of a FIFO message that were not processing attempts: handed back unprocessed
+        # while an earlier message of its group was retried (by SQS message id).
+        self._handed_back: dict[str, int] = {}
         self._settler = _Settler(self)
         self._stats = _Stats()
         self._active = 0  # handlers holding a slot
@@ -912,6 +921,19 @@ class Consumer:
             self._slot_waiters.discard(task)
         return True
 
+    def _note_handed_back(self, delivery: Delivery) -> None:
+        """Counts a hand-back of ``delivery``: its next receive is not a processing attempt."""
+        handed_back = self._handed_back
+        count = handed_back.pop(delivery.sqs_message_id, 0) + 1
+        handed_back[delivery.sqs_message_id] = count  # most recent last
+        if len(handed_back) > _MAX_HANDED_BACK:
+            del handed_back[next(iter(handed_back))]
+
+    def _forget_handed_back(self, delivery: Delivery) -> None:
+        """Forgets the hand-backs of a message that left the queue."""
+        if self._handed_back:
+            self._handed_back.pop(delivery.sqs_message_id, None)
+
     def _task_failed(self, error: Exception) -> None:
         self._emit(EventKind.CONSUMER_ERROR, f"unexpected error in consumer {self.name}", exception=error)
 
@@ -995,7 +1017,10 @@ class Consumer:
             name = envelope.name
         else:
             name = self._envelope_names[index]
-        return Message._received(payload, attributes, visible, name, delivery, self.queue.name, self._settler)
+        message = Message._received(payload, attributes, visible, name, delivery, self.queue.name, self._settler)
+        if self._handed_back:
+            message._handed_back = self._handed_back.get(delivery.sqs_message_id, 0)
+        return message
 
     def _decode_body(self, message: Message[Any], route: Route) -> Any:
         target = route.body_type
@@ -1251,6 +1276,7 @@ class Consumer:
             queue=self.queue.name,
             settler=self._settler,
         )
+        message._handed_back = self._handed_back.get(delivery.sqs_message_id, 0)
         if retryable and not self.retry_policy.exhausted(message.attempt):
             await self._apply_action(message, "retry", "transient decode failure", error)
         else:
