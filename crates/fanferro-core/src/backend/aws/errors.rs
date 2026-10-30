@@ -202,6 +202,25 @@ mod tests {
         assert_eq!(error.aws().map(|aws| aws.kind), Some(AwsErrorKind::Network), "{error:?}");
     }
 
+    #[tokio::test]
+    async fn a_bucket_is_not_found_without_credentials() {
+        use crate::backend::ObjectStoreApi;
+
+        // S3 answers 403 for a bucket of another account: it exists. Without credentials nothing
+        // was asked, so provisioning must not report the bucket as found.
+        let config = aws_sdk_s3::Config::builder()
+            .behavior_version(BehaviorVersion::latest())
+            .region(Region::new("us-east-1"))
+            .endpoint_url("http://127.0.0.1:9")
+            .force_path_style(true)
+            .credentials_provider(FailingCredentials(|| CredentialsError::not_loaded("no credentials")))
+            .retry_config(RetryConfig::disabled())
+            .build();
+        let store = super::super::AwsObjectStore::new(aws_sdk_s3::Client::from_conf(config));
+        let error = store.bucket_exists("payloads").await.unwrap_err();
+        assert_eq!(error.aws().map(|aws| aws.kind), Some(AwsErrorKind::AccessDenied), "{error:?}");
+    }
+
     #[test]
     fn classifies_common_codes() {
         assert_eq!(classify(Some("AWS.SimpleQueueService.NonExistentQueue"), None, Some(400)), AwsErrorKind::NotFound);
