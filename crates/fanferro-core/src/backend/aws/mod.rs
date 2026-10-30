@@ -441,6 +441,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_payload_download_that_breaks_off_can_be_retried() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // S3 starts the response, then the connection breaks (a reset, a stalled transfer cut off).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut connection, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = connection.read(&mut request).await.unwrap();
+            let head = "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nContent-Type: application/octet-stream\r\n\r\n";
+            connection.write_all(head.as_bytes()).await.unwrap();
+            connection.write_all(&[b'x'; 10]).await.unwrap();
+        });
+        let config = AwsConfig {
+            region: Some("us-east-1".into()),
+            endpoint_url: Some(format!("http://{address}")),
+            credentials: Some(StaticCredentials {
+                access_key_id: "test".into(),
+                secret_access_key: "test".into(),
+                session_token: None,
+            }),
+            retry: RetrySettings { max_attempts: 1, ..RetrySettings::default() },
+            ..AwsConfig::default()
+        };
+        let backend = connect(&config).await.unwrap();
+        let error = backend.objects.get_object("payloads", "key", 1 << 20).await.unwrap_err();
+        assert!(error.is_retryable(), "{error:?}");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn payload_urls_are_not_redirected() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
