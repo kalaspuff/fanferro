@@ -127,10 +127,11 @@ pub fn reset_after_fork() {
         std::mem::forget(inherited);
     }
     drop(guard);
-    // The parent's bridges belong to its event loops and its runtime threads.
+    // The parent's bridges belong to its event loops and its runtime threads. (`LOOPS` itself is
+    // only locked by threads attached to the interpreter, so no other thread held it at fork().)
     let inherited: Vec<Registered> = LOOPS.lock().drain(..).collect();
-    for registered in &inherited {
-        registered.bridge.close();
+    for registered in inherited {
+        registered.abandon();
     }
 }
 
@@ -345,6 +346,16 @@ struct Registered {
     bridge: Arc<LoopBridge>,
 }
 
+impl Registered {
+    /// Closes a bridge inherited from the parent process, without its lock: a runtime thread of
+    /// the parent may have held it at fork() (it queues finished futures there), and that thread
+    /// does not exist here to release it. The bridge is leaked: its queue may be in any state.
+    fn abandon(self) {
+        self.bridge.closed.store(true, Ordering::Release);
+        std::mem::forget(self);
+    }
+}
+
 /// Bridges by event loop. Entries keep their loop alive, so a loop's address identifies its
 /// entry; entries of closed loops are dropped when the next loop registers.
 static LOOPS: Mutex<Vec<Registered>> = Mutex::new(Vec::new());
@@ -391,8 +402,12 @@ impl LoopBridge {
             loops.push(Registered { pid, event_loop: event_loop.clone().unbind(), bridge: bridge.clone() });
             removed
         };
-        for registered in &removed {
-            registered.bridge.close();
+        for registered in removed {
+            if registered.pid == pid {
+                registered.bridge.close();
+            } else {
+                registered.abandon();
+            }
         }
         Ok(bridge)
     }
@@ -473,6 +488,11 @@ impl LoopBridge {
 
     /// Resolves every pending future (on the loop's thread).
     fn drain(&self, py: Python<'_>) {
+        if self.closed.load(Ordering::Acquire) {
+            // Nothing to resolve; for a bridge inherited across fork(), the queue and the socket
+            // still belong to the parent (and the queue's lock may never be released here).
+            return;
+        }
         #[cfg(unix)]
         if let Wake::Socket { reader, .. } = &self.wake {
             // Consume the wake-ups before taking the batch: an outcome queued after this point
@@ -487,7 +507,7 @@ impl LoopBridge {
         }
     }
 
-    /// Drops pending and future outcomes (the loop is closed or belongs to a parent process).
+    /// Drops pending and future outcomes (the loop is closed).
     fn close(&self) {
         self.closed.store(true, Ordering::Release);
         // Released after the lock: dropping Python objects can run arbitrary code.
