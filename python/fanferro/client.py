@@ -419,7 +419,8 @@ class Client:
             name: Topic name without the client's ``topic_prefix`` (``.fifo`` suffix for FIFO
                 topics). Optional when ``arn`` is given.
             arn: Topic ARN (skips deriving it from the account id). The topic is then named as in
-                the ARN (or by ``name``), without the prefix.
+                the ARN (or by ``name``), without the prefix. A topic of another account or region
+                is never created: provisioning fails while it does not exist.
             prefixed: Prepend the client's ``topic_prefix`` to ``name`` (``False`` for a topic
                 shared by several environments).
             attributes: Desired attributes (:class:`~fanferro.TopicAttributes` or raw AWS names).
