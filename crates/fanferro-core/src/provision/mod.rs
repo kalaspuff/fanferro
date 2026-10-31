@@ -216,6 +216,12 @@ impl<T> Report<T> {
     }
 }
 
+/// Whether a queue's `KmsMasterKeyId` is the AWS managed key of SQS, whose key policy does not
+/// allow SNS: SNS cannot deliver to such a queue (docs/parity S8).
+pub fn is_aws_managed_sqs_key(key_id: &str) -> bool {
+    key_id == "alias/aws/sqs" || (key_id.starts_with("arn:") && key_id.ends_with(":alias/aws/sqs"))
+}
+
 impl Client {
     pub(crate) fn emit_resource(
         &self,

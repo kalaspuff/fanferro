@@ -454,3 +454,39 @@ async fn buckets() {
     assert_eq!(client.ensure_bucket("b", true).await.unwrap().status, ProvisionStatus::Created);
     assert_eq!(client.ensure_bucket("b", false).await.unwrap().status, ProvisionStatus::Found);
 }
+
+#[tokio::test]
+async fn subscribing_a_queue_encrypted_with_the_aws_managed_key_warns() {
+    // docs/parity S8: SNS cannot use the AWS managed key of SQS, and the messages are lost silently.
+    let client = client();
+    client.events().set_enabled(&[EventKind::ConfigWarning]);
+    let topic = client.backend().sns.create_topic("t", &StringMap::new(), &StringMap::new()).await.unwrap();
+    for (queue, key) in [("plain", None), ("managed", Some("alias/aws/sqs")), ("custom", Some("alias/payments"))] {
+        let attributes = key.map(|key| attrs(&[("KmsMasterKeyId", key)])).unwrap_or_default();
+        let url = client.backend().sqs.create_queue(queue, &attributes, &StringMap::new()).await.unwrap();
+        for policy in [ensure(), ProvisionPolicy::default()] {
+            let spec = SubscriptionSpec {
+                topic_arn: topic.clone(),
+                queue_arn: format!("arn:aws:sqs:us-east-1:000000000000:{queue}"),
+                queue_url: url.clone(),
+                attributes: StringMap::new(),
+                manage_queue_policy: policy.create,
+                dead_letter_queue_url: None,
+                dead_letter_queue_arn: None,
+                policy,
+            };
+            client.ensure_subscription(&spec).await.unwrap();
+            let warnings = client.events().drain(10);
+            if key == Some("alias/aws/sqs") {
+                assert_eq!(warnings.len(), 1, "{queue}");
+                assert!(
+                    warnings[0].message.contains("SNS cannot deliver to arn:aws:sqs:us-east-1:000000000000:managed")
+                );
+            } else {
+                assert!(warnings.is_empty(), "{queue}: {warnings:?}");
+            }
+        }
+    }
+    assert!(is_aws_managed_sqs_key("arn:aws:kms:eu-north-1:123456789012:alias/aws/sqs"));
+    assert!(!is_aws_managed_sqs_key("alias/aws/sqs-other"));
+}

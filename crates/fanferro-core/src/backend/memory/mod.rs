@@ -1372,6 +1372,9 @@ fn publish_locked(inner: &Inner, state: &mut State, topic_arn: &str, request: Pu
     if let (true, Some(id)) = (topic.fifo, &deduplication_id) {
         topic.dedup.insert(id.clone(), now, message_id.clone());
     }
+    let active = topic.attributes.get("TracingConfig").map(String::as_str) == Some("Active");
+    let trace_header =
+        if active { request.trace_header.as_deref().map(sns_trace_header) } else { request.trace_header.clone() };
     let subscriptions: Vec<Subscription> =
         state.subscriptions.values().filter(|s| s.topic_arn == topic_arn && s.protocol == "sqs").cloned().collect();
     for subscription in subscriptions {
@@ -1379,6 +1382,12 @@ fn publish_locked(inner: &Inner, state: &mut State, topic_arn: &str, request: Pu
             continue;
         }
         let Some(queue_url) = state.queue_url_by_arn(&subscription.endpoint) else { continue };
+        // SNS cannot use the AWS managed key of SQS (its key policy does not allow SNS): the
+        // delivery fails, and nothing reports it to the publisher (docs/parity S8).
+        let managed_key = state.queues.get(&queue_url).and_then(|queue| queue.attributes.get("KmsMasterKeyId"));
+        if managed_key.is_some_and(|key| crate::provision::is_aws_managed_sqs_key(key)) {
+            continue;
+        }
         let raw = subscription.attributes.get("RawMessageDelivery").map(String::as_str) == Some("true");
         let (body, attributes) = if raw {
             (request.message.clone(), request.attributes.clone())
@@ -1410,7 +1419,7 @@ fn publish_locked(inner: &Inner, state: &mut State, topic_arn: &str, request: Pu
                 } else {
                     None
                 },
-                trace_header: request.trace_header.clone(),
+                trace_header: trace_header.clone(),
                 redriven: None,
                 message_id: None,
                 sent: None,
@@ -1418,6 +1427,18 @@ fn publish_locked(inner: &Inner, state: &mut State, topic_arn: &str, request: Pu
         );
     }
     Ok(PublishOutput { message_id, sequence_number })
+}
+
+/// The trace header SNS passes on: with active tracing, SNS records a segment of its own and
+/// makes it the parent; the root and the sampling decision stay (docs/parity S7).
+fn sns_trace_header(header: &str) -> String {
+    let parent = format!("Parent={}", &uuid::Uuid::new_v4().simple().to_string()[..16]);
+    let mut parts: Vec<String> = header.split(';').map(str::to_string).collect();
+    match parts.iter_mut().find(|part| part.starts_with("Parent=")) {
+        Some(part) => *part = parent,
+        None => parts.insert(1.min(parts.len()), parent),
+    }
+    parts.join(";")
 }
 
 /// Validates a subscription's filter policy like SNS (for its scope) and compiles it.

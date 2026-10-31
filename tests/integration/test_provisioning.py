@@ -323,3 +323,25 @@ async def test_queues_are_created_again_and_purged_again_only_after_a_minute(
     assert isinstance(error, fanferro.ThrottledError)
     assert error.code == "AWS.SimpleQueueService.QueueDeletedRecently"
     assert created.value.retryable
+
+
+async def test_subscribing_a_queue_encrypted_with_the_aws_managed_key_warns(
+    memory_client: fanferro.Client, name: Any
+) -> None:
+    # docs/parity S8: SNS cannot use the AWS managed key of SQS and drops the messages silently.
+    # MiniStack delivers them, so this runs on the in-memory broker only.
+    warnings: list[fanferro.Event] = []
+    memory_client.on("config.warning", warnings.append)
+    topic = memory_client.topic(name("orders"))
+    managed = memory_client.queue(
+        name("managed"), attributes=fanferro.QueueAttributes(encryption=fanferro.Kms("alias/aws/sqs"))
+    )
+    plain = memory_client.queue(name("plain"))
+    memory_client.subscription(topic, managed)
+    memory_client.subscription(topic, plain)
+    async with memory_client:
+        await topic.publish({"n": 1})
+        assert (await managed.approximate_count())["visible"] == 0
+        assert (await plain.approximate_count())["visible"] == 1
+    assert [event.fields["queue"] for event in warnings] == [managed.arn]
+    assert "SNS cannot deliver" in warnings[0].message

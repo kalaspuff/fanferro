@@ -90,7 +90,10 @@ Durations accept seconds or `timedelta`. JSON-valued attributes are compared sem
 
 KMS is optional everywhere. With a customer managed key on a queue subscribed to SNS, the key
 policy must allow `sns.amazonaws.com` to use it (`kms:GenerateDataKey*`, `kms:Decrypt`) - fanferro
-does not modify key policies.
+does not modify key policies. The AWS managed key `alias/aws/sqs` cannot be used for such a queue:
+its key policy does not allow SNS, and SNS drops the messages without telling anyone. Provisioning
+a subscription to a queue encrypted with it emits a `config.warning` event; use a customer managed
+key or `SqsManagedEncryption()`. The in-memory broker drops such deliveries too.
 
 ## IAM permissions
 
