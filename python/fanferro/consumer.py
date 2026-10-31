@@ -6,7 +6,8 @@ handlers on the asyncio event loop:
 
 1. transport decoding (SNS unwrapping, claim-check download, base64) happens in Rust;
 2. the envelope is unwrapped (first matching envelope);
-3. messages past ``RetryPolicy.max_attempts`` are dead-lettered without running a handler;
+3. messages past ``RetryPolicy.max_attempts`` get ``DeadLetterPolicy.on_exhausted`` without running
+   a handler (dead-lettered by default), except with ``"retry"``, which keeps processing them;
 4. the router picks a route; the body is decoded into the route's type;
 5. middleware and the handler run (with an optional timeout) inside an OpenTelemetry span;
 6. success acks the message; failures follow the :class:`~fanferro.RetryPolicy` and
