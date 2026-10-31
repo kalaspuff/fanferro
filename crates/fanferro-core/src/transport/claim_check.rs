@@ -344,6 +344,7 @@ pub async fn fetch(backend: &Backend, settings: &FetchSettings, pointer: &Payloa
         FetchPreference::Url => [FetchPreference::Url, FetchPreference::S3],
     };
     let mut last_error = None;
+    let mut missing_object = None;
     for method in order {
         let result = match method {
             FetchPreference::S3 if has_s3 => {
@@ -361,10 +362,21 @@ pub async fn fetch(backend: &Backend, settings: &FetchSettings, pointer: &Payloa
         };
         match result {
             Ok(data) => return verify(pointer, data, settings.verify_checksum),
+            Err(err) if method == FetchPreference::S3 && is_missing_object(&err) => missing_object = Some(err),
             Err(err) => last_error = Some(err),
         }
     }
-    Err(last_error.unwrap_or_else(|| Error::Payload("claim check pointer has neither bucket/key nor url".into())))
+    // A pointer's URL refers to the same object: when S3 says it no longer exists, that is the
+    // error to report (consumers act on it), not the URL's answer.
+    Err(missing_object
+        .or(last_error)
+        .unwrap_or_else(|| Error::Payload("claim check pointer has neither bucket/key nor url".into())))
+}
+
+/// Whether S3 answered that the payload object does not exist (deleted, or expired by a lifecycle
+/// rule).
+fn is_missing_object(error: &Error) -> bool {
+    error.aws().is_some_and(|aws| aws.code.as_deref() == Some("NoSuchKey"))
 }
 
 /// The error for a presigned payload URL that expired before the message was consumed.
@@ -524,6 +536,21 @@ mod tests {
             fetch(&backend, &FetchSettings::default(), &wrong_size).await,
             Err(Error::PayloadIntegrity(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_deleted_object_is_reported_as_missing_whichever_method_is_tried_last() {
+        let broker = MemoryBroker::new("us-east-1", "000000000000");
+        let backend = broker.backend();
+        backend.objects.create_bucket("b").await.unwrap();
+        let pointer = offload(&backend, &settings("b"), "m1", Bytes::from_static(b"payload")).await.unwrap();
+        assert!(pointer.url.is_some());
+        backend.objects.delete_object("b", pointer.key.as_deref().unwrap()).await.unwrap();
+        for prefer in [FetchPreference::S3, FetchPreference::Url] {
+            let error =
+                fetch(&backend, &FetchSettings { prefer, ..FetchSettings::default() }, &pointer).await.unwrap_err();
+            assert!(is_missing_object(&error), "{prefer:?}: {error}");
+        }
     }
 
     #[test]

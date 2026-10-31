@@ -107,7 +107,7 @@ each parameter and field listed here exists in the code and that every one in th
 | `settle_linger` | `0.005` | Seconds a batch of acks/retries waits to fill up (0-1; full batches of 10 go at once) |
 | `sns_unwrap` | `True` | Unwrap SNS notification JSON |
 | `auto_confirm_subscriptions` | `False` | Confirm SNS subscription confirmation messages |
-| `delete_offloaded_payloads` | `False` | Delete S3 payload objects after acking |
+| `delete_offloaded_payloads` | `False` | Delete S3 payload objects after acking; a message whose object is missing (`NoSuchKey`) is then acked as an already processed duplicate (`message.duplicate`), including one whose object expired or was deleted for another reason (see [large payloads](../guides/large-payloads.md#cleanup)) |
 
 ## Policies
 

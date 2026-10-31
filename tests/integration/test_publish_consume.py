@@ -414,6 +414,48 @@ async def test_a_message_published_again_keeps_its_offloaded_payload(client_fact
     assert [(m.id, m.json()) for m in received] == [("order-1", {"blob": "x" * 5000})]
 
 
+async def test_a_copy_whose_offloaded_payload_was_deleted_is_skipped_as_a_duplicate(
+    client_factory: ClientFactory, name: Any
+) -> None:
+    # Two copies of a message (a publisher retry) share their payload object; with
+    # delete_offloaded_payloads, the ack of one deletes it. The other copy was dead-lettered as
+    # undecodable (NoSuchKey) instead of skipped as already processed.
+    bucket = name("payloads")
+    client = client_factory(
+        large_payloads=fanferro.LargePayloads(bucket, threshold=1024, reference="both", create_bucket=True)
+    )
+    queue = client.queue(name("deleted-payload"))
+    processed: list[str] = []
+    duplicates: list[fanferro.Event] = []
+    decode_failures: list[fanferro.Event] = []
+    client.on("message.duplicate", duplicates.append)
+    client.on("message.decode_failed", decode_failures.append)
+
+    async def handle(message: fanferro.Message[bytes]) -> None:
+        processed.append(message.id)
+
+    consumer = client.consumer(queue, handle, wait_time=1, delete_offloaded_payloads=True)
+    message = fanferro.OutgoingMessage(body={"blob": "x" * 5000}, id="order-1")
+    async with client:
+        first = await queue.send(message)
+        second = await queue.send(message)
+        assert first.offloaded is not None
+        assert first.offloaded.key is not None
+        assert second.offloaded is not None
+        assert second.offloaded.key == first.offloaded.key
+        # What the ack of a copy processed elsewhere does.
+        core = await client._core()
+        await core.delete_payload(bucket, first.offloaded.key)
+        await consume_until(consumer, lambda: len(duplicates) == 2)
+        counts = await queue.approximate_count()
+    assert counts["visible"] == counts["in_flight"] == 0
+    assert processed == []
+    assert decode_failures == []
+    assert consumer.stats()["duplicates"] == 2
+    assert consumer.stats()["decode_failures"] == 0
+    assert duplicates[0].fields["reason"] == "payload_deleted"
+
+
 async def test_messages_over_the_queue_limit_are_offloaded_below_the_threshold(
     client_factory: ClientFactory, name: Any
 ) -> None:

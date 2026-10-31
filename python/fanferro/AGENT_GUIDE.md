@@ -206,7 +206,10 @@ twice within 5 minutes is deduplicated.
 
 `fanferro.Client(large_payloads=fanferro.LargePayloads(bucket="...", reference="both"))` offloads
 bodies above 256 KiB to S3 and sends a pointer (bucket/key and/or presigned URL). Consumers fetch
-transparently. Add an S3 lifecycle rule on the prefix.
+transparently. Add an S3 lifecycle rule on the prefix (expiring well after the queue's retention
+period). `delete_offloaded_payloads=True` (point-to-point queues only) deletes the object on ack and
+acks a copy whose object is gone as a duplicate (`message.duplicate`): it would also drop a message
+whose object expired or was deleted for another reason.
 
 ## Transactional outbox
 
