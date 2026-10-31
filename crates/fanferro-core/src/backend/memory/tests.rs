@@ -160,6 +160,33 @@ async fn fifo_groups_and_deduplication() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn fifo_deduplication_scope_message_group() {
+    // The deduplication id was the key whatever the scope: the same body sent to two groups with
+    // content-based deduplication was delivered once, while SQS delivers it to both groups.
+    let (_, backend) = broker();
+    let fifo = |body: &str, group: &str| SendRequest {
+        body: body.into(),
+        group_id: Some(group.into()),
+        ..SendRequest::default()
+    };
+    for (scope, delivered) in [("messageGroup", vec!["same", "same"]), ("queue", vec!["same"])] {
+        let attributes = StringMap::from([
+            ("FifoQueue".to_string(), "true".to_string()),
+            ("ContentBasedDeduplication".to_string(), "true".to_string()),
+            ("DeduplicationScope".to_string(), scope.to_string()),
+        ]);
+        let url = backend.sqs.create_queue(&format!("{scope}.fifo"), &attributes, &StringMap::new()).await.unwrap();
+        let first = backend.sqs.send_message(&url, fifo("same", "a")).await.unwrap();
+        let again = backend.sqs.send_message(&url, fifo("same", "a")).await.unwrap();
+        assert_eq!(first.message_id, again.message_id, "{scope}: a duplicate within its group");
+        let other = backend.sqs.send_message(&url, fifo("same", "b")).await.unwrap();
+        assert_eq!(other.message_id != first.message_id, scope == "messageGroup", "{scope}");
+        let received = backend.sqs.receive_messages(receive(&url, 10, Some(30))).await.unwrap();
+        assert_eq!(received.iter().map(|m| m.body.as_str()).collect::<Vec<_>>(), delivered, "{scope}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn long_poll_wakes_on_send_and_delays_apply() {
     let (_, backend) = broker();
     let url = backend.sqs.create_queue("q", &StringMap::new(), &StringMap::new()).await.unwrap();

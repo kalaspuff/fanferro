@@ -4,7 +4,7 @@ import asyncio
 import datetime
 import json
 import time
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from google.protobuf import timestamp_pb2
@@ -275,6 +275,23 @@ async def test_fifo_order_and_deduplication(client_factory: ClientFactory, name:
         ids = [order for g, order in seen if g == group]
         assert ids == sorted(ids), f"group {group} out of order: {ids}"
     assert len(seen) == 12, "the duplicate send was deduplicated"
+
+
+@pytest.mark.parametrize(("scope", "delivered"), [("messageGroup", ["a", "b"]), ("queue", ["a"])])
+async def test_fifo_deduplication_scope(
+    client_factory: ClientFactory, name: Any, scope: Literal["queue", "messageGroup"], delivered: list[str]
+) -> None:
+    # The memory broker deduplicated by the deduplication id alone, also with the messageGroup scope.
+    client = client_factory()
+    queue = client.queue(
+        f"{name('dedup-scope')}.fifo",
+        attributes=fanferro.QueueAttributes(deduplication_scope=scope, fifo_throughput_limit="perQueue"),
+    )
+    async with client:
+        for group in ("a", "a", "b"):
+            await queue.send({"group": group}, group_id=group, deduplication_id="same")
+        messages = await drain_queue(client, queue)
+    assert sorted(message.json()["group"] for message in messages) == delivered
 
 
 @pytest.mark.parametrize(("strict", "acked_before"), [(True, [0, 1, 2]), (False, [0, 0, 0])])

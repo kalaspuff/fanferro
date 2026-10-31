@@ -6,7 +6,8 @@
 //! * SQS: visibility timeouts, receipt handles, receive counts, long polling, per-message
 //!   and queue delays (in whole seconds, rounded up as the AWS adapter rounds them), redrive to a
 //!   dead-letter queue (`RedrivePolicy`), FIFO ordering per message group, FIFO deduplication
-//!   (explicit and content based), batch operations, MD5 digests.
+//!   (explicit and content based, per queue or per message group as `DeduplicationScope` says),
+//!   batch operations, MD5 digests.
 //! * SNS: topics (standard and FIFO), SQS subscriptions with raw and notification (JSON)
 //!   delivery, filter policies (see [`filter_policy`]), FIFO deduplication.
 //! * S3: buckets and objects, presigned URLs (`memory://` scheme, resolvable only by the
@@ -88,12 +89,24 @@ struct Queue {
     attributes: StringMap,
     tags: StringMap,
     messages: Messages,
-    /// FIFO deduplication id -> message id and sequence number.
+    /// FIFO deduplication key (see [`Queue::dedup_key`]) -> message id and sequence number.
     dedup: Dedup<(String, Option<String>)>,
     notify: Arc<Notify>,
 }
 
 impl Queue {
+    /// What a FIFO message is deduplicated by: its deduplication id, within its message group when
+    /// the queue's `DeduplicationScope` is `messageGroup` (the same id in two groups is two messages).
+    fn dedup_key(&self, group_id: Option<&str>, deduplication_id: &str) -> String {
+        match group_id {
+            Some(group) if self.attributes.get("DeduplicationScope").map(String::as_str) == Some("messageGroup") => {
+                // Neither id may contain a NUL character, so the key cannot be ambiguous.
+                format!("{group}\0{deduplication_id}")
+            }
+            _ => deduplication_id.to_string(),
+        }
+    }
+
     fn attribute_secs(&self, name: &str, default: u64) -> u64 {
         self.attributes.get(name).and_then(|value| value.parse().ok()).unwrap_or(default)
     }
@@ -338,7 +351,8 @@ fn enqueue(state: &mut State, queue_url: &str, operation: &'static str, request:
             }
         }
         if let Some(id) = &deduplication_id
-            && let Some((message_id, sequence_number)) = queue.dedup.get(id, now)
+            && let Some((message_id, sequence_number)) =
+                queue.dedup.get(&queue.dedup_key(request.group_id.as_deref(), id), now)
         {
             return Ok(SendOutput {
                 message_id: message_id.clone(),
@@ -356,7 +370,8 @@ fn enqueue(state: &mut State, queue_url: &str, operation: &'static str, request:
     if let Some(id) = &deduplication_id
         && queue.fifo
     {
-        queue.dedup.insert(id.clone(), now, (message_id.clone(), sequence_number.clone()));
+        let key = queue.dedup_key(request.group_id.as_deref(), id);
+        queue.dedup.insert(key, now, (message_id.clone(), sequence_number.clone()));
     }
     let md5_body = md5_of_body(&request.body);
     let md5_attributes = (!request.attributes.is_empty()).then(|| md5_of_attributes(&request.attributes));
