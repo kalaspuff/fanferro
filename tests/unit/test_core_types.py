@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import datetime
+import pickle
+import traceback
 from decimal import Decimal
 
 import pytest
 
 import fanferro
-from fanferro import _core
+import fanferro.errors
+from fanferro import _core, testing
+
+NATIVE_ERRORS = [
+    value for value in vars(_core).values() if isinstance(value, type) and issubclass(value, BaseException)
+]
 
 
 class TestAttributeValue:
@@ -100,3 +107,34 @@ def test_error_hierarchy() -> None:
     assert issubclass(fanferro.ProvisioningError, fanferro.FanferroError)
     assert issubclass(fanferro.HandlerTimeoutError, TimeoutError)
     assert fanferro.FanferroError.retryable is False
+
+
+def test_native_errors_are_exported_by_the_errors_module() -> None:
+    assert {fanferro.FanferroError, fanferro.AccessDeniedError, fanferro.ShutdownError} <= set(NATIVE_ERRORS)
+    assert {error_type.__name__ for error_type in NATIVE_ERRORS} <= set(fanferro.errors.__all__)
+
+
+@pytest.mark.parametrize("error_type", NATIVE_ERRORS, ids=lambda error_type: error_type.__name__)
+def test_native_errors_name_their_module(error_type: type[Exception]) -> None:
+    assert error_type.__module__ == "fanferro.errors"
+    assert getattr(fanferro.errors, error_type.__name__) is error_type
+    assert traceback.format_exception_only(error_type("boom")) == [f"fanferro.errors.{error_type.__name__}: boom\n"]
+    assert fanferro.errors.error_details(error_type("boom"))["error_type"] == f"fanferro.errors.{error_type.__name__}"
+    copy = pickle.loads(pickle.dumps(error_type("boom")))
+    assert (type(copy), str(copy)) == (error_type, "boom")
+
+
+async def test_aws_errors_pickle_with_their_attributes() -> None:
+    async with testing.memory_client() as client:
+        queue = client.queue("missing", provisioning=fanferro.Provisioning.assume())
+        with pytest.raises(fanferro.ResourceNotFoundError) as raised:
+            await queue.approximate_count()
+    error = raised.value
+    copy = pickle.loads(pickle.dumps(error))
+    assert (type(copy), str(copy)) == (fanferro.ResourceNotFoundError, str(error))
+    assert vars(copy) == vars(error)
+    assert (copy.code, copy.operation, copy.status) == (
+        "AWS.SimpleQueueService.NonExistentQueue",
+        "GetQueueAttributes",
+        400,
+    )

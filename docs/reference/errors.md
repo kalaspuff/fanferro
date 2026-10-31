@@ -5,6 +5,11 @@ retrying the same operation unchanged may succeed). Errors raised by the Rust co
 `category`; AWS errors have `service`, `operation`, `kind`, `code`, `aws_message`, `request_id`
 and `status`.
 
+All of them are classes of `fanferro.errors` (also exported by `fanferro`), the module that
+tracebacks, the `error_type` of events and dead-letter metadata, and OpenTelemetry's `error.type`
+name: `fanferro.errors.AccessDeniedError`. Errors raised by the Rust core pickle with these
+attributes, so they reach the caller of a worker process as themselves.
+
 | Exception | Raised when | Retryable |
 | --- | --- | --- |
 | `ConfigurationError` | Invalid configuration (client, consumer, resource declarations) | no |

@@ -3,7 +3,8 @@
 Every exception derives from :class:`FanferroError` and carries a ``retryable`` attribute that
 tells whether retrying the same operation unchanged may succeed. Errors raised by the Rust core
 (AWS failures, validation, payload problems, leases) are defined in the native module and
-re-exported here; the rest are raised by the Python layer.
+re-exported here, the module they name as theirs (``fanferro.errors.AccessDeniedError``); the rest
+are raised by the Python layer.
 
 Hierarchy::
 
