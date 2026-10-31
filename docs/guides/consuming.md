@@ -21,6 +21,10 @@ A handler is an `async def` whose first parameter's annotation decides what it r
 | `message: fanferro.Message` / none | the message | JSON → Python data, text → `str`, else `bytes` |
 | `message: fanferro.Message[bytes]` | the message | raw bytes (never fails to decode) |
 
+Async methods, callable objects with an `async def __call__` and `functools.partial` of any of them
+work too (`functools.partial(handle, db=db)`): the first parameter the partial leaves open receives
+the message.
+
 `Message` exposes the decoded `body`, envelope metadata (`id`, `type`, `time`, `source`,
 `subject`, `headers`, `content_type`), user `attributes` (`message.attribute("tenant")` returns
 `str`/`int`/`Decimal`/`bytes`), transport metadata (`receive_count`, `attempt`, `group_id`,

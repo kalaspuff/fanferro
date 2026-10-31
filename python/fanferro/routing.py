@@ -28,6 +28,7 @@ Example::
 
 from __future__ import annotations
 
+import functools
 import inspect
 import itertools
 import typing
@@ -91,11 +92,28 @@ class Route:
             await self.handler(message.body)
 
 
+def _unwrap_partial(handler: Callable[..., Any]) -> Callable[..., Any]:
+    while isinstance(handler, functools.partial):
+        handler = handler.func
+    return handler
+
+
 def _signature_target(handler: Callable[..., Any]) -> Callable[..., Any]:
-    if inspect.isfunction(handler) or inspect.ismethod(handler):
+    if inspect.isfunction(handler) or inspect.ismethod(handler) or isinstance(handler, functools.partial):
+        # The signature of a partial leaves out the arguments it binds (its __call__ takes any).
         return handler
     call = getattr(handler, "__call__", None)  # noqa: B004 - callable objects
     return call if call is not None else handler
+
+
+def _hints_target(handler: Callable[..., Any]) -> Callable[..., Any]:
+    # A partial has no annotations of its own: the hints are those of the function it wraps.
+    return _signature_target(_unwrap_partial(handler))
+
+
+def _handler_name(handler: Callable[..., Any]) -> str:
+    """The qualified name of a handler (of the function a partial wraps), for route names and errors."""
+    return getattr(_unwrap_partial(handler), "__qualname__", None) or repr(handler)
 
 
 def inspect_handler(handler: Handler, message_type: type | str | None = None) -> tuple[Any, bool]:
@@ -106,22 +124,19 @@ def inspect_handler(handler: Handler, message_type: type | str | None = None) ->
     """
     if not is_async_callable(handler):
         raise RoutingError(f"handler {handler!r} must be an async function")
-    target = _signature_target(handler)
     try:
-        signature = inspect.signature(target)
+        signature = inspect.signature(_signature_target(handler))
     except (TypeError, ValueError) as error:
         raise RoutingError(f"cannot inspect handler {handler!r}: {error}") from error
     parameters = [p for p in signature.parameters.values() if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
     if not parameters:
-        raise RoutingError(
-            f"handler {getattr(handler, '__qualname__', handler)} must accept the message as its first argument"
-        )
+        raise RoutingError(f"handler {_handler_name(handler)} must accept the message as its first argument")
     first = parameters[0]
     try:
-        hints = typing.get_type_hints(target, include_extras=True)
+        hints = typing.get_type_hints(_hints_target(handler), include_extras=True)
     except Exception as error:
         raise RoutingError(
-            f"cannot resolve the type hints of {getattr(handler, '__qualname__', handler)}: {error}. "
+            f"cannot resolve the type hints of {_handler_name(handler)}: {error}. "
             "Define the annotated types at module level or pass the type to route(...) explicitly."
         ) from error
     annotation = hints.get(first.name, inspect.Parameter.empty)
@@ -174,7 +189,7 @@ class Router:
             handler=handler,
             body_type=body_type,
             pass_message=pass_message,
-            name=name or getattr(handler, "__qualname__", repr(handler)),
+            name=name or _handler_name(handler),
             message_type=message_type,
             matcher=as_matcher(when) if when is not None else None,
             priority=priority,
