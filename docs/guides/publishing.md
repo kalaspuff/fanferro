@@ -22,7 +22,7 @@ Every option is a field of `fanferro.OutgoingMessage`; pass them as keywords or 
 | Option | Meaning |
 | --- | --- |
 | `type` | Message type name (routing, filter policies) |
-| `attributes` | User message attributes: `str` → String, numbers → Number, `bytes` → Binary |
+| `attributes` | User message attributes: `str` → String, numbers → Number (SQS returns them without leading and trailing zeros: `1.50` as `1.5`), `bytes` → Binary |
 | `headers` | Envelope headers (CloudEvents extensions, lowercase alphanumeric names; message attributes with the raw envelope) |
 | `id` | Message id; stable across retries; FIFO deduplication id by default |
 | `time`, `source`, `subject`, `data_schema` | CloudEvents attributes (not carried by the raw envelope) |

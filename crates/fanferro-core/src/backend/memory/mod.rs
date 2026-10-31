@@ -41,9 +41,10 @@ use super::{
     SubscriptionInfo, SystemAttributes, VisibilityChange,
 };
 use crate::error::{AwsError, AwsErrorKind, Error, Result};
+use crate::types::attributes::BaseType;
 use crate::types::attributes::{attributes_encoded_len, md5_of_attributes, md5_of_body, validate_attributes};
 use crate::types::text::is_sqs_safe_text;
-use crate::types::{AttributeData, MessageAttributes, arn};
+use crate::types::{AttributeData, AttributeValue, MessageAttributes, arn};
 use crate::util::whole_seconds;
 use filter_policy::{FilterPolicy, FilterScope};
 use store::{Dedup, Messages, StoredMessage};
@@ -531,7 +532,11 @@ fn enqueue(state: &mut State, queue_url: &str, operation: &'static str, request:
         queue.dedup.insert(key, now, (message_id.clone(), sequence_number.clone()));
     }
     let md5_body = md5_of_body(&request.body);
+    // SendMessage reports the MD5 of the attributes as sent; SQS stores numbers normalised, and
+    // a receive reports the MD5 of the attributes as stored.
     let md5_attributes = (!request.attributes.is_empty()).then(|| md5_of_attributes(&request.attributes));
+    let stored_attributes = normalized_numbers(request.attributes);
+    let stored_md5_attributes = (!stored_attributes.is_empty()).then(|| md5_of_attributes(&stored_attributes));
     let (receive_count, first_receive, dead_letter_source) = match request.redriven {
         Some(redriven) => (redriven.receive_count, redriven.first_receive, Some(redriven.source_arn)),
         None => (0, None, None),
@@ -540,9 +545,9 @@ fn enqueue(state: &mut State, queue_url: &str, operation: &'static str, request:
         StoredMessage {
             message_id: message_id.clone(),
             body: request.body,
-            attributes: request.attributes,
+            attributes: stored_attributes,
             md5_of_body: md5_body.clone(),
-            md5_of_attributes: md5_attributes.clone(),
+            md5_of_attributes: stored_md5_attributes,
             sent: request.sent.unwrap_or_else(OffsetDateTime::now_utc),
             available_at: now + delay,
             receive_count,
@@ -565,6 +570,62 @@ fn enqueue(state: &mut State, queue_url: &str, operation: &'static str, request:
         md5_of_body: Some(md5_body),
         md5_of_message_attributes: md5_attributes,
     })
+}
+
+/// The attributes with their `Number` values as SQS stores them (see [`normalized_number`]).
+fn normalized_numbers(mut attributes: MessageAttributes) -> MessageAttributes {
+    for value in attributes.values_mut() {
+        if let (BaseType::Number, AttributeData::Text(text)) = (value.base_type(), value.data())
+            && let Some(normalized) = normalized_number(text)
+            && normalized != *text
+            && let Ok(stored) =
+                AttributeValue::with_type(value.data_type().to_string(), AttributeData::Text(normalized))
+        {
+            *value = stored;
+        }
+    }
+    attributes
+}
+
+/// A `Number` value as SQS stores it: without leading and trailing zeros, in plain notation
+/// (`1.50` as `1.5`, `3.0` as `3`, `007` as `7`, `1.0E2` as `100`). `None` for a value that is no
+/// decimal number (left as it is).
+fn normalized_number(value: &str) -> Option<String> {
+    let (negative, unsigned) = match value.as_bytes().first()? {
+        b'-' => (true, &value[1..]),
+        b'+' => (false, &value[1..]),
+        _ => (false, value),
+    };
+    let (mantissa, exponent) = match unsigned.find(['e', 'E']) {
+        Some(at) => (&unsigned[..at], unsigned[at + 1..].parse::<i64>().ok()?),
+        None => (unsigned, 0),
+    };
+    let (integer, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let is_digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+    if (integer.is_empty() && fraction.is_empty()) || !is_digits(integer) || !is_digits(fraction) {
+        return None;
+    }
+    let digits = format!("{integer}{fraction}");
+    let significant = digits.trim_start_matches('0');
+    // Where the decimal point is, counted from the first significant digit.
+    let point = i64::try_from(integer.len()).ok()? + exponent - i64::try_from(digits.len() - significant.len()).ok()?;
+    let significant = significant.trim_end_matches('0');
+    if significant.is_empty() {
+        return Some("0".into());
+    }
+    if point.abs() > 300 {
+        return None; // far outside what SQS accepts
+    }
+    let length = i64::try_from(significant.len()).ok()?;
+    let plain = if point <= 0 {
+        format!("0.{}{significant}", "0".repeat(usize::try_from(-point).ok()?))
+    } else if point >= length {
+        format!("{significant}{}", "0".repeat(usize::try_from(point - length).ok()?))
+    } else {
+        let (whole, part) = significant.split_at(usize::try_from(point).ok()?);
+        format!("{whole}.{part}")
+    };
+    Some(if negative { format!("-{plain}") } else { plain })
 }
 
 /// Moves messages that exhausted `maxReceiveCount` to the dead-letter queue.
