@@ -16,6 +16,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from fanferro._core import AttributeValue, Delivery, Payload, WireMessage, is_sqs_safe_text, new_message_id
+from fanferro._utils import optional_seconds
 from fanferro.codecs._base import loads_json
 from fanferro.errors import DecodeError
 
@@ -430,13 +431,23 @@ class Message[T]:
             await settler.ack(self)
 
     async def retry(self, *, delay: float | None = None, error: BaseException | None = None) -> None:
-        """Retries later (after ``delay`` seconds, or the retry policy's backoff)."""
+        """Retries later (after ``delay`` seconds, or the retry policy's backoff).
+
+        Raises:
+            ValueError: If ``delay`` is negative or NaN (the message stays unsettled).
+        """
+        delay = optional_seconds(delay, "delay")  # before _begin: an invalid delay settles nothing
         settler = self._begin("retried")
         if settler is not None:
             await settler.retry(self, delay, error)
 
     async def requeue(self, *, delay: float | None = None, error: BaseException | None = None) -> None:
-        """Re-enqueues a copy (attempt counter + 1) and deletes this one."""
+        """Re-enqueues a copy (attempt counter + 1) and deletes this one.
+
+        Raises:
+            ValueError: If ``delay`` is negative or NaN (the message stays unsettled).
+        """
+        delay = optional_seconds(delay, "delay")  # before _begin: an invalid delay settles nothing
         settler = self._begin("requeued")
         if settler is not None:
             await settler.requeue(self, delay, error)

@@ -73,6 +73,8 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 - **events:** Awaitables returned by sync event hooks (a lambda calling an async function) are
   awaited (#123)
 - **routing:** `functools.partial` handlers are accepted (#124)
+- **consumer:** A negative or NaN retry delay raises `ValueError` before the message is marked
+  settled, so that it can still be settled (#125)
 
 ## [0.5.0] - 2026-10-17
 

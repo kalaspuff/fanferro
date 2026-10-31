@@ -152,6 +152,32 @@ async def test_explicit_settlement(client_factory: ClientFactory, name: Any) -> 
     assert (await queue.approximate_count())["visible"] == 0
 
 
+async def test_an_invalid_retry_delay_leaves_the_message_unsettled(client_factory: ClientFactory, name: Any) -> None:
+    # message.retry(delay=-1) marked the message settled before the native call refused the delay:
+    # it could not be settled any more, and the consumer reported a consumer error.
+    client = client_factory()
+    queue = client.queue(name("bad-delay"))
+    outcomes: list[str] = []
+    errors: list[fanferro.Event] = []
+    client.on("consumer.error", errors.append)
+    consumer = client.consumer(queue, wait_time=1, auto_ack=False)
+
+    @consumer.route(OrderCreated)
+    async def handle(message: fanferro.Message[OrderCreated]) -> None:
+        with pytest.raises(ValueError, match="delay"):
+            await message.retry(delay=-1)
+        await message.ack()
+        outcomes.append(str(message.outcome))
+
+    async with client:
+        await queue.send(OrderCreated(order_id=1))
+        await consume_until(consumer, lambda: len(outcomes) == 1)
+        await consumer.stop()
+        assert await queue.approximate_count() == {"visible": 0, "in_flight": 0, "delayed": 0}
+    assert outcomes == ["acked"]
+    assert errors == []
+
+
 async def test_unsettled_messages_are_left_to_time_out(client_factory: ClientFactory, name: Any) -> None:
     # auto_ack=False: a message the handler does not settle comes back once its visibility timeout
     # ran out. It was released at once (and redelivered in a loop) when its delivery was dropped,

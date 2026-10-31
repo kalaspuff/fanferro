@@ -14,6 +14,8 @@ Example::
 
 from __future__ import annotations
 
+from fanferro._utils import optional_seconds
+
 __all__ = ["Discard", "HandlerAction", "Reject", "Requeue", "Retry"]
 
 
@@ -29,7 +31,7 @@ class Retry(HandlerAction):
 
     def __init__(self, reason: str = "retry requested", *, delay: float | None = None) -> None:
         super().__init__(reason)
-        self.delay = delay
+        self.delay = optional_seconds(delay, "delay")
 
 
 class Requeue(HandlerAction):
@@ -37,7 +39,7 @@ class Requeue(HandlerAction):
 
     def __init__(self, reason: str = "requeue requested", *, delay: float | None = None) -> None:
         super().__init__(reason)
-        self.delay = delay
+        self.delay = optional_seconds(delay, "delay")
 
 
 class Reject(HandlerAction):
