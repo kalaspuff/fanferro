@@ -636,6 +636,20 @@ async def test_reserved_attributes_are_rejected(client_factory: ClientFactory, n
             await queue.send({"x": 1}, attributes={f"a{i}": "v" for i in range(10)})
 
 
+async def test_numbers_of_more_than_38_digits_are_refused_before_sending(
+    client_factory: ClientFactory, name: Any
+) -> None:
+    # docs/parity M11: SQS refuses Number values of more than 38 significant digits.
+    client = client_factory()
+    queue = client.queue(name("digits"))
+    async with client:
+        with pytest.raises(fanferro.ValidationError, match="39 significant digits"):
+            await queue.send({"x": 1}, attributes={"n": int("1" * 39)})
+        await queue.send({"x": 1}, attributes={"n": int("1" * 38)})
+        messages = await drain_queue(client, queue)
+    assert [message.attribute("n") for message in messages] == [int("1" * 38)]
+
+
 class LegacyEnvelope:
     """A custom (Python) envelope: consumers unwrap it in Python, built-in ones in the engine."""
 

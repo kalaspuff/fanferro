@@ -57,6 +57,8 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 - **memory:** SNS of the in-memory broker refuses topic ARNs of other regions in every operation,
   refuses invalid FIFO ids with SNS's text (a whole `PublishBatch` call for one such entry), and
   writes the default topic policy as SNS does (#159)
+- `Number` attributes with more than 38 significant digits raise `ValidationError` before sending,
+  as SQS refuses them; the in-memory broker refuses them with SQS's text (#160)
 
 ## [0.6.0] - 2026-10-31
 
