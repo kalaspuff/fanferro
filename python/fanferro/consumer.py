@@ -578,6 +578,8 @@ class Consumer:
         self._stopping = False
         self._force_stop = False
         self._active = self._waiting = self._blocked = self._group_waits = 0
+        # A group task cancelled before it ran (stopping) left its group behind in the last one.
+        self._sequencer = _GroupSequencer(self)
         client._acquire_pump()
         try:
             self._engine.start()
@@ -792,11 +794,14 @@ class Consumer:
             await self._drain()
             await stop_receiving
             buffered = engine.drain_buffered()
-            if policy.release_prefetched:
-                await asyncio.gather(*(self._release_quietly(delivery) for delivery in buffered))
-            else:
+            deadline = self._drain_deadline
+            if not policy.release_prefetched and (deadline is None or time.monotonic() < deadline):
                 for delivery in buffered:
                     self._schedule(delivery)
+            elif policy.release_prefetched or policy.release_unfinished:
+                # Past the drain deadline their tasks would be cancelled before they ran.
+                await asyncio.gather(*(self._release_quietly(delivery) for delivery in buffered))
+            # Otherwise they are left to time out, like unfinished messages (engine.leave_unsettled()).
             await self._drain()
             if self._tasks:
                 for task in list(self._tasks):

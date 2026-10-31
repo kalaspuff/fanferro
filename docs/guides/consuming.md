@@ -192,7 +192,8 @@ Shutdown follows `ShutdownPolicy`:
    visibility timeout). With `abort_receives=False` the poll may finish instead (≤ `wait_time`) and
    its messages are released right away - slower to stop, nothing delayed (ADR 0007, ADR 0008);
 2. prefetched messages are released at once (`release_prefetched`), also those that wait for a
-   handler slot; in-flight handlers get `drain_timeout` seconds (`None` = forever) with
+   handler slot (with `release_prefetched=False` they are processed during the drain, and those
+   not dispatched yet when `drain_timeout` has passed count as unfinished); in-flight handlers get `drain_timeout` seconds (`None` = forever) with
    `consumer.draining` progress events every `progress_interval`;
 3. remaining handlers are cancelled and get `cancel_timeout` seconds to unwind;
 4. unfinished messages are released (`release_unfinished`) or left to time out;

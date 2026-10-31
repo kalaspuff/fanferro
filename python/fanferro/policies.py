@@ -176,7 +176,9 @@ class ShutdownPolicy:
        allowed to finish instead (at most the consumer's ``wait_time``, overlapping with step 2) and
        whatever it returns is released immediately.
        Prefetched messages that have not started are released (made visible) when
-       ``release_prefetched`` is set, otherwise they are processed as part of the drain.
+       ``release_prefetched`` is set, otherwise they are processed as part of the drain (those
+       still waiting to be dispatched once ``drain_timeout`` has passed are handled like unfinished
+       messages, step 4).
     2. In-flight handlers get ``drain_timeout`` seconds to finish (``None`` waits forever); a
        ``consumer.draining`` event reports progress every ``progress_interval`` seconds.
     3. Still-running handlers are cancelled and get ``cancel_timeout`` seconds to unwind.
