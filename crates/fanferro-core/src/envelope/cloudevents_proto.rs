@@ -96,7 +96,7 @@ pub enum Attr {
 }
 
 /// The CloudEvents protobuf (binary) envelope.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CloudEventsProtobuf {
     /// Promote the message type to this message attribute (for SNS filter policies).
     pub type_attribute: Option<String>,

@@ -5,7 +5,14 @@ from __future__ import annotations
 import sys
 from typing import Any
 
-from fanferro.codecs._base import JSON_CONTENT_TYPE, EncodedBody, is_json_content_type, media_type, referenced_types
+from fanferro.codecs._base import (
+    JSON_CONTENT_TYPE,
+    EncodedBody,
+    SettingsEquality,
+    is_json_content_type,
+    media_type,
+    referenced_types,
+)
 from fanferro.errors import DecodeError, EncodeError
 
 __all__ = ["MsgspecCodec"]
@@ -16,7 +23,7 @@ def _struct() -> Any:
     return getattr(module, "Struct", None)
 
 
-class MsgspecCodec:
+class MsgspecCodec(SettingsEquality):
     """Encodes ``msgspec.Struct`` values as JSON and decodes JSON into them (fast and validated)."""
 
     name = "msgspec"

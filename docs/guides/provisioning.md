@@ -18,7 +18,9 @@ client.subscription(orders, worker, filter_policy={"fanferro.type": ["orders.cre
 ```
 
 Declaring a resource again returns the same handle; settings that differ from the first declaration
-raise `ConfigurationError` (configure each resource in one place). Several queues can share a
+raise `ConfigurationError` (configure each resource in one place). Settings compare by value:
+built-in envelopes and codecs with the same settings are equal (`CloudEvents() == CloudEvents()`),
+custom ones as their `__eq__` says (by identity unless they define it). Several queues can share a
 dead-letter queue: the first declaration of it sets its attributes, and later `DeadLetterQueue`s of
 the same name may only repeat them.
 

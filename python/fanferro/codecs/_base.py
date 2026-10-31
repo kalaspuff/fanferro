@@ -18,6 +18,7 @@ __all__ = [
     "TEXT_CONTENT_TYPE",
     "Codec",
     "EncodedBody",
+    "SettingsEquality",
     "is_json_content_type",
     "loads_json",
     "media_type",
@@ -28,6 +29,22 @@ JSON_CONTENT_TYPE = "application/json"
 TEXT_CONTENT_TYPE = "text/plain; charset=utf-8"
 OCTET_STREAM = "application/octet-stream"
 PROTOBUF_CONTENT_TYPE = "application/x-protobuf"
+
+
+class SettingsEquality:
+    """Makes codecs of the same class with the same settings equal.
+
+    Declaring a topic or queue again compares its settings, its codec too: two ``JsonCodec()``
+    are the same codec, not a conflict. Settings are the instance attributes.
+    """
+
+    def __eq__(self, other: object) -> bool:
+        if type(other) is not type(self):
+            return NotImplemented
+        return vars(self) == vars(other)
+
+    def __hash__(self) -> int:
+        return hash(type(self))
 
 
 class EncodedBody(NamedTuple):

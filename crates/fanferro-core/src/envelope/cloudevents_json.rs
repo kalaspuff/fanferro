@@ -30,7 +30,7 @@ const CORE_ATTRIBUTES: &[&str] =
     &["specversion", "id", "source", "type", "datacontenttype", "dataschema", "subject", "time", "data", "data_base64"];
 
 /// The CloudEvents structured JSON envelope (fanferro's default).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CloudEventsJson {
     /// Write `content-type: application/cloudevents+json` as a message attribute.
     /// Consumers still detect events without it by sniffing the JSON body.
