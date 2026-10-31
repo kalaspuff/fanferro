@@ -83,6 +83,10 @@ class OutboxStore(Protocol):
         ...
 
 
+_MAX_FAILING_RECORDS = 10_000
+"""Records whose failures a relay counts (the oldest are forgotten first)."""
+
+
 class _HeldBack(Exception):  # noqa: N818 - not an error of the record itself
     """A FIFO record not attempted because an earlier record of its group failed this round."""
 
@@ -148,20 +152,21 @@ class OutboxRelay:
     one by one in order, and a failure stops the rest of that message group for the round, so the
     group's order is preserved.
 
-    A record whose attempt fails with an error that retrying cannot fix (its destination does not
-    exist, the destination refuses the message), and that has been attempted ``max_attempts``
-    times, is given up (:meth:`OutboxStore.mark_abandoned`): it no longer holds back the records
-    behind it, and a FIFO group continues with its next record, as after dead-lettering. Records
-    that fail with errors that may pass (throttling, timeouts, network errors) are retried until
-    they are published.
+    A record whose attempts failed ``max_attempts`` times with an error that retrying cannot fix
+    (its destination does not exist, the destination refuses the message) is given up
+    (:meth:`OutboxStore.mark_abandoned`): it no longer holds back the records behind it, and a FIFO
+    group continues with its next record, as after dead-lettering. Errors that may pass (throttling,
+    timeouts, network errors) and rounds spent behind an earlier record of a FIFO group do not
+    count: such records are retried until they are published. The relay counts these failures
+    itself (a restarted relay starts again from zero).
 
     Args:
         client: The fanferro client.
         store: The outbox store.
         batch_size: Records claimed per round.
         poll_interval: Pause after an empty round (seconds).
-        max_attempts: Attempts before a record that keeps failing for good is given up (``None``:
-            retry it forever).
+        max_attempts: Failed attempts for good before a record is given up (``None``: retry it
+            forever).
     """
 
     def __init__(
@@ -182,6 +187,9 @@ class OutboxRelay:
         self.max_attempts = max_attempts
         self._stopped = asyncio.Event()
         self._warned_store = False
+        # Failures for good per record id: rounds of temporary errors, or of waiting behind an earlier
+        # record of a FIFO group, are attempts for the store but do not count towards giving up.
+        self._failures: dict[str, int] = {}
 
     async def run_once(self) -> int:
         """Publishes one round of records; returns how many were published."""
@@ -213,21 +221,31 @@ class OutboxRelay:
             published.append(record.id)
         if published:
             await self.store.mark_published(published)
+            if self._failures:
+                for identifier in published:
+                    self._failures.pop(identifier, None)
         return len(published)
 
     async def _failed(self, record: OutboxRecord, error: BaseException) -> None:
         """Records a failed attempt, or gives the record up (see :class:`OutboxRelay`)."""
-        attempts = record.attempts + 1
-        if self.max_attempts is not None and attempts >= self.max_attempts and not getattr(error, "retryable", False):
+        failures = self._failures
+        count = 0
+        if self.max_attempts is not None and not getattr(error, "retryable", False):
+            count = failures.pop(record.id, 0) + 1
+            failures[record.id] = count  # most recent last
+            if len(failures) > _MAX_FAILING_RECORDS:
+                del failures[next(iter(failures))]
+        if self.max_attempts is not None and count >= self.max_attempts:
             abandon = getattr(self.store, "mark_abandoned", None)
             if abandon is not None:
                 _LOGGER.error(
-                    "outbox record %s given up after %d attempts (%s: %s)",
+                    "outbox record %s given up after %d attempts that failed for good (%s: %s)",
                     record.id,
-                    attempts,
+                    count,
                     type(error).__name__,
                     error,
                 )
+                failures.pop(record.id, None)
                 await abandon(record, error)
                 return
             if not self._warned_store:
