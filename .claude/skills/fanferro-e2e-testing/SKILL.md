@@ -48,6 +48,14 @@ uv run python scripts/probe_backends.py compare probe-aws.json probe-memory.json
   broker (`backend/memory`) or the error classification (`backend/aws/errors.rs`) to match AWS, or
   note why fanferro must behave differently. Facts named `info.*` (timings, URLs, request ids) are
   never counted as differences.
+* `scripts/probe_aws_cli.sh` makes the raw SQS, SNS, S3 and STS calls fanferro relies on with the
+  AWS CLI (error codes and HTTP statuses as the services send them, receipt handle and FIFO
+  semantics, limits, SNS notification documents, presigned URLs) and prints normalised results:
+  `diff -u` the output of real AWS (`--region`) and of an emulator (`--endpoint-url`, with the
+  `test`/`test` credentials). It needs bash 3.2+, the AWS CLI (`AWS_CLI` overrides the command) and
+  curl, and its `ffprobe-cli-*` resources fall under the same IAM policy and `cleanup`. A case an
+  emulator accepts but AWS refuses must not change resources later cases use: run such cases on
+  throwaway queues and topics (MiniStack, for example, turns a standard topic into a FIFO one).
 * Add a scenario with `@scenario("area.name")`: record facts with `probe.fact(...)` and
   `await probe.outcome(key, awaitable)`, name resources with `probe.name(...)`, and wait for
   deliveries with `collect(...)`/`Collector` (on real AWS, `warm_up` waits until a new subscription

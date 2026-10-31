@@ -26,7 +26,8 @@ skills/fanferro/SKILL.md       Skill for agents of applications using fanferro (
 .claude/skills/                Skills for agents developing fanferro (this repository)
 scripts/                       check_consistency.py, generate_reference.py, release.py, release_notes.py,
                                smoke_test.py (run against every built wheel), benchmark.py,
-                               probe_backends.py (real AWS vs MiniStack, LocalStack and memory)
+                               probe_backends.py and probe_aws_cli.sh (real AWS vs MiniStack, LocalStack
+                               and memory)
 .github/workflows/             ci.yml, prepare-release.yml, tag-release.yml, release.yml, pr-title.yml
 ```
 
@@ -50,7 +51,7 @@ Requirements: Rust (stable, see `rust-toolchain.toml`), [uv](https://docs.astral
 | Release wheels for all Linux targets | `make wheels` (maturin + zig, `--profile dist`, like release.yml; `make wheels-fast` uses `build-wheels`) |
 | Smoke-test an installed wheel | `python -I scripts/smoke_test.py` |
 | Throughput per message (wall and CPU time) | `uv run python scripts/benchmark.py` (`--endpoint` for MiniStack) |
-| Compare behaviour and errors with real AWS | `uv run python scripts/probe_backends.py run --target memory` (`ministack`, `localstack`, `aws`), then `compare` (see the e2e testing skill) |
+| Compare behaviour and errors with real AWS | `uv run python scripts/probe_backends.py run --target memory` (`ministack`, `localstack`, `aws`), then `compare`; raw API calls: `scripts/probe_aws_cli.sh` (see the e2e testing skill) |
 | Lint GitHub workflows | `uvx --from actionlint-py actionlint` (part of `make lint`) |
 | Run MiniStack manually | `uv run ministack` (port 4566) |
 

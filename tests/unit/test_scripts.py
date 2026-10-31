@@ -101,6 +101,16 @@ def test_backend_probe_runs_and_compares(tmp_path: Path) -> None:
     assert all("123456789012" in json.dumps(s) for s in policy["Statement"][:2])
 
 
+@pytest.mark.skipif(sys.platform == "win32" or shutil.which("bash") is None, reason="needs bash")
+def test_aws_cli_probe_is_valid_shell() -> None:
+    script = str(SCRIPTS / "probe_aws_cli.sh")
+    result = subprocess.run(["bash", "-n", script], capture_output=True, text=True, timeout=30, check=False)
+    assert result.returncode == 0, result.stderr
+    if shutil.which("shellcheck"):
+        result = subprocess.run(["shellcheck", script], capture_output=True, text=True, timeout=60, check=False)
+        assert result.returncode == 0, result.stdout
+
+
 CHANGELOG = """# Changelog
 
 Intro.
