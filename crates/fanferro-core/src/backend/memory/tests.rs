@@ -628,8 +628,14 @@ async fn invalid_filter_policies_are_refused() {
         .subscribe(&topic, "sqs", queue_arn, &attributes(&[("FilterPolicy", r#"{"kind": [{"glob": "a*"}]}"#)]))
         .await
         .unwrap_err();
-    assert_eq!(error.aws().unwrap().code.as_deref(), Some("InvalidParameter"));
-    assert!(error.to_string().contains("FilterPolicy: \"kind\": unrecognized match type glob"), "{error}");
+    // SNS's texts (docs/parity S5).
+    assert_eq!(
+        code_and_message(&error),
+        (
+            "InvalidParameter".to_string(),
+            "Invalid parameter: Attributes Reason: FilterPolicy: Unrecognized match type glob".to_string()
+        )
+    );
     let nested =
         attributes(&[("FilterPolicy", r#"{"order": {"status": ["paid"]}}"#), ("FilterPolicyScope", "MessageBody")]);
     let subscription = backend.sns.subscribe(&topic, "sqs", queue_arn, &nested).await.unwrap();
@@ -639,7 +645,10 @@ async fn invalid_filter_policies_are_refused() {
         .set_subscription_attribute(&subscription, "FilterPolicyScope", "MessageAttributes")
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("FilterPolicyScope MessageBody"), "{error}");
+    assert_eq!(
+        code_and_message(&error).1,
+        "Invalid parameter: Filter policy scope MessageAttributes does not support nested filter policy"
+    );
     let request = |body: &str| PublishRequest { message: body.into(), ..PublishRequest::default() };
     backend.sns.publish(&topic, request(r#"{"order": {"status": "paid"}}"#)).await.unwrap();
     backend.sns.publish(&topic, request(r#"{"order": {"status": "open"}}"#)).await.unwrap();
@@ -1031,4 +1040,79 @@ async fn fifo_ids_are_validated_like_sqs() {
             )
         );
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn topics_and_subscriptions_are_validated_and_reported_like_sns() {
+    // docs/parity S1-S4: SNS's codes, texts and default attributes.
+    let (_, backend) = broker();
+    let invalid = |error: Error| code_and_message(&error);
+    let parameter = |message: &str| ("InvalidParameter".to_string(), message.to_string());
+    let fifo = attributes(&[("FifoTopic", "true")]);
+    for (name, attributes) in [("bad name", StringMap::new()), ("t.fifo", StringMap::new()), ("t", fifo.clone())] {
+        let err = backend.sns.create_topic(name, &attributes, &StringMap::new()).await.unwrap_err();
+        assert_eq!(invalid(err), parameter("Invalid parameter: Topic Name"), "{name}");
+    }
+    let err = backend
+        .sns
+        .create_topic("t", &attributes(&[("ContentBasedDeduplication", "true")]), &StringMap::new())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        invalid(err),
+        parameter("Invalid parameter: Attributes Reason: Unknown attribute ContentBasedDeduplication")
+    );
+    let err =
+        backend.sns.create_topic("t", &attributes(&[("SignatureVersion", "3")]), &StringMap::new()).await.unwrap_err();
+    assert_eq!(
+        invalid(err),
+        parameter("Invalid parameter: Attributes Reason: SignatureVersion: Invalid value '[3]'. Must be 1 or 2.")
+    );
+    let topic = backend.sns.create_topic("t", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let err =
+        backend.sns.create_topic("t", &attributes(&[("DisplayName", "Other")]), &StringMap::new()).await.unwrap_err();
+    assert_eq!(
+        invalid(err),
+        parameter("Invalid parameter: Attributes Reason: Topic already exists with different attributes")
+    );
+    let err = backend.sns.set_topic_attribute(&topic, "SignatureVersion", "3").await.unwrap_err();
+    assert_eq!(invalid(err), parameter("Invalid parameter: SignatureVersion: Invalid value '[3]'. Must be 1 or 2."));
+    let err = backend.sns.set_topic_attribute(&topic, "FifoTopic", "true").await.unwrap_err();
+    assert_eq!(invalid(err), parameter("Invalid parameter: AttributeName"));
+    let reported = backend.sns.get_topic_attributes(&topic).await.unwrap();
+    let policy: serde_json::Value = serde_json::from_str(&reported["Policy"]).unwrap();
+    assert_eq!(policy["Statement"][0]["Resource"], topic.as_str());
+    assert!(reported["EffectiveDeliveryPolicy"].contains("defaultHealthyRetryPolicy"));
+
+    let fifo_queue =
+        backend.sqs.create_queue("q.fifo", &attributes(&[("FifoQueue", "true")]), &StringMap::new()).await.unwrap();
+    let fifo_arn = backend.sqs.get_queue_attributes(&fifo_queue).await.unwrap()["QueueArn"].clone();
+    let err = backend.sns.subscribe(&topic, "sqs", &fifo_arn, &StringMap::new()).await.unwrap_err();
+    assert_eq!(
+        invalid(err),
+        parameter(
+            "Invalid parameter: Invalid parameter: Endpoint Reason: FIFO SQS Queues can not be subscribed to standard SNS topics"
+        )
+    );
+    let queue = backend.sqs.create_queue("q", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let queue_arn = backend.sqs.get_queue_attributes(&queue).await.unwrap()["QueueArn"].clone();
+    let filtered = attributes(&[("FilterPolicy", r#"{"kind": ["a"]}"#)]);
+    let subscription = backend.sns.subscribe(&topic, "sqs", &queue_arn, &filtered).await.unwrap();
+    let raw = attributes(&[("RawMessageDelivery", "true")]);
+    let err = backend.sns.subscribe(&topic, "sqs", &queue_arn, &raw).await.unwrap_err();
+    assert_eq!(
+        invalid(err),
+        parameter("Invalid parameter: Attributes Reason: Subscription already exists with different attributes")
+    );
+    let reported = backend.sns.get_subscription_attributes(&subscription).await.unwrap();
+    assert_eq!(reported["FilterPolicyScope"], "MessageAttributes");
+    assert_eq!(reported["SubscriptionPrincipal"], "arn:aws:iam::000000000000:root");
+
+    // A topic ARN of another region (docs/parity S3).
+    let elsewhere = topic.replace("us-east-1", "us-west-2");
+    let request = PublishRequest { message: "m".into(), ..PublishRequest::default() };
+    let err = backend.sns.publish(&elsewhere, request.clone()).await.unwrap_err();
+    assert_eq!(invalid(err), parameter("Invalid parameter: TopicArn"));
+    let err = backend.sns.publish_batch(&elsewhere, vec![request]).await.unwrap_err();
+    assert_eq!(invalid(err), parameter("Invalid parameter: TopicArn"));
 }
