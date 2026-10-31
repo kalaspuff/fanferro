@@ -31,7 +31,8 @@ It is authoritative for the installed version (this skill only summarizes it). A
 10. Environments sharing an AWS account: `fanferro.Client(queue_prefix=f"{env}-", topic_prefix=f"{env}-")`,
     never hand-built `f"{env}-..."` names. Write names without the prefix everywhere (strings passed to
     `subscription`/`consumer`/`DeadLetterQueue` get it too); `prefixed=False` for shared resources, passed
-    as handles; `queue.name` and events carry the prefixed name.
+    as handles; `queue.name` and events carry the prefixed name. `bucket_prefix=f"{env}-"` prefixes
+    `LargePayloads` buckets the same way.
 
 ## Skeleton
 

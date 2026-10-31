@@ -86,7 +86,12 @@ as a string (`client.subscription`, `client.consumer`, `topic.subscribe`, `queue
 
 ```python
 env = os.environ["APP_ENV"]
-client = fanferro.Client(queue_prefix=f"{env}-", topic_prefix=f"{env}-")
+client = fanferro.Client(
+    queue_prefix=f"{env}-",
+    topic_prefix=f"{env}-",
+    bucket_prefix=f"{env}-",
+    large_payloads=fanferro.LargePayloads("my-app-payloads"),  # AWS: staging-my-app-payloads
+)
 
 orders = client.topic("orders")  # AWS: staging-orders
 worker = client.queue(
@@ -128,13 +133,18 @@ audit = client.topic("shared-audit", prefixed=False)  # shared by all environmen
 * An outbox record holds the ARN or URL of its destination, so a relay publishes to the
   environment the message was prepared in. It finds the destination's settings (such as
   `large_payloads`) by the prefixed name, though, so give the relay's client the same prefixes as
-  the publisher's.
+  the publisher's, `bucket_prefix` included: the relay uploads large payloads.
 * The prefix counts toward the AWS limits: at most 80 characters for a queue name and 256 for a
   topic name, a `.fifo` suffix included. fanferro checks every name when it is declared, before
   any network call, and the error says what to shorten:
   `queue name '...' (prefix 'staging-' + '...') is 83 characters; SQS allows 80 - shorten the prefix or the name`.
-* The prefixes apply to queues and topics only. For large payloads, give each environment its own
-  bucket or key prefix (`LargePayloads("my-bucket", prefix=f"{env}/fanferro/")`).
+* `bucket_prefix` is prepended to the bucket of every `LargePayloads` setting, the client's and
+  those of topics and queues; `LargePayloads(..., prefixed=False)` opts a shared bucket out (then
+  give each environment its own key prefix: `prefix=f"{env}/fanferro/"`). S3 bucket names are
+  global and stricter than queue names: the prefix may only contain lowercase letters, digits,
+  `-` and `.`, and the bucket name, prefix included, is checked against the 63 characters S3
+  allows when it is declared. Consumers download a payload from the bucket its pointer names, so
+  they read it whatever their own prefix.
 
 The prefix also scopes IAM permissions to one environment. A role for staging (account
 `123456789012`) that publishes, consumes and looks resources up:

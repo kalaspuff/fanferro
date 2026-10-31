@@ -142,7 +142,8 @@ every environment rewires the queue's redrive policy). `queue.name`, `client.que
 metrics and outbox records carry the prefixed name: compare with `topic.name` in matchers
 (`m.topic() == orders.name`) and give an outbox relay the same prefixes. Names are checked when
 declared: letters, digits, `-`, `_`, a `.fifo` suffix, at most 80 characters for queues and 256
-for topics, prefix included.
+for topics, prefix included. `bucket_prefix=f"{env}-"` does the same for the buckets of
+`LargePayloads` (`prefixed=False` for a shared bucket; lowercase, at most 63 characters).
 
 ## Handler signatures
 

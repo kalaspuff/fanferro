@@ -147,6 +147,8 @@ class _Destination(_Resource):
         codec: Codec | str | None,
     ) -> None:
         super().__init__(client, name, provisioning)
+        if large_payloads is not None and large_payloads is not _UNSET:
+            large_payloads.bucket_name(client.bucket_prefix)  # fail fast on a name S3 rejects
         self._envelope = envelope
         self._large_payloads = large_payloads
         self._group_id = group_id
@@ -201,7 +203,9 @@ class _Destination(_Resource):
         if self._transport is None:
             core = await self._client._core()
             settings = self.large_payloads
-            self._transport = core.transport(settings.to_core() if settings is not None else None)
+            self._transport = core.transport(
+                settings.to_core(self._client.bucket_prefix) if settings is not None else None
+            )
         return self._transport
 
     def _message(self, body: Any, options: Mapping[str, Any]) -> OutgoingMessage:

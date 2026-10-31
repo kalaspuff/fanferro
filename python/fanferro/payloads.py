@@ -27,6 +27,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Literal
 
 from fanferro._utils import Duration, seconds
+from fanferro.errors import ConfigurationError
 from fanferro.provisioning import Kms
 
 if TYPE_CHECKING:
@@ -34,13 +35,16 @@ if TYPE_CHECKING:
 
 __all__ = ["LargePayloads", "PayloadFetch"]
 
+_MAX_BUCKET_NAME = 63
+"""Maximum length of S3 bucket names."""
+
 
 @dataclass(frozen=True, slots=True)
 class LargePayloads:
     """Offload large message bodies to S3.
 
     Attributes:
-        bucket: Bucket for payload objects.
+        bucket: Bucket for payload objects, without the client's ``bucket_prefix``.
         prefix: Key prefix; the object key is ``{prefix}{message_id}/{sha256 of the body}``
             (idempotent across retries of the same bytes).
         threshold: Offload when the encoded message (body plus attributes) exceeds this many bytes,
@@ -55,6 +59,8 @@ class LargePayloads:
         bucket_key: Use S3 bucket keys with SSE-KMS (fewer KMS requests).
         storage_class: S3 storage class, e.g. ``"INTELLIGENT_TIERING"``.
         create_bucket: Create the bucket during provisioning if it does not exist.
+        prefixed: Prepend the client's ``bucket_prefix`` to ``bucket`` (``False`` for a bucket
+            shared by several environments).
     """
 
     bucket: str
@@ -68,6 +74,7 @@ class LargePayloads:
     bucket_key: bool = True
     storage_class: str | None = None
     create_bucket: bool = False
+    prefixed: bool = True
 
     def __post_init__(self) -> None:
         if not self.bucket:
@@ -77,8 +84,24 @@ class LargePayloads:
         if self.format == "aws_extended" and self.reference != "s3":
             raise ValueError("the aws_extended pointer format only supports reference='s3'")
 
-    def to_core(self) -> dict[str, Any]:
-        """The core representation."""
+    def bucket_name(self, bucket_prefix: str = "") -> str:
+        """The AWS name of the bucket: ``bucket_prefix + bucket``, unless ``prefixed`` is ``False``.
+
+        Raises:
+            ConfigurationError: The prefixed name is longer than the 63 characters S3 allows.
+        """
+        if not self.prefixed or not bucket_prefix:
+            return self.bucket
+        name = bucket_prefix + self.bucket
+        if len(name) > _MAX_BUCKET_NAME:
+            raise ConfigurationError(
+                f"bucket name {name!r} (prefix {bucket_prefix!r} + {self.bucket!r}) is {len(name)} characters; "
+                f"S3 allows {_MAX_BUCKET_NAME} - shorten the prefix or the bucket"
+            )
+        return name
+
+    def to_core(self, bucket_prefix: str = "") -> dict[str, Any]:
+        """The core representation, with the client's ``bucket_prefix`` applied."""
         encryption: dict[str, Any]
         if self.encryption is None:
             encryption = {"mode": "bucket_default"}
@@ -87,7 +110,7 @@ class LargePayloads:
         else:
             encryption = {"mode": "s3"}
         return {
-            "bucket": self.bucket,
+            "bucket": self.bucket_name(bucket_prefix),
             "key_prefix": self.prefix,
             "threshold": self.threshold,
             "always": self.always,

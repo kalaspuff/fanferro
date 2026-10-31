@@ -298,3 +298,36 @@ def test_names_must_follow_aws_naming_rules() -> None:
         client.queue(url="http://localhost:4566/000000000000/my.queue")
     with pytest.raises(fanferro.ConfigurationError, match=r"^topic name 'my\.topic' may only contain"):
         client.topic(arn="arn:aws:sns:us-east-1:000000000000:my.topic")
+
+
+def test_bucket_prefix_applies_to_every_large_payloads_bucket() -> None:
+    payloads = fanferro.LargePayloads("payloads", create_bucket=True)
+    client = memory_client(bucket_prefix="staging-", large_payloads=payloads)
+    assert client.bucket_prefix == "staging-"
+    assert client._client_config()["offload"]["bucket"] == "staging-payloads"
+    assert payloads.bucket == "payloads"  # the setting itself stays without the prefix
+    assert payloads.bucket_name() == "payloads"
+    assert payloads.bucket_name("staging-") == "staging-payloads"
+    shared = fanferro.LargePayloads("shared-payloads", prefixed=False)
+    assert shared.bucket_name("staging-") == "shared-payloads"
+    assert shared.to_core("staging-")["bucket"] == "shared-payloads"
+    assert memory_client()._client_config()["offload"] is None
+    assert memory_client(large_payloads=payloads)._client_config()["offload"]["bucket"] == "payloads"
+
+
+@pytest.mark.parametrize("prefix", ["Staging-", "staging_", "-staging", ".staging", "a..b", "staging/"])
+def test_invalid_bucket_prefixes_are_rejected(prefix: str) -> None:
+    with pytest.raises(fanferro.ConfigurationError, match="bucket_prefix"):
+        memory_client(bucket_prefix=prefix)
+
+
+def test_bucket_names_longer_than_s3_allows_are_rejected_at_declaration() -> None:
+    long = fanferro.LargePayloads("b" * 60)
+    with pytest.raises(fanferro.ConfigurationError, match="is 68 characters; S3 allows 63"):
+        memory_client(bucket_prefix="staging-", large_payloads=long)
+    client = memory_client(bucket_prefix="staging-")
+    with pytest.raises(fanferro.ConfigurationError, match="shorten the prefix or the bucket"):
+        client.queue("orders", large_payloads=long)
+    with pytest.raises(fanferro.ConfigurationError, match="S3 allows 63"):
+        client.topic("orders", large_payloads=long)
+    assert memory_client(bucket_prefix="staging-", large_payloads=fanferro.LargePayloads("b" * 60, prefixed=False))

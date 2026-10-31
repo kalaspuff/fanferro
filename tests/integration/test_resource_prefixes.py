@@ -112,3 +112,38 @@ async def test_environments_with_different_prefixes_are_isolated(client_factory:
     assert sorted(message.json()["order_id"] for message in staging_messages) == [2, 3]
     assert dev.queue(f"{base}-worker").name == f"dev-{base}-worker"
     assert staging.queue(f"{base}-worker").name == f"staging-{base}-worker"
+
+
+async def test_large_payloads_use_the_prefixed_bucket(client_factory: ClientFactory, name: Any) -> None:
+    bucket = name("payloads")
+    shared = fanferro.LargePayloads(name("shared-payloads"), always=True, create_bucket=True, prefixed=False)
+    client = client_factory(
+        **STAGING,
+        bucket_prefix="staging-",
+        large_payloads=fanferro.LargePayloads(bucket, always=True, create_bucket=True),
+    )
+    base = name("big")
+    queue = client.queue(base)
+    jobs = client.queue(f"{base}-jobs", large_payloads=fanferro.LargePayloads(f"{bucket}-jobs", always=True))
+    audit = client.queue(f"{base}-audit", large_payloads=shared)
+    async with client:
+        # The queue's own bucket is not created (no create_bucket): create it under its prefixed name.
+        core = await client._core()
+        await core.ensure_bucket(f"staging-{bucket}-jobs", True)
+        sent = [await destination.send({"n": n}) for n, destination in enumerate((queue, jobs, audit))]
+        bodies = [[message.json() for message in await drain_queue(client, q)] for q in (queue, jobs, audit)]
+    assert [result.offloaded.bucket if result.offloaded else None for result in sent] == [
+        f"staging-{bucket}",
+        f"staging-{bucket}-jobs",
+        shared.bucket,
+    ]
+    assert bodies == [[{"n": 0}], [{"n": 1}], [{"n": 2}]]
+    # A consumer without the prefix reads the payload from the bucket its pointer names.
+    publisher = client_factory(
+        **STAGING, bucket_prefix="staging-", large_payloads=fanferro.LargePayloads(bucket, always=True)
+    )
+    plain = client_factory()
+    async with publisher, plain:
+        await publisher.queue(base).send({"n": 3})
+        messages = await drain_queue(plain, plain.queue(f"staging-{base}"))
+    assert [message.json() for message in messages] == [{"n": 3}]

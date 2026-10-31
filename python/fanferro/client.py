@@ -49,6 +49,7 @@ _NAME_LIMITS = {"queue": ("SQS", 80), "topic": ("SNS", 256)}
 """Service and maximum length (``.fifo`` suffix included) of queue and topic names."""
 _VALID_NAME = re.compile(r"[A-Za-z0-9_-]+(?:\.fifo)?")
 _VALID_PREFIX = re.compile(r"[A-Za-z0-9_-]*")
+_VALID_BUCKET_PREFIX = re.compile(r"(?:[a-z0-9][a-z0-9.-]*)?")
 _EVENTS_WAIT = 1.0
 """Seconds the event pump waits for events per call (stopping wakes it at once)."""
 
@@ -68,6 +69,16 @@ def _checked_prefix(argument: str, kind: Literal["queue", "topic"], prefix: str)
         raise ConfigurationError(
             f"{argument} {prefix!r} may only contain letters, digits, '-' and '_', "
             f"like the {kind} names it is prepended to"
+        )
+    return prefix
+
+
+def _checked_bucket_prefix(prefix: str) -> str:
+    """Validates ``bucket_prefix``: the start of an S3 bucket name."""
+    if not _VALID_BUCKET_PREFIX.fullmatch(prefix) or ".." in prefix:
+        raise ConfigurationError(
+            f"bucket_prefix {prefix!r} may only contain lowercase letters, digits, '-' and '.' and must start "
+            "with a letter or a digit, like the S3 bucket names it is prepended to"
         )
     return prefix
 
@@ -136,6 +147,11 @@ class Client:
             ``prefixed=False``; a queue given by ``url`` is never prefixed.
         topic_prefix: Prepended as is to every topic name, like ``queue_prefix``; a topic given by
             ``arn`` is never prefixed.
+        bucket_prefix: Prepended as is to the bucket of every :class:`~fanferro.LargePayloads`
+            setting, the client's and those of topics and queues, e.g. ``"staging-"`` (lowercase
+            letters, digits, ``-`` and ``.``, like S3 bucket names). Opt a bucket out with
+            ``LargePayloads(prefixed=False)``. Consumers download payloads from the bucket a
+            pointer names, so they need no prefix.
         source: CloudEvents ``source`` of published messages, e.g. ``"urn:service:orders"`` (only
             carried by CloudEvents envelopes).
         envelope: Envelope for publishing (default: :class:`~fanferro.envelopes.Raw`: the payload
@@ -174,6 +190,7 @@ class Client:
         account_id: str | None = None,
         queue_prefix: str = "",
         topic_prefix: str = "",
+        bucket_prefix: str = "",
         source: str = "fanferro",
         envelope: Envelope | None = None,
         accept_envelopes: Sequence[Envelope] | None = None,
@@ -197,6 +214,9 @@ class Client:
     ) -> None:
         self.queue_prefix = _checked_prefix("queue_prefix", "queue", queue_prefix)
         self.topic_prefix = _checked_prefix("topic_prefix", "topic", topic_prefix)
+        self.bucket_prefix = _checked_bucket_prefix(bucket_prefix)
+        if large_payloads is not None:
+            large_payloads.bucket_name(self.bucket_prefix)  # fail fast on a name S3 rejects
         _register_fork_hook()
         self.region = region
         self.endpoint_url = endpoint_url
@@ -242,7 +262,7 @@ class Client:
 
     def _client_config(self) -> dict[str, Any]:
         return {
-            "offload": self.large_payloads.to_core() if self.large_payloads is not None else None,
+            "offload": self.large_payloads.to_core(self.bucket_prefix) if self.large_payloads is not None else None,
             "fetch": self.payload_fetch.to_core(),
             "publish_retry": {"max_attempts": self.publish_retry_attempts, "initial_backoff": 0.1, "max_backoff": 5.0},
             "verify_md5": self.verify_md5,
@@ -645,7 +665,9 @@ class Client:
         settings = [] if resources else [self.large_payloads]
         settings += [target.large_payloads for target in targets if isinstance(target, Topic | Queue)]
         # Each bucket once, in declaration order (several resources may share one).
-        buckets = dict.fromkeys(s.bucket for s in settings if s is not None and s.create_bucket)
+        buckets = dict.fromkeys(
+            s.bucket_name(self.bucket_prefix) for s in settings if s is not None and s.create_bucket
+        )
         for bucket in buckets:
             core = await self._core()
             report = ProvisioningReport.from_core(await core.ensure_bucket(bucket, True))
