@@ -370,6 +370,7 @@ class Consumer:
         receive_batch_wait: float = 0.1,
         wait_time: float = 20.0,
         pollers: int = 1,
+        max_pollers: int | None = None,
         rate_limit: RateLimit | float | None = None,
         visibility_timeout: float | None = None,
         heartbeat: Heartbeat | bool = True,
@@ -401,6 +402,8 @@ class Consumer:
             raise ValueError("wait_time must be between 0 and 20 seconds")
         if not 1 <= pollers <= 64:
             raise ValueError("pollers must be between 1 and 64")
+        if max_pollers is not None and not pollers <= max_pollers <= 64:
+            raise ValueError(f"max_pollers must be between pollers ({pollers}) and 64")
         if not 0 <= settle_linger <= 1:
             raise ValueError("settle_linger must be between 0 and 1 second")
         self._client = client
@@ -409,13 +412,15 @@ class Consumer:
         self.name = name or queue.name
         self.concurrency = concurrency
         # One receive batch per poller ahead of the handlers (the next receive overlaps with them),
-        # but not more than the handlers can take at once.
+        # but not more than the handlers can take at once; extra receive loops bring one each too.
         self.prefetch = min(batch_size, concurrency) * pollers if prefetch is None else prefetch
+        self._extra_poller_slots = min(batch_size, concurrency) if prefetch is None else 0
         self.batch_size = batch_size
         self.min_receive_batch = min_receive_batch
         self.receive_batch_wait = receive_batch_wait
         self.wait_time = wait_time
         self.pollers = pollers
+        self.max_pollers = max_pollers
         self.rate_limit = RateLimit(rate_limit) if isinstance(rate_limit, int | float) else rate_limit
         self.visibility_timeout = visibility_timeout
         self.heartbeat = heartbeat
@@ -575,6 +580,8 @@ class Consumer:
             "receive_batch_wait": float(self.receive_batch_wait),
             "wait_time": float(self.wait_time),
             "pollers": self.pollers,
+            "max_pollers": self.max_pollers,
+            "extra_poller_slots": self._extra_poller_slots,
             "rate_limit": (
                 {"per_second": self.rate_limit.per_second, "burst": self.rate_limit.burst} if self.rate_limit else None
             ),

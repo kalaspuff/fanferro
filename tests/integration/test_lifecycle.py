@@ -431,6 +431,33 @@ async def test_receives_are_full_batches(client_factory: ClientFactory, name: An
     assert engine["delete_requests"] <= 240, engine
 
 
+async def test_a_backlog_is_received_by_extra_receive_loops(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory()
+    queue = client.queue(name("extra-pollers"))
+    handled = 0
+    pollers: list[int] = []
+    consumer = client.consumer(queue, wait_time=1, concurrency=100)
+
+    @consumer.default
+    async def handle(message: fanferro.Message[bytes]) -> None:
+        nonlocal handled
+        pollers.append(consumer.stats()["engine"]["pollers"])
+        await asyncio.sleep(0.05)
+        handled += 1
+
+    async with client:
+        await queue.send_batch([{"n": i} for i in range(1000)])
+        await consumer.start()
+        await wait_for(lambda: handled == 1000, timeout=120)
+        assert max(pollers) > 1, "a single receive loop drained the backlog"
+        # Extra loops end at their first receive that is not full: one long poll is left.
+        await wait_for(lambda: consumer.stats()["engine"]["pollers"] == 1, timeout=10)
+        before = consumer.stats()["engine"]["receive_requests"]
+        await asyncio.sleep(2)
+        assert consumer.stats()["engine"]["receive_requests"] - before <= 3
+        await consumer.stop()
+
+
 async def test_a_slow_handler_does_not_hold_back_free_slots(client_factory: ClientFactory, name: Any) -> None:
     client = client_factory()
     queue = client.queue(name("slow-one"))

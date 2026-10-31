@@ -157,6 +157,76 @@ impl SqsApi for StuckVisibility {
     }
 }
 
+/// SQS whose receives take `delay` (a network round trip) before they reach `inner`, and that
+/// records their overlap.
+#[derive(Debug)]
+pub(crate) struct SlowReceives {
+    inner: Arc<dyn SqsApi>,
+    delay: Duration,
+    /// `ReceiveMessage` calls.
+    pub(crate) receives: Overlap,
+}
+
+impl SlowReceives {
+    pub(crate) fn new(inner: Arc<dyn SqsApi>, delay: Duration) -> Self {
+        Self { inner, delay, receives: Overlap::default() }
+    }
+}
+
+impl Overlap {
+    /// Calls in progress now.
+    pub(crate) fn active(&self) -> usize {
+        self.active.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl SqsApi for SlowReceives {
+    async fn send_message(&self, queue_url: &str, request: SendRequest) -> Result<SendOutput> {
+        self.inner.send_message(queue_url, request).await
+    }
+    async fn send_message_batch(&self, queue_url: &str, entries: Vec<SendRequest>) -> Result<BatchResult<SendOutput>> {
+        self.inner.send_message_batch(queue_url, entries).await
+    }
+    async fn receive_messages(&self, request: ReceiveRequest) -> Result<Vec<ReceivedMessage>> {
+        self.receives.around(self.delay, self.inner.receive_messages(request)).await
+    }
+    async fn delete_message_batch(&self, queue_url: &str, receipt_handles: Vec<String>) -> Result<BatchResult<()>> {
+        self.inner.delete_message_batch(queue_url, receipt_handles).await
+    }
+    async fn change_visibility_batch(
+        &self,
+        queue_url: &str,
+        entries: Vec<VisibilityChange>,
+    ) -> Result<BatchResult<()>> {
+        self.inner.change_visibility_batch(queue_url, entries).await
+    }
+    async fn get_queue_url(&self, name: &str, owner_account_id: Option<&str>) -> Result<String> {
+        self.inner.get_queue_url(name, owner_account_id).await
+    }
+    async fn get_queue_attributes(&self, queue_url: &str) -> Result<StringMap> {
+        self.inner.get_queue_attributes(queue_url).await
+    }
+    async fn create_queue(&self, name: &str, attributes: &StringMap, tags: &StringMap) -> Result<String> {
+        self.inner.create_queue(name, attributes, tags).await
+    }
+    async fn set_queue_attributes(&self, queue_url: &str, attributes: &StringMap) -> Result<()> {
+        self.inner.set_queue_attributes(queue_url, attributes).await
+    }
+    async fn list_queue_tags(&self, queue_url: &str) -> Result<StringMap> {
+        self.inner.list_queue_tags(queue_url).await
+    }
+    async fn tag_queue(&self, queue_url: &str, tags: &StringMap) -> Result<()> {
+        self.inner.tag_queue(queue_url, tags).await
+    }
+    async fn delete_queue(&self, queue_url: &str) -> Result<()> {
+        self.inner.delete_queue(queue_url).await
+    }
+    async fn purge_queue(&self, queue_url: &str) -> Result<()> {
+        self.inner.purge_queue(queue_url).await
+    }
+}
+
 /// SQS whose first `failures` batch sends fail with a retryable (throttling) error.
 #[derive(Debug)]
 pub(crate) struct ThrottledBatches {

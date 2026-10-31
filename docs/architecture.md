@@ -80,8 +80,9 @@ These are relied upon across layers; tests cover each of them.
    Dropping a `Delivery` without settling releases the message (Rust `Drop`), unless it was left
    to time out (`auto_ack=False`) or the consumer stops with `release_unfinished=False`.
 2. **Bounded in-flight.** A consumer never holds more than `concurrency + prefetch` unsettled
-   messages; pollers acquire one in-flight permit per requested message before calling
-   `ReceiveMessage`. A settlement exchanges the message's permit for one of `max_settling`
+   messages, plus one batch per extra receive loop when `prefetch` is left at its default
+   (`extra_poller_slots`, [ADR 0012](adr/0012-receives-follow-the-backlog.md)); pollers acquire
+   one in-flight permit per requested message before calling `ReceiveMessage`. A settlement exchanges the message's permit for one of `max_settling`
    settling permits (default: four times the in-flight limit, at least 20) when it starts, so
    receiving continues during the settlement's round trip and the settlement backlog is bounded
    too.
@@ -131,7 +132,8 @@ These are relied upon across layers; tests cover each of them.
   ([ADR 0009](adr/0009-results-reach-asyncio-in-batches.md)). Settlements (`delivery.ack()`,
   `nack()`...) run as tasks the engine tracks (`close()` waits for them; cancelling their
   awaitable does not stop a started delete).
-* Per consumer engine: `pollers` receive loops, one heartbeat loop, one settle loop and one
+* Per consumer engine: `pollers` receive loops (plus up to `max_pollers - pollers` extra ones
+  while receives come back full, see ADR 0012), one heartbeat loop, one settle loop and one
   decode task per received batch (decoded and unwrapped concurrently, handed out together and in
   order). Lease state is in a `parking_lot` mutex that is never held across an `.await`. An ack
   queues its delete synchronously when a settling permit is free, so acks reach the settle loop in

@@ -775,8 +775,8 @@ class Client:
                 to add routes later with ``@consumer.route(...)``.
             **options: :class:`~fanferro.Consumer` options: ``concurrency``, ``prefetch``,
                 ``batch_size``, ``min_receive_batch``, ``receive_batch_wait``, ``wait_time``,
-                ``pollers``, ``rate_limit``, ``visibility_timeout``, ``heartbeat``, ``retry``,
-                ``dead_letter``, ``shutdown``, ``handler_timeout``, ``ordering``,
+                ``pollers``, ``max_pollers``, ``rate_limit``, ``visibility_timeout``, ``heartbeat``,
+                ``retry``, ``dead_letter``, ``shutdown``, ``handler_timeout``, ``ordering``,
                 ``strict_ordering``, ``envelopes``, ``middleware``, ``auto_ack``, ``settle_linger``,
                 ``sns_unwrap``, ``auto_confirm_subscriptions``, ``delete_offloaded_payloads``,
                 ``name``.
