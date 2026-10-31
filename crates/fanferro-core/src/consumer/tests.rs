@@ -892,7 +892,7 @@ async fn an_abort_during_a_graceful_stop_still_guards_against_the_orphaned_poll(
     // is over, as when the stop aborts right away.
     let broker = MemoryBroker::new("us-east-1", "000000000000");
     let mut backend = broker.backend();
-    backend.kind = crate::backend::BackendKind::Aws;
+    backend.orphaned_polls = true;
     let client = Client::with_backend(backend, ClientConfig::default()).unwrap();
     let url = client.backend().sqs.create_queue("work", &StringMap::new(), &StringMap::new()).await.unwrap();
     let fx = Fixture { broker, client, url };
@@ -918,11 +918,40 @@ async fn an_abort_during_a_graceful_stop_still_guards_against_the_orphaned_poll(
     engine.close(true).await;
 }
 
+#[tokio::test(start_paused = true)]
+async fn released_messages_escape_an_aborted_poll_the_broker_serves() {
+    // With the broker serving aborted polls as SQS does (docs/parity M10), a message the engine
+    // releases while stopping is kept from the poll and received by the next consumer.
+    let broker = MemoryBroker::with_options(
+        "us-east-1",
+        "000000000000",
+        crate::backend::memory::MemoryOptions { orphaned_polls: true },
+    );
+    let client = Client::with_backend(broker.backend(), ClientConfig::default()).unwrap();
+    let url = client.backend().sqs.create_queue("work", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let fx = Fixture { broker, client, url };
+    fx.send("held").await;
+    let engine = fx.engine(|c| {
+        c.wait_time = 20.0;
+        c.min_receive_batch = Some(1);
+    });
+    let delivery = collect(&engine, 1).await.remove(0);
+    tokio::time::sleep(Duration::from_secs(1)).await; // the next long poll is in flight
+    engine.stop_receiving(true).await;
+    delivery.lease.release().await.unwrap();
+    engine.close(true).await;
+    tokio::time::sleep(Duration::from_secs(21)).await;
+    let next = fx.engine(|c| c.wait_time = 1.0);
+    let again = collect(&next, 1).await.remove(0);
+    assert_eq!(again.message().system.approximate_receive_count, 2, "the aborted poll did not take it");
+    next.close(true).await;
+}
+
 async fn aws_fixture() -> Fixture {
-    // The memory broker playing AWS: aborted long polls are guarded against only there.
+    // The memory broker playing AWS: aborted long polls are guarded against only where they go on.
     let broker = MemoryBroker::new("us-east-1", "000000000000");
     let mut backend = broker.backend();
-    backend.kind = crate::backend::BackendKind::Aws;
+    backend.orphaned_polls = true;
     let client = Client::with_backend(backend, ClientConfig::default()).unwrap();
     let url = client.backend().sqs.create_queue("work", &StringMap::new(), &StringMap::new()).await.unwrap();
     Fixture { broker, client, url }

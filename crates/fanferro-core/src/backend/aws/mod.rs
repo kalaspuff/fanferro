@@ -208,6 +208,7 @@ pub async fn connect(config: &AwsConfig) -> Result<Backend> {
         kind: BackendKind::Aws,
         region,
         endpoint_url: config.endpoint_url.clone(),
+        orphaned_polls: true,
         sqs: Arc::new(AwsSqs::new(sqs_client)),
         sns: Arc::new(AwsSns::new(sns_client)),
         objects: Arc::new(AwsObjectStore::new(s3_client)),

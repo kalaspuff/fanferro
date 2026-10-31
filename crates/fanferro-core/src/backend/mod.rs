@@ -344,6 +344,11 @@ pub struct Backend {
     pub region: String,
     /// Custom endpoint (emulators), if any.
     pub endpoint_url: Option<String>,
+    /// Whether a `ReceiveMessage` long poll that the client aborts goes on until its wait time
+    /// ends and takes messages that arrive meanwhile (SQS does; the in-memory broker when asked
+    /// to). The consumer engine then keeps the messages it releases while stopping invisible
+    /// until such polls are over.
+    pub orphaned_polls: bool,
     /// SQS.
     pub sqs: Arc<dyn SqsApi>,
     /// SNS.

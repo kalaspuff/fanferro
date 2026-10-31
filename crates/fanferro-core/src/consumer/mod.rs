@@ -743,10 +743,7 @@ impl ConsumerEngine {
         // Cancelled before the calls in flight are looked at: pollers register a call only while
         // receiving goes on (see `begin_receive`), so none is sent unseen.
         self.inner.receive_token.cancel();
-        if abort
-            && !self.inner.abort_token.is_cancelled()
-            && self.inner.client.backend().kind == crate::backend::BackendKind::Aws
-        {
+        if abort && !self.inner.abort_token.is_cancelled() && self.inner.client.backend().orphaned_polls {
             let receives = self.inner.receives.lock();
             if receives.count > 0
                 && let Some(started) = receives.latest_start
