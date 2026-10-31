@@ -78,7 +78,8 @@ class InMemoryIdempotencyStore:
     worker keeps only the keys of its last ``ttl`` seconds in memory.
     """
 
-    def __init__(self, *, clock: Callable[[], float] = time.monotonic, sweep_interval: float = 60.0) -> None:
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic, sweep_interval: Duration = 60.0) -> None:
+        sweep_interval = seconds(sweep_interval, "sweep_interval")
         self._clock = clock
         self._entries: dict[str, tuple[Claim, float]] = {}
         self._sweep_interval = sweep_interval

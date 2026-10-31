@@ -730,12 +730,15 @@ class Consumer:
                 for sig in installed:
                     loop.remove_signal_handler(sig)
 
-    async def run_until_idle(self, *, idle_for: float = 0.3, timeout: float = 30.0) -> None:
+    async def run_until_idle(self, *, idle_for: Duration = 0.3, timeout: Duration = 30.0) -> None:
         """Processes messages until nothing has happened for ``idle_for`` seconds, then stops.
 
         Intended for tests and batch jobs. Raises :class:`TimeoutError` if the queue does not go
-        idle within ``timeout`` seconds (the consumer is stopped either way).
+        idle within ``timeout`` seconds (the consumer is stopped either way). Both take seconds or
+        a ``timedelta``.
         """
+        idle_for = seconds(idle_for, "idle_for")
+        timeout = seconds(timeout, "timeout")
         if self._state != "running":
             await self.start()
         deadline = time.monotonic() + timeout

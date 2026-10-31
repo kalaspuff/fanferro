@@ -141,7 +141,8 @@ at most 12 hours).
 
 Durations in the policies (`Backoff`'s delays, `ShutdownPolicy`'s timeouts, `Heartbeat`), in
 `Retry(delay=...)`, `Requeue(delay=...)`, `message.retry()`, `message.requeue()`,
-`message.extend()`, `IdempotencyMiddleware` and a publish's `delay` are seconds or a `timedelta`;
+`message.extend()`, `consumer.stop()` and `run_until_idle()`, `IdempotencyMiddleware`,
+`InMemoryIdempotencyStore`, `OutboxRelay(poll_interval=)` and a publish's `delay` are seconds or a `timedelta`;
 the policies and `OutgoingMessage` keep them as float seconds.
 
 `Provisioning`: `lookup` (`True`), `verify` (`True`), `create` (`False`), `update` (`False`),

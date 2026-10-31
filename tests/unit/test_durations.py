@@ -10,6 +10,7 @@ import pytest
 
 import fanferro
 from fanferro.idempotency import IdempotencyMiddleware, InMemoryIdempotencyStore
+from fanferro.outbox import InMemoryOutbox, OutboxRelay
 from fanferro.testing import RecordingSettler, build_message
 
 SECONDS = (2.5, timedelta(seconds=2.5))
@@ -130,3 +131,29 @@ async def test_publish_delay_takes_timedelta(memory_client: fanferro.Client) -> 
 def test_idempotency_durations_take_timedelta(value: float | timedelta) -> None:
     middleware = IdempotencyMiddleware(InMemoryIdempotencyStore(), ttl=value, lock_ttl=value, retry_delay=value)
     assert (middleware.ttl, middleware.lock_ttl, middleware.retry_delay) == (2.5, 2.5, 2.5)
+
+
+@pytest.mark.parametrize("value", SECONDS, ids=["float", "timedelta"])
+def test_outbox_and_store_intervals_take_timedelta(value: float | timedelta) -> None:
+    client = fanferro.testing.memory_client()
+    relay = OutboxRelay(client, InMemoryOutbox(), poll_interval=value)
+    assert relay.poll_interval == 2.5
+    assert InMemoryIdempotencyStore(sweep_interval=value)._sweep_interval == 2.5
+    with pytest.raises(ValueError, match="poll_interval"):
+        OutboxRelay(client, InMemoryOutbox(), poll_interval=timedelta(seconds=-1))
+
+
+async def test_run_until_idle_takes_timedelta(memory_client: fanferro.Client) -> None:
+    queue = memory_client.queue("idle-durations")
+    handled: list[object] = []
+
+    async def handle(message: fanferro.Message) -> None:
+        handled.append(message.body)
+
+    consumer = memory_client.consumer(queue, handle, wait_time=1)
+    async with memory_client:
+        await queue.send({"a": 1})
+        await consumer.run_until_idle(idle_for=timedelta(milliseconds=200), timeout=timedelta(seconds=10))
+    assert handled == [{"a": 1}]
+    with pytest.raises(ValueError, match="idle_for"):
+        await consumer.run_until_idle(idle_for=timedelta(seconds=-1))
