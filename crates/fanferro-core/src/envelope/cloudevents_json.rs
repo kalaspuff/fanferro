@@ -142,7 +142,11 @@ impl Envelope for CloudEventsJson {
         };
         let (data, data_base64) = if payload.data.is_empty() {
             (None, None)
-        } else if let Some(raw) = raw_json {
+        } else if let Some(raw) = raw_json
+            && (content_type.is_some() || raw.get().trim() != "null")
+        {
+            // A null payload is `"data": null` with its JSON `datacontenttype`; without one, that
+            // reads as no data, so the payload goes as `data_base64` instead.
             (Some(DataField::Raw(raw)), None)
         } else if let (Some(ct), Some(text)) = (content_type, text)
             && is_text_content_type(ct)
@@ -242,7 +246,10 @@ fn parse_map(map: BTreeMap<String, &RawValue>) -> Result<Payload> {
     let time = string_field(&map, "time")?.and_then(|text| OffsetDateTime::parse(&text, &Rfc3339).ok());
 
     let data_base64 = string_field(&map, "data_base64")?;
-    let data_raw = map.get("data").copied().filter(|raw| raw.get() != "null");
+    // `"data": null` is no data, except in an event that declares a JSON `datacontenttype` (and has
+    // no `data_base64`): its data is the JSON value null, a null payload.
+    let null_payload = content_type.as_deref().is_some_and(is_json_content_type) && data_base64.is_none();
+    let data_raw = map.get("data").copied().filter(|raw| raw.get().trim() != "null" || null_payload);
     let data = match (data_raw, data_base64) {
         (Some(_), Some(_)) => {
             return Err(Error::Envelope("CloudEvent must not contain both data and data_base64".into()));
@@ -449,6 +456,38 @@ mod tests {
         assert_eq!(decoded.message_type.as_deref(), Some(DEFAULT_MESSAGE_TYPE));
         assert_eq!(decoded.source.as_deref(), Some(DEFAULT_SOURCE));
         assert_eq!(decoded.id.unwrap().len(), 36);
+    }
+
+    #[test]
+    fn null_payloads_roundtrip() {
+        // `"data": null` read as no data: a null JSON payload reached handlers as an empty body.
+        let envelope = CloudEventsJson::default();
+        let wire = envelope.wrap(&payload(b"null", Some("application/json"))).unwrap();
+        let body = std::str::from_utf8(&wire.body).unwrap();
+        assert!(body.contains(r#""datacontenttype":"application/json""#) && body.contains(r#""data":null"#), "{body}");
+        let decoded = envelope.unwrap(&wire).unwrap().unwrap();
+        assert_eq!(&decoded.data[..], b"null");
+        assert_eq!(decoded.content_type.as_deref(), Some("application/json"));
+        // Without a content type, `"data": null` would be no data: the payload goes as data_base64.
+        let wire = envelope.wrap(&payload(b"null", None)).unwrap();
+        let body = std::str::from_utf8(&wire.body).unwrap();
+        assert!(!body.contains(r#""data":"#) && body.contains(r#""data_base64":"bnVsbA==""#), "{body}");
+        assert_eq!(&envelope.unwrap(&wire).unwrap().unwrap().data[..], b"null");
+    }
+
+    #[test]
+    fn null_data_without_a_json_content_type_is_no_data() {
+        let envelope = CloudEventsJson::default();
+        for event in [
+            r#"{"specversion":"1.0","id":"1","source":"s","type":"t","data":null}"#,
+            r#"{"specversion":"1.0","id":"1","source":"s","type":"t","datacontenttype":"text/plain","data":null}"#,
+        ] {
+            let wire = WireMessage { body: Bytes::from_static(event.as_bytes()), attributes: MessageAttributes::new() };
+            assert!(envelope.unwrap(&wire).unwrap().unwrap().data.is_empty(), "{event}");
+        }
+        let both = r#"{"specversion":"1.0","id":"1","source":"s","type":"t","datacontenttype":"application/json","data":null,"data_base64":"e30="}"#;
+        let wire = WireMessage { body: Bytes::from_static(both.as_bytes()), attributes: MessageAttributes::new() };
+        assert_eq!(&envelope.unwrap(&wire).unwrap().unwrap().data[..], b"{}");
     }
 
     #[test]

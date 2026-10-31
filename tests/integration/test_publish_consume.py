@@ -114,6 +114,29 @@ async def test_raw_messages_whose_body_is_a_cloudevent(client_factory: ClientFac
     assert (message.envelope, message.id, message.type, message.body) == ("raw", result.message_id, "relay.v1", event)
 
 
+async def test_null_payloads_in_cloudevents(client_factory: ClientFactory, name: Any) -> None:
+    # The CloudEvents JSON envelope read its own `"data": null` as no data: handlers got an empty
+    # body, which a typed route failed to decode (and dead-lettered).
+    client = client_factory()
+    queue = client.queue(name("nulls"), envelope=CloudEvents())
+    received: list[fanferro.Message[Any]] = []
+    consumer = client.consumer(queue, wait_time=1)
+
+    @consumer.route("pings.v1")
+    async def handle(message: fanferro.Message[dict[str, int] | None]) -> None:
+        received.append(message)
+
+    async with client:
+        await queue.send(None, type="pings.v1")
+        await queue.send({"n": 1}, type="pings.v1")
+        await consume_until(consumer, lambda: len(received) == 2)
+    assert sorted((message.data, message.body is None) for message in received) == [
+        (b"null", True),
+        (b'{"n":1}', False),
+    ]
+    assert {message.envelope for message in received} == {"cloudevents"}
+
+
 async def test_topic_fanout_raw_and_wrapped(client_factory: ClientFactory, name: Any) -> None:
     client = client_factory()
     topic = client.topic(name("events"))

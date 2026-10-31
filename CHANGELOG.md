@@ -78,6 +78,8 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 - Declaring a topic or queue again with an equal envelope or codec (`CloudEvents()`, `JsonCodec()`)
   returns it instead of raising `ConfigurationError` (#126)
 - **provisioning:** `create_bucket` of a topic's or queue's own `LargePayloads` creates its bucket (#127)
+- **envelopes:** CloudEvents JSON keeps a JSON `null` payload instead of turning it into an empty
+  body (#128)
 
 ## [0.5.0] - 2026-10-17
 
