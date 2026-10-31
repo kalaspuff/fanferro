@@ -5,7 +5,8 @@
 //! 2. messages larger than the offload threshold or the destination limit (or all, with
 //!    `always`) are stored in S3 and replaced by a pointer ([`claim_check`]);
 //! 3. messages still over the destination limit fail fast with [`Error::MessageTooLarge`];
-//! 4. attributes are validated (names, values, at most 10).
+//! 4. attributes are validated (names, values, at most 10; for offloaded messages before the
+//!    upload, with one left for the pointer).
 //!
 //! Incoming ([`Transport::decode`], after [`sns_notification::unwrap`]): pointers are
 //! resolved, base64 bodies decoded, and transport attributes removed again.
@@ -21,7 +22,7 @@ use bytes::Bytes;
 
 use crate::backend::Backend;
 use crate::error::{Error, Result};
-use crate::types::attributes::{attributes_encoded_len, validate_attributes};
+use crate::types::attributes::{MAX_ATTRIBUTES, attributes_encoded_len, validate_attributes};
 use crate::types::text::as_sqs_safe_text;
 use crate::types::{AttributeValue, MessageAttributes, WireMessage, reserved};
 pub use claim_check::{FetchSettings, OffloadSettings, PayloadPointer, PointerFormat};
@@ -114,6 +115,22 @@ impl Transport {
             && (settings.always || size > settings.threshold.min(limit))
         {
             attributes.remove(reserved::ENCODING);
+            // Before the upload, so that nothing is stored for a message that cannot be sent; the
+            // pointer adds one attribute (counted first, so that the error gives the right limit).
+            if attributes.len() >= MAX_ATTRIBUTES {
+                return Err(Error::validation(format!(
+                    "a message whose payload is offloaded can carry at most {} attributes (the pointer to the payload \
+                     needs one), got {} ({})",
+                    MAX_ATTRIBUTES - 1,
+                    attributes.len(),
+                    attributes.keys().cloned().collect::<Vec<_>>().join(", ")
+                )));
+            }
+            validate_attributes(&attributes)?;
+            let attributes_len = attributes_encoded_len(&attributes);
+            if attributes_len > limit {
+                return Err(Error::MessageTooLarge { size: attributes_len, limit });
+            }
             let pointer = claim_check::offload(&self.backend, settings, message_id, wire.body.clone()).await?;
             match pointer.format {
                 PointerFormat::Fanferro => {
@@ -297,6 +314,29 @@ mod tests {
         // The same bytes again share the object (retries do not pile up objects).
         let again = transport.encode(&first, "same-id", 1000).await.unwrap();
         assert_eq!(again.offloaded.unwrap().key, first_out.offloaded.unwrap().key);
+    }
+
+    #[tokio::test]
+    async fn attributes_are_checked_before_a_payload_is_uploaded() {
+        // No bucket: an upload would fail with NoSuchBucket. A message that cannot be sent must
+        // fail before anything is stored (it left an orphaned object).
+        let (transport, _) = transport(Some(offload(10, PointerFormat::Fanferro)));
+        let body = Bytes::from(vec![b'a'; 64]);
+        for count in [10, 11] {
+            let attributes: MessageAttributes =
+                (0..count).map(|i| (format!("a{i}"), AttributeValue::string("v"))).collect();
+            let error = transport.encode(&WireMessage::new(body.clone(), attributes), "id", 100_000).await.unwrap_err();
+            assert!(matches!(error, Error::Validation(_)), "{error:?}");
+            assert!(error.to_string().contains("at most 9 attributes"), "{count}: {error}");
+        }
+        let mut reserved_name = MessageAttributes::new();
+        reserved_name.insert("AWS.trace".into(), AttributeValue::string("v"));
+        let error = transport.encode(&WireMessage::new(body.clone(), reserved_name), "id", 100_000).await.unwrap_err();
+        assert!(matches!(error, Error::Validation(_)), "{error:?}");
+        let mut huge = MessageAttributes::new();
+        huge.insert("note".into(), AttributeValue::string("x".repeat(2000)));
+        let error = transport.encode(&WireMessage::new(body, huge), "id", 1000).await.unwrap_err();
+        assert!(matches!(error, Error::MessageTooLarge { .. }), "{error:?}");
     }
 
     #[tokio::test]
