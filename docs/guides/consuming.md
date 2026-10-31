@@ -77,7 +77,8 @@ Matchers (all in `fanferro.matchers`): `attribute(name)`, `header(name)` (falls 
 when the client has a `topic_prefix`), `group_id()`; comparisons `==`, `!=`, `<`, `<=`, `>`,
 `>=`, `.is_in()`, `.exists()`, `.missing()`, `.startswith()`, `.endswith()`, `.contains()`,
 `.matches(regex)`, `.test(fn)`; combine with `&`, `|`, `~` (parenthesize comparisons:
-`(m.topic() == "orders") | ...`). Any `(Message) -> bool` callable works too.
+`(m.topic() == "orders") | ...`). Python's `and`, `or` and `not` raise `TypeError` on matchers
+(they would silently drop a condition). Any `(Message) -> bool` callable works too.
 
 No route → the dead-letter policy's `on_unroutable` action (default: dead-letter).
 

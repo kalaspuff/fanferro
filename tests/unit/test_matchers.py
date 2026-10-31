@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 from typing import Any
 
@@ -123,3 +124,45 @@ def test_comparisons_with_nan_values_do_not_match() -> None:
         assert not (field <= 1)(msg)
         assert not (field == 1)(msg)
     assert (m.attribute("score") == "nan")(msg)
+
+
+NO_TRUTH_VALUE = re.escape("combine matchers with &, | and ~")
+
+
+@pytest.mark.parametrize(
+    "matcher",
+    [
+        m.attribute("tenant") == "acme",
+        m.body("order.status").exists(),
+        m.message_type().startswith("orders."),
+        m.topic() == "orders",
+        m.predicate(lambda message: True),
+        (m.attribute("tenant") == "acme") & m.attribute("region").exists(),
+        ~(m.topic() == "orders"),
+        m.any_of(m.attribute("tenant") == "acme"),
+    ],
+    ids=repr,
+)
+def test_matchers_have_no_truth_value(matcher: m.Matcher) -> None:
+    # `a and b` would silently be `b`, `a or b` would be `a`: the other condition was dropped.
+    other = m.attribute("region").exists()
+    with pytest.raises(TypeError, match=NO_TRUTH_VALUE):
+        _ = matcher and other
+    with pytest.raises(TypeError, match=NO_TRUTH_VALUE):
+        _ = matcher or other
+    with pytest.raises(TypeError, match=NO_TRUTH_VALUE):
+        _ = not matcher
+    with pytest.raises(TypeError, match=NO_TRUTH_VALUE):
+        bool(matcher)  # as `if matcher:`
+    # The operators still work and evaluate.
+    assert isinstance(matcher & other, m.Matcher)
+    assert isinstance(matcher | other, m.Matcher)
+    assert isinstance(~matcher, m.Matcher)
+
+
+@pytest.mark.parametrize("field", [m.attribute("tenant"), m.body("order"), m.message_type(), m.topic()], ids=repr)
+def test_fields_have_no_truth_value(field: m.Field) -> None:
+    with pytest.raises(TypeError, match=NO_TRUTH_VALUE):
+        _ = field and m.attribute("region").exists()
+    with pytest.raises(TypeError, match=NO_TRUTH_VALUE):
+        _ = not field
