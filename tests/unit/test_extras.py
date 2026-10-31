@@ -167,6 +167,33 @@ async def test_the_outbox_relay_never_gives_up_on_temporary_failures(
         assert await relay.run_once() == 1
 
 
+async def test_the_outbox_relay_counts_only_failures_for_good(
+    memory_client: fanferro.Client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Rounds of throttling (or of waiting behind an earlier record of a FIFO group) are attempts for
+    # the store, but must not bring a record closer to being given up.
+    queue = memory_client.queue("outbox-later-gone")
+    outbox = InMemoryOutbox()
+    errors: list[BaseException] = []
+    throttled = fanferro.ThrottledError("Rate exceeded")
+    throttled.retryable = True
+
+    async def fail(messages: list[fanferro.PreparedMessage], **_: object) -> fanferro.BatchPublishResult:
+        error = errors.pop(0)
+        return fanferro.BatchPublishResult(tuple(fanferro.BatchFailure(i, m, error) for i, m in enumerate(messages)))
+
+    async with memory_client:
+        outbox.add(await queue.prepare({"n": 1}))
+        relay = OutboxRelay(memory_client, outbox, max_attempts=3)
+        monkeypatch.setattr(memory_client, "publish_prepared_batch", fail)
+        errors.extend([throttled] * 5 + [fanferro.ResourceNotFoundError("gone")] * 3)
+        for _ in range(7):
+            await relay.run_once()
+        assert outbox.abandoned == [], "two failures for good of three"
+        await relay.run_once()
+        assert [(r.attempts, len(outbox.pending)) for r in outbox.abandoned] == [(8, 0)]
+
+
 def test_cli(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["version"]) == 0
     assert capsys.readouterr().out.strip() == fanferro.__version__
