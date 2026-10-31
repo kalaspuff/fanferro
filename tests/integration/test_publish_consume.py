@@ -413,6 +413,26 @@ async def test_outbox_prepare_and_relay(client_factory: ClientFactory, name: Any
     assert [message.json()["order_id"] for message in fifo_messages] == [0, 1]
 
 
+async def test_prepared_messages_use_the_large_payload_settings_of_their_destination(
+    client_factory: ClientFactory, name: Any
+) -> None:
+    # A topic and its subscriber queue share a name: prepared messages for the queue were sent with
+    # the topic's settings (no offloading here), and refused as too large.
+    client = client_factory(large_payloads=fanferro.LargePayloads(name("payloads"), threshold=1024, create_bucket=True))
+    shared = name("orders")
+    topic = client.topic(shared, large_payloads=None)
+    queue = client.queue(shared)
+    big = {"blob": "x" * 300_000}
+    async with client:
+        single = await client.publish_prepared(await queue.prepare(big))
+        assert single.offloaded is not None
+        batch = await client.publish_prepared_batch([await queue.prepare(big)], raise_on_failure=True)
+        assert batch.successful[0].offloaded is not None
+        with pytest.raises(fanferro.MessageTooLargeError):
+            await client.publish_prepared(await topic.prepare(big))
+        assert [message.json() for message in await drain_queue(client, queue)] == [big, big]
+
+
 async def test_the_outbox_relay_gives_up_on_records_it_cannot_publish(client_factory: ClientFactory, name: Any) -> None:
     # Records for a deleted queue at the head of the outbox were claimed again every round, so the
     # relay never got to the records behind them.

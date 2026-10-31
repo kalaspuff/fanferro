@@ -66,6 +66,8 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 - **payloads:** A large message's attributes are validated before its payload is uploaded (#116)
 - ARNs, assumed queue URLs and presigned URL hosts follow every AWS partition (#117)
 - **routing:** `m.topic() !=` and `.is_in()` accept topic names like `==` (#118)
+- **outbox:** Prepared messages for a queue that shares its name with a topic are sent with the queue's
+  large payload settings, not the topic's (#120)
 
 ## [0.5.0] - 2026-10-17
 

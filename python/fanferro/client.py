@@ -833,7 +833,7 @@ class Client:
     async def publish_prepared(self, prepared: PreparedMessage) -> PublishResult:
         """Sends a message produced by ``topic.prepare(...)``/``queue.prepare(...)`` (e.g. from an outbox)."""
         core = await self._core()
-        transport = await self._transport_for_destination(prepared.destination_name)
+        transport = await self._transport_for_destination(prepared)
         started = monotonic()
         kind = prepared.destination.get("kind", "queue")
         with self._telemetry.publish_span(prepared.destination_name, kind, prepared.message_id) as span:
@@ -886,7 +886,7 @@ class Client:
             groups.setdefault(key, []).append(index)
         for indexes in groups.values():
             first = messages[indexes[0]]
-            transport = await self._transport_for_destination(first.destination_name)
+            transport = await self._transport_for_destination(first)
             try:
                 receipts = await core.publish_batch(
                     first.destination, [messages[i].core_entry() for i in indexes], transport=transport
@@ -904,8 +904,11 @@ class Client:
             batch.raise_for_failures()
         return batch
 
-    async def _transport_for_destination(self, name: str) -> Any:
-        resource = self._topics.get(name) or self._queues.get(name)
+    async def _transport_for_destination(self, prepared: PreparedMessage) -> Any:
+        # A topic and a queue may share a name (``orders`` and its subscriber queue ``orders``),
+        # with different large payload settings: the destination's kind picks the right one.
+        resources = self._topics if prepared.destination.get("kind", "queue") == "topic" else self._queues
+        resource = resources.get(prepared.destination_name)
         if resource is None:
             return None
         return await resource._transport_for()
