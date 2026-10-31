@@ -8,6 +8,8 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-31
+
 ### Behaviour changes
 
 - With `auto_ack=False`, a message the handler leaves unsettled stops being extended by heartbeats
@@ -107,6 +109,20 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 - **consumer:** A retry or a release waits for a heartbeat extension of the message that is in
   flight, which could otherwise reach SQS after it and hide the message for another visibility
   timeout (#140)
+- **consumer:** `delete_offloaded_payloads` acks a copy whose payload was already deleted (#142)
+
+### Features
+
+- **payloads:** `Client(bucket_prefix=...)` prefixes the buckets of large payloads per environment (#132)
+
+### Documentation
+
+- Agents that can push open their own pull requests (#56)
+- Changelog entries for the bug fixes since 0.5.0 (#119)
+
+### Tests
+
+- The immediate-stop tests no longer fail on slow CI runners (#105)
 
 ## [0.5.0] - 2026-10-17
 
