@@ -89,7 +89,9 @@ These are relied upon across layers; tests cover each of them.
    message is buffered, processing or waiting for a settling permit, capped at 12 hours after
    receipt and `max_duration`. An extension call that gets no answer within half the heartbeat
    interval (0.5-10 s) is retried at the next tick, so a stuck connection cannot stall the others.
-   The lease stays tracked until its settlement completed.
+   A retry or a release of a lease waits until an extension call of it that is in flight ended
+   (at most that call's timeout), so that the extension cannot reach SQS after it and hide the
+   message for another `extend_by`. The lease stays tracked until its settlement completed.
 4. **Stable message ids.** The fanferro message id is generated once per message and reused on
    retries; FIFO destinations use it as the deduplication id; idempotency keys default to it.
 5. **Transport details are invisible to handlers.** Base64, claim checks and SNS wrapping are

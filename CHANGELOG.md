@@ -102,6 +102,9 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   `tuple`/`set` fields it writes, instead of dead-lettering such messages (#138)
 - Batch publishes to SNS topics send the X-Ray trace header (`X-Amzn-Trace-Id`) of their entries,
   with one `PublishBatch` call per trace header, instead of leaving it out (#139)
+- **consumer:** A retry or a release waits for a heartbeat extension of the message that is in
+  flight, which could otherwise reach SQS after it and hide the message for another visibility
+  timeout (#140)
 
 ## [0.5.0] - 2026-10-17
 

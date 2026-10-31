@@ -279,6 +279,22 @@ impl EngineInner {
         &self.settings.queue_url
     }
 
+    /// How long a visibility settlement waits for a heartbeat extension in flight: the extension
+    /// call gives up after [`heartbeat::call_timeout`].
+    pub(crate) fn extension_wait(&self) -> Duration {
+        heartbeat::call_timeout(self.settings.heartbeat_interval) + Duration::from_secs(1)
+    }
+
+    /// Waits until a heartbeat extension of lease `id` that is in flight ended, so that a
+    /// visibility settlement (a retry, a release) reaches SQS after it: sent before, it would be
+    /// overridden by the extension, and the message would stay hidden for another `extend_by`.
+    pub(crate) async fn after_extension(&self, id: u64) {
+        let extension = self.leases.lock().get(&id).and_then(|entry| entry.extending.clone());
+        if let Some(extension) = extension {
+            let _ = tokio::time::timeout(self.extension_wait(), extension.cancelled()).await;
+        }
+    }
+
     /// Raises a visibility timeout so the message cannot become visible while a long poll that
     /// was aborted during shutdown may still be served by the queue.
     ///
@@ -327,7 +343,7 @@ impl EngineInner {
                         next_heartbeat: now + self.settings.heartbeat_interval,
                         max_until: now + self.settings.max_lease,
                         status: LeaseStatus::Buffered,
-                        extending: false,
+                        extending: None,
                     },
                 );
                 leased.push(Lease::new(id, self.clone(), message, permit));
@@ -777,6 +793,13 @@ impl ConsumerEngine {
         let remaining: Vec<(u64, LeaseEntry)> = self.inner.leases.lock().drain().collect();
         self.inner.metrics.in_flight.add(-i64::try_from(remaining.len()).unwrap_or(0));
         if release_unsettled && let Some(queue) = self.inner.settle_queue() {
+            // After the extensions in flight, which would hide the messages again.
+            let wait = self.inner.extension_wait();
+            let extensions = remaining.iter().filter_map(|(_, entry)| entry.extending.clone());
+            futures::future::join_all(extensions.map(|extension| async move {
+                let _ = tokio::time::timeout(wait, extension.cancelled_owned()).await;
+            }))
+            .await;
             let mut replies = Vec::new();
             for (_, entry) in remaining {
                 if matches!(entry.status, LeaseStatus::Buffered | LeaseStatus::Active) {

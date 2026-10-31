@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use futures::future::join_all;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 use super::EngineInner;
 use super::config::MAX_VISIBILITY;
@@ -20,7 +21,7 @@ const SAFETY_MARGIN: Duration = Duration::from_secs(5);
 /// How long an extension call may take before its leases are retried (at the next tick): the loop
 /// waits for its calls, and the SDK has no read timeout by default, so one stuck connection would
 /// otherwise stall every lease's heartbeat until their visibility runs out.
-fn call_timeout(heartbeat_interval: Duration) -> Duration {
+pub(super) fn call_timeout(heartbeat_interval: Duration) -> Duration {
     (heartbeat_interval / 2).clamp(Duration::from_millis(500), Duration::from_secs(10))
 }
 
@@ -37,13 +38,14 @@ pub(crate) async fn heartbeat_loop(inner: Arc<EngineInner>) {
             break;
         }
         let now = Instant::now();
-        let mut due = Vec::new();
+        // Batch calls of up to ten leases, each with the token its leases keep while it is in flight.
+        let mut chunks: Vec<(CancellationToken, Vec<Due>)> = Vec::new();
         let mut expired = Vec::new();
         {
             let mut leases = inner.leases.lock();
             for (id, lease) in leases.iter_mut() {
                 if !matches!(lease.status, LeaseStatus::Buffered | LeaseStatus::Active)
-                    || lease.extending
+                    || lease.extending.is_some()
                     || lease.next_heartbeat > now
                 {
                     continue;
@@ -56,8 +58,12 @@ pub(crate) async fn heartbeat_loop(inner: Arc<EngineInner>) {
                     expired.push(lease.message.clone());
                     continue;
                 }
-                lease.extending = true;
-                due.push(Due {
+                if chunks.last().is_none_or(|(_, chunk)| chunk.len() == MAX_BATCH_ENTRIES) {
+                    chunks.push((CancellationToken::new(), Vec::with_capacity(MAX_BATCH_ENTRIES)));
+                }
+                let Some((call, chunk)) = chunks.last_mut() else { continue };
+                lease.extending = Some(call.clone());
+                chunk.push(Due {
                     id: *id,
                     message: lease.message.clone(),
                     timeout: inner.settings.extend_by.min(remaining),
@@ -75,19 +81,14 @@ pub(crate) async fn heartbeat_loop(inner: Arc<EngineInner>) {
                 .field("sqs_message_id", &message.message_id)
             });
         }
-        if due.is_empty() {
-            continue;
-        }
-        let mut chunks = Vec::new();
-        while !due.is_empty() {
-            let rest = due.split_off(due.len().min(MAX_BATCH_ENTRIES));
-            chunks.push(std::mem::replace(&mut due, rest));
-        }
-        join_all(chunks.into_iter().map(|chunk| extend_chunk(&inner, chunk))).await;
+        join_all(chunks.into_iter().map(|(call, chunk)| extend_chunk(&inner, call, chunk))).await;
     }
 }
 
-async fn extend_chunk(inner: &Arc<EngineInner>, chunk: Vec<Due>) {
+/// Extends a chunk of leases; cancels `call` when the call ended (also when it timed out, or when
+/// this future is dropped), after the leases were updated.
+async fn extend_chunk(inner: &Arc<EngineInner>, call: CancellationToken, chunk: Vec<Due>) {
+    let _ended = call.drop_guard();
     let started = Instant::now();
     let entries = chunk
         .iter()
@@ -106,7 +107,7 @@ async fn extend_chunk(inner: &Arc<EngineInner>, chunk: Vec<Due>) {
         Ok(results) => {
             for (due, outcome) in chunk.into_iter().zip(results) {
                 let Some(lease) = leases.get_mut(&due.id) else { continue };
-                lease.extending = false;
+                lease.extending = None;
                 match outcome {
                     Ok(()) => {
                         lease.visible_until = started + due.timeout;
@@ -160,7 +161,7 @@ async fn extend_chunk(inner: &Arc<EngineInner>, chunk: Vec<Due>) {
             let retry_in = if matches!(error, crate::error::Error::Timeout(_)) { Duration::ZERO } else { RETRY_SOON };
             for due in chunk {
                 if let Some(lease) = leases.get_mut(&due.id) {
-                    lease.extending = false;
+                    lease.extending = None;
                     lease.next_heartbeat = Instant::now() + retry_in;
                 }
                 inner.metrics.lease_extension_failures.inc();
