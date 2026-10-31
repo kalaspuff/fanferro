@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 from typing import Any
+from urllib.parse import urlsplit
 
 import boto3
 import pytest
@@ -155,27 +157,52 @@ async def test_legacy_aws_extended_client_pointers(ministack_endpoint: str, aws:
 async def test_presigned_url_pointers_are_allow_listed(ministack_endpoint: str, aws: dict[str, Any], name: Any) -> None:
     client = emulator_client(ministack_endpoint)
     queue = client.queue(name("ssrf"), dead_letter=fanferro.DeadLetterQueue(f"{name('ssrf')}-dlq"))
+    bucket = name("ssrf-payloads")
     decode_failures: list[fanferro.Event] = []
     client.on(
         "message.decode_failed",
         lambda event: event.fields.get("consumer") == queue.name and decode_failures.append(event),
     )
+    payload = json.dumps({"crafted": True}).encode()
+    sha256 = hashlib.sha256(payload).hexdigest()
+    endpoint = urlsplit(ministack_endpoint)
     async with client:
         info = await queue.resolve()
-        aws["sqs"].send_message(
-            QueueUrl=info.url,
-            MessageBody=json.dumps({"fanferro": "claim-check/v1", "url": "http://169.254.169.254/latest/meta-data/"}),
-            MessageAttributes={"fanferro.claim-check": {"DataType": "String", "StringValue": "v1"}},
-        )
+        aws["s3"].create_bucket(Bucket=bucket)
+        aws["s3"].put_object(Bucket=bucket, Key="crafted", Body=payload)
+        presigned = aws["s3"].generate_presigned_url("get_object", Params={"Bucket": bucket, "Key": "crafted"})
+        assert presigned.startswith(f"{ministack_endpoint}/{bucket}/crafted?")
+        refused = [
+            {"url": "http://169.254.169.254/latest/meta-data/"},
+            # Hosts under amazonaws.com that are not S3: an internal load balancer, an EC2 instance.
+            {"url": "https://internal-orders-1234567890.us-east-1.elb.amazonaws.com/", "sha256": sha256},
+            {"url": "https://ec2-203-0-113-25.compute-1.amazonaws.com/", "sha256": sha256},
+            # Another port on the endpoint's host.
+            {"url": f"http://{endpoint.hostname}:{(endpoint.port or 80) + 1}/{bucket}/crafted", "sha256": sha256},
+            # The endpoint itself, but without a SHA-256 to check what it answers against.
+            {"url": presigned},
+        ]
+        for pointer in [*refused, {"url": presigned, "size": len(payload), "sha256": sha256}]:
+            aws["sqs"].send_message(
+                QueueUrl=info.url,
+                MessageBody=json.dumps({"fanferro": "claim-check/v1", **pointer}),
+                MessageAttributes={"fanferro.claim-check": {"DataType": "String", "StringValue": "v1"}},
+            )
+        received: list[Any] = []
         consumer = client.consumer(queue, wait_time=1)
 
         @consumer.default
         async def handle(message: fanferro.Message[Any]) -> None:
-            raise AssertionError("must not be delivered")
+            received.append(message.json())
 
         await consumer.run_until_idle(idle_for=1.0, timeout=20)
         assert queue.dead_letter_queue is not None
         dead_counts = await queue.dead_letter_queue.approximate_count()
-    assert len(decode_failures) == 1
-    assert "refusing to fetch" in str(decode_failures[0].error.message)  # type: ignore[union-attr]
-    assert dead_counts["visible"] == 1
+    assert received == [{"crafted": True}], "the pointer with a SHA-256 is fetched from the endpoint"
+    messages = sorted(str(event.error.message) for event in decode_failures)  # type: ignore[union-attr]
+    assert len(messages) == len(refused), messages
+    assert all("refusing to fetch" in message for message in messages), messages
+    assert sum("not an S3 endpoint" in message for message in messages) == 2, messages
+    assert sum("over http:// from" in message for message in messages) == 2, messages
+    assert sum("without a sha256" in message for message in messages) == 1, messages
+    assert dead_counts["visible"] == len(refused)

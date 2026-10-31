@@ -740,3 +740,98 @@ async def test_a_message_whose_task_fails_unexpectedly_is_retried(
     assert attempts == [1, 2]
     assert elapsed >= 0.9, "retried after the backoff, not at once"
     assert [event.error.category for event in errors if event.error] == ["RuntimeError"]
+
+
+_UNAWAITED: dict[str, Any] = {
+    "ack": lambda message: message.ack(),
+    "retry": lambda message: message.retry(delay=0),
+    "requeue": lambda message: message.requeue(delay=0),
+    "dead_letter": lambda message: message.dead_letter("invalid order"),
+    "release": lambda message: message.release(),
+    "discard": lambda message: message.discard("test order"),
+}
+
+
+@pytest.mark.parametrize("operation", list(_UNAWAITED))
+async def test_settlements_that_are_not_awaited_still_happen(
+    client_factory: ClientFactory, name: Any, operation: str
+) -> None:
+    # message.dead_letter() without await only created a coroutine: the message stayed unsettled,
+    # the consumer acked it, and the handler's decision was lost (#179).
+    client = client_factory()
+    queue = queue_with_dlq(client, name(f"unawaited-{operation.replace('_', '-')}"))
+    assert queue.dead_letter_queue is not None
+    attempts: list[int] = []
+    warnings: list[fanferro.Event] = []
+    client.on("config.warning", warnings.append)
+    consumer = client.consumer(queue, wait_time=1)
+    comes_back = operation in ("retry", "requeue", "release")
+
+    @consumer.route(OrderCreated)
+    async def handle(message: fanferro.Message[OrderCreated]) -> None:
+        attempts.append(message.attempt)
+        if len(attempts) == 1:
+            _UNAWAITED[operation](message)  # no await
+
+    async with client:
+        await queue.send(OrderCreated(order_id=1))
+        await consume_until(consumer, lambda: consumer.stats()["processed"] == (2 if comes_back else 1))
+        dead = await drain_queue(client, queue.dead_letter_queue)
+        assert await queue.approximate_count() == {"visible": 0, "in_flight": 0, "delayed": 0}
+    assert len(attempts) == (2 if comes_back else 1)
+    if operation == "requeue":
+        assert attempts == [1, 2]
+    assert [message.dead_letter_info["reason"] for message in dead] == (  # type: ignore[index]
+        ["invalid order"] if operation == "dead_letter" else []
+    )
+    assert [event.message for event in warnings if "operation" in event.fields] == [
+        f"message.{operation}() was not awaited; the consumer completed it after the handler returned "
+        "(await it in the handler)"
+    ]
+    assert [event.fields["operation"] for event in warnings if "operation" in event.fields] == [operation]
+
+
+async def test_a_failed_settlement_that_is_not_awaited_is_reported(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory()
+    queue = client.queue(name("unawaited-failure"))
+    seen: list[int] = []
+    failures: list[fanferro.Event] = []
+    errors: list[fanferro.Event] = []
+    client.on("message.ack_failed", failures.append)
+    client.on("consumer.error", errors.append)
+    consumer = client.consumer(queue, wait_time=1)
+
+    @consumer.route(OrderCreated)
+    async def handle(message: fanferro.Message[OrderCreated]) -> None:
+        seen.append(message.attempt)
+        if len(seen) == 1:
+            message.delivery = _RejectedDelete(message.delivery)  # type: ignore[assignment]
+            message.ack()  # no await: the delete fails, and the message comes back
+
+    async with client:
+        await queue.send(OrderCreated(order_id=1))
+        await consume_until(consumer, lambda: len(seen) == 2 and consumer.stats()["processed"] == 2)
+    assert [event.message for event in failures] == ["could not settle message (ack); it will be redelivered"]
+    assert isinstance(failures[0].exception, fanferro.FanferroError)
+    assert errors == []
+
+
+async def test_an_unawaited_fifo_retry_keeps_the_group_in_order(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory()
+    queue = client.queue(f"{name('unawaited-group')}.fifo")
+    seen: list[int] = []
+    consumer = client.consumer(queue, wait_time=1)
+
+    @consumer.route(OrderCreated)
+    async def handle(message: fanferro.Message[OrderCreated]) -> None:
+        seen.append(message.body.order_id)
+        if seen == [0]:
+            message.retry(delay=0)  # no await
+
+    async with client:
+        await queue.send_batch(
+            [fanferro.OutgoingMessage(body=OrderCreated(order_id=i), group_id="g") for i in range(3)]
+        )
+        await consume_until(consumer, lambda: len(seen) == 4)
+        assert await queue.approximate_count() == {"visible": 0, "in_flight": 0, "delayed": 0}
+    assert seen == [0, 0, 1, 2]

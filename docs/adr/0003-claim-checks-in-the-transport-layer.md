@@ -15,7 +15,10 @@ Python ones) should not need to care about either.
 * The AWS SQS/SNS Extended Client pointer format (`ExtendedPayloadSize`) is supported for reading
   always and for writing on request, for interoperability with Java/Python services.
 * Receiving resolves pointers before envelopes see the message. URL fetches are restricted to an
-  allow-list of hosts (AWS by default) to prevent SSRF via crafted messages, and size-capped.
+  allow-list of hosts to prevent SSRF via crafted messages, and size-capped. By default the list
+  holds the endpoints of S3 (until 0.7 any host under AWS's domains, which included load balancers
+  and EC2 instances that resolve to private addresses), and URL fetches need a pointer that records
+  the payload's SHA-256.
 * The S3 key is `{prefix}{message_id}`, so publish retries overwrite the same object (amended by
   [0010](0010-payload-keys-include-the-body-hash.md): `{prefix}{message_id}/{sha256 of the body}`).
 

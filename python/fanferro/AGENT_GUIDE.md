@@ -91,7 +91,7 @@ result = await events.publish(InvoicePaid(invoice_id="inv-1", amount_cents=1299)
 | Prepare (outbox) | `prepared = await topic.prepare(obj)`, `prepared.to_json()`, `await client.publish_prepared(prepared)` |
 | Consume | `consumer = client.consumer(queue, ...)`, `@consumer.route(Type)`, `await consumer.run()` |
 | Route | `fanferro.Router()`, `router.route(Type, when=matchers..., priority=...)`, `router.default` |
-| Settle manually | `await message.ack() / retry(delay=) / requeue() / dead_letter(reason) / release() / discard(reason)` |
+| Settle manually | `await message.ack() / retry(delay=) / requeue() / dead_letter(reason) / release() / discard(reason)` (settles when called; await the returned `Settlement` for SQS's confirmation) |
 | Observe | `client.on("message.*", hook)`, `LoggingConfig(...)`, `Telemetry(...)`, `client.metrics()` |
 | Test | `fanferro.testing.memory_client()`, `fanferro.testing.build_message(obj)`, `consumer.run_until_idle()` |
 
@@ -213,7 +213,10 @@ bodies above 256 KiB to S3 and sends a pointer (bucket/key and/or presigned URL)
 transparently. Add an S3 lifecycle rule on the prefix (expiring well after the queue's retention
 period). `delete_offloaded_payloads=True` (point-to-point queues only) deletes the object on ack and
 acks a copy whose object is gone as a duplicate (`message.duplicate`): it would also drop a message
-whose object expired or was deleted for another reason.
+whose object expired or was deleted for another reason. Consumers fetch presigned URLs from S3
+endpoints only (`PayloadFetch(allowed_url_hosts=[...])` for other hosts) and read any bucket a
+pointer names that their credentials allow: grant them `s3:GetObject` on the payload bucket only,
+or set `PayloadFetch(allowed_buckets=[...])`.
 
 ## Transactional outbox
 

@@ -201,10 +201,15 @@ impl Transport {
         Ok(DecodedBody { wire: WireMessage { body, attributes }, pointer: None })
     }
 
-    /// Deletes an offloaded payload object (only possible for S3 pointers).
+    /// Deletes an offloaded payload object (only possible for S3 pointers). Refuses buckets
+    /// outside [`FetchSettings::allowed_buckets`]: a pointer read by URL names a bucket and key
+    /// that were never checked, and a crafted one could name any object.
     pub async fn delete_payload(&self, pointer: &PayloadPointer) -> Result<()> {
         match (&pointer.bucket, &pointer.key) {
-            (Some(bucket), Some(key)) => self.backend.objects.delete_object(bucket, key).await,
+            (Some(bucket), Some(key)) => {
+                claim_check::check_bucket_allowed(bucket, &self.fetch, "delete")?;
+                self.backend.objects.delete_object(bucket, key).await
+            }
             _ => Ok(()),
         }
     }
@@ -402,5 +407,27 @@ mod tests {
         let mut attributes = MessageAttributes::new();
         attributes.insert(reserved::ENCODING.into(), AttributeValue::string("base64"));
         assert!(transport.decode("!!!", attributes).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn payloads_are_deleted_only_from_allowed_buckets() {
+        let backend = MemoryBroker::new("us-east-1", "000000000000").backend();
+        let fetch = FetchSettings { allowed_buckets: vec!["payloads".into()], ..FetchSettings::default() };
+        let transport = Transport::new(backend.clone(), None, fetch).unwrap();
+        let options = PutOptions::default();
+        for bucket in ["payloads", "records"] {
+            backend.objects.create_bucket(bucket).await.unwrap();
+            backend.objects.put_object(bucket, "k", Bytes::from_static(b"data"), &options).await.unwrap();
+        }
+        let pointer = |bucket: &str| PayloadPointer {
+            bucket: Some(bucket.into()),
+            key: Some("k".into()),
+            ..PayloadPointer::default()
+        };
+        let error = transport.delete_payload(&pointer("records")).await.unwrap_err();
+        assert!(error.to_string().contains("refusing to delete a payload from bucket \"records\""), "{error}");
+        assert_eq!(&backend.objects.get_object("records", "k", 100).await.unwrap()[..], b"data");
+        transport.delete_payload(&pointer("payloads")).await.unwrap();
+        assert!(backend.objects.get_object("payloads", "k", 100).await.is_err());
     }
 }

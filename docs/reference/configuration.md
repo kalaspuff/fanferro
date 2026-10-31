@@ -154,8 +154,9 @@ the policies and `OutgoingMessage` keep them as float seconds.
 `bucket_key` (`True`), `storage_class` (`None`), `create_bucket` (`False`), `prefixed` (`True`:
 the client's `bucket_prefix` applies; `False` for a bucket shared by environments).
 
-`PayloadFetch`: `max_bytes` (64 MiB), `prefer` (`"s3"`), `allowed_url_hosts` (AWS + endpoint),
-`allow_http` (`False`), `verify_checksum` (`True`).
+`PayloadFetch`: `max_bytes` (64 MiB), `prefer` (`"s3"`), `allowed_url_hosts` (S3 endpoints; the
+`endpoint_url`'s scheme, host and port are allowed either way), `allow_http` (`False`),
+`allowed_buckets` (any bucket; also limits `delete_offloaded_payloads`), `verify_checksum` (`True`).
 
 `Telemetry`: `tracing` (`True`), `metrics` (`True`), `propagation` (`Propagation()`),
 `consumer_span_parent` (`"child"`), `tracer_provider`, `meter_provider`.
