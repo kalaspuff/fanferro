@@ -54,6 +54,9 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 - **memory:** A FIFO queue of the in-memory broker expires the receipt handle of a message that is
   visible again ("The receipt handle has expired"), as SQS does, instead of answering
   `MessageNotInflight` (#158)
+- **memory:** SNS of the in-memory broker refuses topic ARNs of other regions in every operation,
+  refuses invalid FIFO ids with SNS's text (a whole `PublishBatch` call for one such entry), and
+  writes the default topic policy as SNS does (#159)
 
 ## [0.6.0] - 2026-10-31
 

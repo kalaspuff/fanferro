@@ -1306,29 +1306,37 @@ impl SqsApi for MemorySqs {
     }
 }
 
+/// SNS refuses FIFO group and deduplication ids that SQS refuses, with its own text
+/// (docs/parity M8, S11).
+fn check_fifo_ids(operation: &'static str, request: &PublishRequest) -> Result<()> {
+    for (parameter, id) in
+        [("MessageGroupId", &request.group_id), ("MessageDeduplicationId", &request.deduplication_id)]
+    {
+        if let Some(id) = id
+            && !crate::publish::is_fifo_id(id)
+        {
+            return Err(sns_invalid(
+                operation,
+                format!(
+                    "Invalid parameter: The {parameter} parameter can only include alphanumeric and punctuation characters. 1 to 128 in length"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// SNS refuses requests with the code `InvalidParameter` (SQS with `InvalidParameterValue`).
 fn sns_invalid(operation: &'static str, message: impl Into<String>) -> Error {
     aws_error("sns", operation, AwsErrorKind::InvalidRequest, "InvalidParameter", message)
 }
 
-/// SNS's default access policy of a topic: the owner's account may use it.
+/// SNS's default access policy of a topic: the owner's account may use it. The text is SNS's, keys
+/// in its order (docs/parity S2).
 fn default_topic_policy(topic_arn: &str, account: &str) -> String {
-    serde_json::json!({
-        "Version": "2008-10-17",
-        "Id": "__default_policy_ID",
-        "Statement": [{
-            "Sid": "__default_statement_ID",
-            "Effect": "Allow",
-            "Principal": {"AWS": "*"},
-            "Action": [
-                "SNS:GetTopicAttributes", "SNS:SetTopicAttributes", "SNS:AddPermission", "SNS:RemovePermission",
-                "SNS:DeleteTopic", "SNS:Subscribe", "SNS:ListSubscriptionsByTopic", "SNS:Publish"
-            ],
-            "Resource": topic_arn,
-            "Condition": {"StringEquals": {"AWS:SourceOwner": account}}
-        }]
-    })
-    .to_string()
+    format!(
+        r#"{{"Version":"2008-10-17","Id":"__default_policy_ID","Statement":[{{"Sid":"__default_statement_ID","Effect":"Allow","Principal":{{"AWS":"*"}},"Action":["SNS:GetTopicAttributes","SNS:SetTopicAttributes","SNS:AddPermission","SNS:RemovePermission","SNS:DeleteTopic","SNS:Subscribe","SNS:ListSubscriptionsByTopic","SNS:Publish"],"Resource":"{topic_arn}","Condition":{{"StringEquals":{{"AWS:SourceOwner":"{account}"}}}}}}]}}"#
+    )
 }
 
 /// SNS's default delivery policy of a topic, as `EffectiveDeliveryPolicy` reports it.
@@ -1467,24 +1475,7 @@ fn publish_locked(inner: &Inner, state: &mut State, topic_arn: &str, request: Pu
                 "Invalid parameter: The MessageGroupId parameter is required for FIFO topics",
             ));
         }
-        // SNS refuses the ids SQS refuses (docs/parity M8; its text is finding S11).
-        for (parameter, id) in
-            [("MessageGroupId", &request.group_id), ("MessageDeduplicationId", &request.deduplication_id)]
-        {
-            if let Some(id) = id
-                && !crate::publish::is_fifo_id(id)
-            {
-                return Err(aws_error(
-                    "sns",
-                    "Publish",
-                    AwsErrorKind::InvalidRequest,
-                    "InvalidParameter",
-                    format!(
-                        "Invalid parameter: {parameter} Reason: {parameter} can only include alphanumeric and punctuation characters. 1 to 128 in length."
-                    ),
-                ));
-            }
-        }
+        check_fifo_ids("Publish", &request)?;
         if deduplication_id.is_none() {
             if topic.attributes.get("ContentBasedDeduplication").map(String::as_str) == Some("true") {
                 deduplication_id = Some(content_dedup_id(&request.message));
@@ -1612,7 +1603,8 @@ fn validate_subscription_attribute(name: &str, value: &str) -> Result<()> {
 }
 
 impl MemorySns {
-    /// SNS refuses a topic ARN of another region than the client's (docs/parity S3).
+    /// SNS refuses a topic ARN of another region than the client's, in every operation
+    /// (docs/parity S3).
     fn check_region(&self, operation: &'static str, topic_arn: &str) -> Result<()> {
         match arn::Arn::parse(topic_arn) {
             Ok(parsed) if parsed.region != self.0.region => Err(sns_invalid(operation, "Invalid parameter: TopicArn")),
@@ -1635,8 +1627,12 @@ impl SnsApi for MemorySns {
             return Err(sns_invalid("PublishBatch", "a batch must contain 1-10 entries"));
         }
         let mut state = self.0.state.lock();
-        if !state.topics.contains_key(topic_arn) {
-            return Err(topic_not_found("PublishBatch"));
+        let topic = state.topics.get(topic_arn).ok_or_else(|| topic_not_found("PublishBatch"))?;
+        // An invalid FIFO id fails the whole call, not its entry (docs/parity S11).
+        if topic.fifo {
+            for entry in &entries {
+                check_fifo_ids("PublishBatch", entry)?;
+            }
         }
         // Like SNS: one trace header per call, kept only when every entry has the same one.
         let trace_header = crate::backend::shared_trace_header(&entries).map(str::to_string);
@@ -1701,6 +1697,7 @@ impl SnsApi for MemorySns {
     }
 
     async fn get_topic_attributes(&self, topic_arn: &str) -> Result<StringMap> {
+        self.check_region("GetTopicAttributes", topic_arn)?;
         let state = self.0.state.lock();
         let topic = state.topics.get(topic_arn).ok_or_else(|| topic_not_found("GetTopicAttributes"))?;
         let mut attributes = topic.attributes.clone();
@@ -1713,6 +1710,7 @@ impl SnsApi for MemorySns {
     }
 
     async fn set_topic_attribute(&self, topic_arn: &str, name: &str, value: &str) -> Result<()> {
+        self.check_region("SetTopicAttributes", topic_arn)?;
         if name == "FifoTopic" {
             return Err(sns_invalid("SetTopicAttributes", "Invalid parameter: AttributeName"));
         }
@@ -1724,17 +1722,20 @@ impl SnsApi for MemorySns {
     }
 
     async fn list_topic_tags(&self, topic_arn: &str) -> Result<StringMap> {
+        self.check_region("ListTagsForResource", topic_arn)?;
         let state = self.0.state.lock();
         Ok(state.topics.get(topic_arn).ok_or_else(|| topic_not_found("ListTagsForResource"))?.tags.clone())
     }
 
     async fn tag_topic(&self, topic_arn: &str, tags: &StringMap) -> Result<()> {
+        self.check_region("TagResource", topic_arn)?;
         let mut state = self.0.state.lock();
         state.topics.get_mut(topic_arn).ok_or_else(|| topic_not_found("TagResource"))?.tags.extend(tags.clone());
         Ok(())
     }
 
     async fn delete_topic(&self, topic_arn: &str) -> Result<()> {
+        self.check_region("DeleteTopic", topic_arn)?;
         let mut state = self.0.state.lock();
         state.topics.remove(topic_arn);
         state.subscriptions.retain(|_, sub| sub.topic_arn != topic_arn);
@@ -1748,6 +1749,7 @@ impl SnsApi for MemorySns {
         endpoint: &str,
         attributes: &StringMap,
     ) -> Result<String> {
+        self.check_region("Subscribe", topic_arn)?;
         for (name, value) in attributes {
             validate_subscription_attribute(name, value)?;
         }
@@ -1793,6 +1795,7 @@ impl SnsApi for MemorySns {
     }
 
     async fn list_subscriptions_by_topic(&self, topic_arn: &str) -> Result<Vec<SubscriptionInfo>> {
+        self.check_region("ListSubscriptionsByTopic", topic_arn)?;
         let state = self.0.state.lock();
         if !state.topics.contains_key(topic_arn) {
             return Err(topic_not_found("ListSubscriptionsByTopic"));
@@ -1863,6 +1866,7 @@ impl SnsApi for MemorySns {
     }
 
     async fn confirm_subscription(&self, topic_arn: &str, _token: &str) -> Result<String> {
+        self.check_region("ConfirmSubscription", topic_arn)?;
         let state = self.0.state.lock();
         state
             .subscriptions
