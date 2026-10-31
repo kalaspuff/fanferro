@@ -24,6 +24,8 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   name) and `PurgeQueueInProgress` (purging a queue twice within 60 seconds) are retryable
   `ThrottledError`s instead of invalid requests; the in-memory broker refuses both for 60 seconds,
   like SQS (#148)
+- **memory:** `Number` attributes come back from the in-memory broker without leading and trailing
+  zeros (`1.50` as `1.5`), with the attributes' MD5 of the values as returned, as from SQS (#149)
 
 ## [0.6.0] - 2026-10-31
 

@@ -855,3 +855,74 @@ async fn queues_are_created_again_and_purged_again_only_after_60_seconds() {
     tokio::time::advance(Duration::from_secs(1)).await;
     backend.sqs.create_queue("q", &StringMap::new(), &StringMap::new()).await.unwrap();
 }
+
+#[test]
+fn numbers_are_stored_without_leading_and_trailing_zeros() {
+    // docs/parity M1 (1.50 and 3.0 were recorded on AWS; the rest follows the same rule, O4).
+    for (sent, stored) in [
+        ("1.50", Some("1.5")),
+        ("3.0", Some("3")),
+        ("12345678901234567890", Some("12345678901234567890")),
+        ("100", Some("100")),
+        ("007", Some("7")),
+        ("-0.50", Some("-0.5")),
+        ("0.000", Some("0")),
+        ("-0", Some("0")),
+        (".5", Some("0.5")),
+        ("+5", Some("5")),
+        ("1.0E2", Some("100")),
+        ("1e-3", Some("0.001")),
+        ("ten", None),
+        ("1.2.3", None),
+        ("", None),
+        ("-", None),
+    ] {
+        assert_eq!(normalized_number(sent).as_deref(), stored, "{sent}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn number_attributes_come_back_normalised_with_their_md5() {
+    // docs/parity M1: SQS returns `1.50` as `1.5`; SendMessage reports the MD5 of the attributes as
+    // sent, a receive the MD5 of the attributes as returned.
+    let (_, backend) = broker();
+    let url = backend.sqs.create_queue("q", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let mut sent = MessageAttributes::new();
+    sent.insert("decimal".into(), AttributeValue::number("1.50"));
+    sent.insert("custom".into(), AttributeValue::with_type("Number.int", AttributeData::Text("007".into())).unwrap());
+    sent.insert("text".into(), AttributeValue::string("1.50"));
+    let output = backend.sqs.send_message(&url, SendRequest { attributes: sent.clone(), ..send("a") }).await.unwrap();
+    assert_eq!(output.md5_of_message_attributes.as_deref(), Some(md5_of_attributes(&sent).as_str()));
+    let received = backend.sqs.receive_messages(receive(&url, 1, None)).await.unwrap().remove(0);
+    let mut stored = sent.clone();
+    stored.insert("decimal".into(), AttributeValue::number("1.5"));
+    stored.insert("custom".into(), AttributeValue::with_type("Number.int", AttributeData::Text("7".into())).unwrap());
+    assert_eq!(received.attributes, stored, "strings are kept as sent");
+    assert_eq!(received.md5_of_message_attributes.as_deref(), Some(md5_of_attributes(&stored).as_str()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn sns_keeps_numbers_as_published_and_sqs_normalises_raw_deliveries() {
+    // docs/parity M1, S9: the notification document keeps `3.0`; raw delivery stores it as `3`.
+    let (_, backend) = broker();
+    let topic = backend.sns.create_topic("t", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let raw = backend.sqs.create_queue("raw", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let wrapped = backend.sqs.create_queue("wrapped", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let raw_delivery = StringMap::from([("RawMessageDelivery".to_string(), "true".to_string())]);
+    for (url, attributes) in [(&raw, &raw_delivery), (&wrapped, &StringMap::new())] {
+        let arn = backend.sqs.get_queue_attributes(url).await.unwrap()["QueueArn"].clone();
+        backend.sns.subscribe(&topic, "sqs", &arn, attributes).await.unwrap();
+    }
+    let mut attributes = MessageAttributes::new();
+    attributes.insert("n".into(), AttributeValue::number("3.0"));
+    backend
+        .sns
+        .publish(&topic, PublishRequest { message: "m".into(), attributes, ..PublishRequest::default() })
+        .await
+        .unwrap();
+    let delivered = backend.sqs.receive_messages(receive(&raw, 1, None)).await.unwrap().remove(0);
+    assert_eq!(delivered.attributes.get("n"), Some(&AttributeValue::number("3")));
+    let notification = backend.sqs.receive_messages(receive(&wrapped, 1, None)).await.unwrap().remove(0);
+    let document: serde_json::Value = serde_json::from_str(&notification.body).unwrap();
+    assert_eq!(document["MessageAttributes"]["n"]["Value"], "3.0");
+}
