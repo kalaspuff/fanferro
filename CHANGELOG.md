@@ -37,6 +37,10 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   attributes and invalid `SignatureVersion` values of standard topics refused, topic ARNs of other
   regions refused, and the default `Policy`, `EffectiveDeliveryPolicy`, `SubscriptionPrincipal` and
   `FilterPolicyScope` reported (#152)
+- Provisioning a subscription to a queue encrypted with the AWS managed key `alias/aws/sqs` emits a
+  `config.warning`: SNS cannot use that key and drops the messages silently. The in-memory broker
+  drops such deliveries too, and gives deliveries of topics with active X-Ray tracing a parent of
+  SNS's own, as SNS does (#153)
 
 ## [0.6.0] - 2026-10-31
 

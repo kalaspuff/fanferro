@@ -1116,3 +1116,50 @@ async fn topics_and_subscriptions_are_validated_and_reported_like_sns() {
     let err = backend.sns.publish_batch(&elsewhere, vec![request]).await.unwrap_err();
     assert_eq!(invalid(err), parameter("Invalid parameter: TopicArn"));
 }
+
+#[tokio::test(start_paused = true)]
+async fn sns_does_not_deliver_to_queues_encrypted_with_the_aws_managed_key() {
+    // docs/parity S8: SNS cannot use the AWS managed key of SQS; the broker delivered anyway.
+    let (broker, backend) = broker();
+    let topic = backend.sns.create_topic("t", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let mut urls = Vec::new();
+    for (name, attributes) in [
+        ("plain", StringMap::new()),
+        ("managed", attributes(&[("KmsMasterKeyId", "alias/aws/sqs")])),
+        ("custom", attributes(&[("KmsMasterKeyId", "alias/payments")])),
+    ] {
+        let url = backend.sqs.create_queue(name, &attributes, &StringMap::new()).await.unwrap();
+        let arn = backend.sqs.get_queue_attributes(&url).await.unwrap()["QueueArn"].clone();
+        backend.sns.subscribe(&topic, "sqs", &arn, &StringMap::new()).await.unwrap();
+        urls.push(url);
+    }
+    backend.sns.publish(&topic, PublishRequest { message: "m".into(), ..PublishRequest::default() }).await.unwrap();
+    let delivered: Vec<usize> = urls.iter().map(|url| broker.queue_messages(url).unwrap().len()).collect();
+    assert_eq!(delivered, [1, 0, 1]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn active_tracing_gives_deliveries_a_parent_of_sns() {
+    // docs/parity S7: with TracingConfig=Active, SNS passes the trace header on with its own parent.
+    let (_, backend) = broker();
+    let header = "Root=1-5759e988-bd862e3fe1be46a994272793;Parent=53995c3f42cd8ad8;Sampled=1";
+    for (tracing, same) in [("PassThrough", true), ("Active", false)] {
+        let topic = backend
+            .sns
+            .create_topic(tracing, &attributes(&[("TracingConfig", tracing)]), &StringMap::new())
+            .await
+            .unwrap();
+        let url = backend.sqs.create_queue(tracing, &StringMap::new(), &StringMap::new()).await.unwrap();
+        let arn = backend.sqs.get_queue_attributes(&url).await.unwrap()["QueueArn"].clone();
+        backend.sns.subscribe(&topic, "sqs", &arn, &StringMap::new()).await.unwrap();
+        let request =
+            PublishRequest { message: "m".into(), trace_header: Some(header.into()), ..PublishRequest::default() };
+        backend.sns.publish(&topic, request).await.unwrap();
+        let delivered = backend.sqs.receive_messages(receive(&url, 1, None)).await.unwrap().remove(0);
+        let received = delivered.system.aws_trace_header.unwrap();
+        assert_eq!(received == header, same, "{tracing}: {received}");
+        let parts: Vec<&str> = received.split(';').collect();
+        assert_eq!((parts[0], parts[2]), ("Root=1-5759e988-bd862e3fe1be46a994272793", "Sampled=1"));
+        assert!(parts[1].starts_with("Parent=") && parts[1].len() == "Parent=".len() + 16, "{received}");
+    }
+}

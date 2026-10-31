@@ -6,7 +6,7 @@ use super::{ProvisionStatus, Report, SubscriptionSpec};
 use crate::backend::StringMap;
 use crate::client::Client;
 use crate::error::{Error, ResourceKind, Result};
-use crate::events::EventKind;
+use crate::events::{Event, EventKind};
 
 /// A resolved subscription.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -132,16 +132,18 @@ impl Client {
             }
         }
 
+        // The subscribed queue's attributes, when they were read anyway.
+        let mut subscriber = None;
         if spec.manage_queue_policy {
             let may_write = spec.policy.create || spec.policy.update;
             let targets = std::iter::once((spec.queue_url.clone(), spec.queue_arn.clone()))
                 .chain(spec.dead_letter_queue_url.clone().zip(spec.dead_letter_queue_arn.clone()));
-            for (queue_url, queue_arn) in targets {
+            for (index, (queue_url, queue_arn)) in targets.enumerate() {
                 if may_write {
-                    if let Err(err) =
-                        self.ensure_topic_permission(&queue_url, &queue_arn, &spec.topic_arn, &mut report).await
-                    {
-                        return Ok(report.failed(err));
+                    match self.ensure_topic_permission(&queue_url, &queue_arn, &spec.topic_arn, &mut report).await {
+                        Ok(queue_attributes) if index == 0 => subscriber = Some(queue_attributes),
+                        Ok(_) => {}
+                        Err(err) => return Ok(report.failed(err)),
                     }
                 } else {
                     match self.queue_attributes(&queue_url).await {
@@ -158,6 +160,9 @@ impl Client {
                                     mutable: true,
                                 });
                             }
+                            if index == 0 {
+                                subscriber = Some(queue_attributes);
+                            }
                         }
                         Err(err) => report.error = Some(err),
                     }
@@ -165,6 +170,26 @@ impl Client {
             }
         }
 
+        let subscriber = match subscriber {
+            Some(attributes) => Some(attributes),
+            None => self.queue_attributes(&spec.queue_url).await.ok(),
+        };
+        if let Some(key) = subscriber.as_ref().and_then(|attributes| attributes.get("KmsMasterKeyId"))
+            && super::is_aws_managed_sqs_key(key)
+        {
+            self.inner.events.emit(EventKind::ConfigWarning, || {
+                Event::new(
+                    EventKind::ConfigWarning,
+                    format!(
+                        "SNS cannot deliver to {}: the queue is encrypted with the AWS managed key {key}, whose key policy does not allow SNS, and the messages are lost; encrypt the queue with a customer managed key that allows sns.amazonaws.com, or with SQS managed keys",
+                        spec.queue_arn
+                    ),
+                )
+                .field("queue", &spec.queue_arn)
+                .field("topic", &spec.topic_arn)
+                .field("kms_key", key.as_str())
+            });
+        }
         report.resource = Some(SubscriptionInfo {
             arn: subscription_arn,
             topic_arn: spec.topic_arn.clone(),
@@ -180,18 +205,19 @@ impl Client {
         queue_arn: &str,
         topic_arn: &str,
         report: &mut Report<SubscriptionInfo>,
-    ) -> Result<()> {
-        let attributes = self.queue_attributes(queue_url).await?;
+    ) -> Result<StringMap> {
+        let mut attributes = self.queue_attributes(queue_url).await?;
         if let Some(policy) =
             policy_doc::with_topic_permission(attributes.get("Policy").map(String::as_str), queue_arn, topic_arn)?
         {
-            let update = StringMap::from([("Policy".to_string(), policy)]);
+            let update = StringMap::from([("Policy".to_string(), policy.clone())]);
             self.backend().sqs.set_queue_attributes(queue_url, &update).await?;
+            attributes.insert("Policy".into(), policy);
             report.actions.push(format!("allowed {topic_arn} to send to {queue_arn}"));
             self.emit_resource(EventKind::ResourcePolicyUpdated, ResourceKind::Queue, queue_arn, |e| {
                 e.field("topic_arn", topic_arn)
             });
         }
-        Ok(())
+        Ok(attributes)
     }
 }
