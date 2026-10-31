@@ -99,4 +99,5 @@ them, the consumer tries them in Python, in the same order.
 
 SQS bodies must be text. Binary bodies (protobuf, compressed data) are base64-encoded by the
 transport and decoded transparently (`fanferro.encoding`). In CloudEvents JSON, binary payloads use
-`data_base64` instead.
+`data_base64` instead. A JSON `null` payload (`publish(None, ...)`) is `"data": null` with a JSON
+`datacontenttype` and reaches handlers as `null`; `"data": null` without one is an event without data.
