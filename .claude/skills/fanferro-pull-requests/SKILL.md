@@ -21,7 +21,8 @@ or hand-over in that path. Only an agent that cannot push hands its work over as
 - **Changelog.** git-cliff (`cliff.toml`) builds the release notes from the subjects on main: the
   type picks the group, the scope becomes a bold prefix, and `!` or `BREAKING CHANGE:` marks a
   breaking change. The PR title is the changelog line, so write it for users of fanferro. What a
-  title cannot say goes into `CHANGELOG.md` under `[Unreleased]`, in the same PR.
+  title cannot say goes into `CHANGELOG.md` under `[Unreleased]`, in the same PR; an entry there
+  that names its pull request (`(#58)`) replaces the generated line at release time.
 - **Title check.** `.github/workflows/pr-title.yml` accepts `feat`, `fix`, `perf`, `refactor`,
   `docs`, `test`, `ci`, `build`, `chore` and `revert`, with an optional scope and `!`. Editing the
   title runs the check again.
