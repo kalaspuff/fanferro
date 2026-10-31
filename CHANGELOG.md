@@ -98,6 +98,8 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   again; with `ShutdownPolicy(release_prefetched=False)`, messages still buffered once the drain
   deadline has passed are released (or left with `release_unfinished=False`) instead of being
   scheduled and cancelled (#137)
+- **codecs:** The dataclass codec decodes the `NamedTuple`, `TypedDict`, enum `Literal` and bare
+  `tuple`/`set` fields it writes, instead of dead-lettering such messages (#138)
 
 ## [0.5.0] - 2026-10-17
 

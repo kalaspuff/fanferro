@@ -290,6 +290,110 @@ def test_keys_that_encoding_writes_as_strings_are_converted_back() -> None:
         convert({"by_id": {"x": "a"}, "by_ratio": {}, "by_flag": {}, "by_level": {}, "by_color": {}}, Counts)
 
 
+class Point(typing.NamedTuple):
+    x: int
+    y: int = 0
+
+
+class Couple[T](typing.NamedTuple):
+    first: T
+    second: T
+
+
+class Address(typing.TypedDict):
+    street: str
+    since: datetime.date
+    unit: typing.NotRequired[int]
+
+
+class Page[T](typing.TypedDict, total=False):
+    items: typing.Required[list[T]]
+    cursor: str
+
+
+@dataclasses.dataclass
+class Shapes:
+    origin: Point
+    corners: list[Point]
+    pair: Couple[Item]
+    address: Address
+    page: Page[Item]
+    red: Literal[Color.RED]
+    level: Literal[Level.LOW, Level.HIGH]
+    loose: tuple
+    tags: set
+    frozen: frozenset = frozenset()
+
+
+def test_what_encoding_writes_is_converted_back() -> None:
+    # Named tuples and TypedDicts are written as objects, enum literals as their values: decoding
+    # failed ("cannot convert dict to Point", TypeError for TypedDicts, no literal matched), and
+    # bare tuple and set annotations refused the arrays written for them.
+    shapes = Shapes(
+        origin=Point(1, 2),
+        corners=[Point(3), Point(4, 5)],
+        pair=Couple(Item("a"), Item("b", 2)),
+        address={"street": "Main", "since": datetime.date(2026, 1, 2)},
+        page={"items": [Item("c")], "cursor": "next"},
+        red=Color.RED,
+        level=Level.HIGH,
+        loose=(1, "a"),
+        tags={"x"},
+        frozen=frozenset({1}),
+    )
+    from fanferro.codecs import CodecRegistry
+
+    registry = CodecRegistry()
+    encoded = registry.encode(shapes)
+    written = json.loads(encoded.data)
+    assert written["origin"] == {"x": 1, "y": 2}
+    assert written["red"] == "red"
+    decoded = registry.decode(encoded.data, Shapes, encoded.content_type)
+    assert decoded == shapes
+    assert type(decoded.origin) is Point
+    assert type(decoded.red) is Color
+    assert type(decoded.loose) is tuple
+    # Named tuples are also read from arrays; a missing field with a default takes it.
+    assert convert([7], Point) == Point(7, 0)
+    assert convert({"x": 7}, Point) == Point(7, 0)
+    assert convert([{"sku": "a"}, {"sku": "b"}], Couple[Item]) == Couple(Item("a"), Item("b"))
+    # TypedDicts keep keys they do not declare; NotRequired keys may be missing.
+    assert convert({"street": "S", "since": "2026-01-02", "unit": 3, "x": 1}, Address) == {
+        "street": "S",
+        "since": datetime.date(2026, 1, 2),
+        "unit": 3,
+        "x": 1,
+    }
+    assert convert({"items": []}, Page[Item]) == {"items": []}
+
+
+def test_named_tuple_typed_dict_and_literal_errors() -> None:
+    with pytest.raises(DecodeError, match=r"^\$\.y: expected an integer, got str$"):
+        convert({"x": 1, "y": "2"}, Point)
+    with pytest.raises(DecodeError, match=r"^\$\[1\]: expected an integer, got str$"):
+        convert([1, "2"], Point)
+    with pytest.raises(DecodeError, match=r"^\$: expected 1-2 items for Point, got 3$"):
+        convert([1, 2, 3], Point)
+    with pytest.raises(DecodeError, match=r"^\$: missing required field 'x' for Point$"):
+        convert({"y": 1}, Point)
+    with pytest.raises(DecodeError, match=r"^\$: expected an object or an array for Point, got str$"):
+        convert("1,2", Point)
+    with pytest.raises(DecodeError, match=r"^\$: missing required key 'since' for Address$"):
+        convert({"street": "S"}, Address)
+    with pytest.raises(DecodeError, match=r"^\$\.unit: expected an integer, got str$"):
+        convert({"street": "S", "since": "2026-01-02", "unit": "3"}, Address)
+    with pytest.raises(DecodeError, match=r"^\$: missing required key 'items' for Page$"):
+        convert({"cursor": "c"}, Page[Item])
+    with pytest.raises(DecodeError, match=r"^\$: expected an object for Address, got list$"):
+        convert([], Address)
+    with pytest.raises(DecodeError, match="expected one of"):
+        convert("blue", Literal[Color.RED])
+    # Of the same JSON type: true is not the member whose value is 1.
+    with pytest.raises(DecodeError, match="expected one of"):
+        convert(True, Literal[Level.LOW])
+    assert convert("a", Literal["a", Color.RED]) == "a"
+
+
 def test_errors_name_the_json_path() -> None:
     with pytest.raises(DecodeError, match=r"^body\.a\[1\]\.qty: expected an integer, got str$"):
         convert({"a": [{"sku": "x"}, {"sku": "y", "qty": "no"}]}, dict[str, list[Item]], "body")
