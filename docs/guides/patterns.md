@@ -73,12 +73,20 @@ async def apply(message: fanferro.Message[PaymentCaptured]) -> None:
 ```
 
 For handlers whose effects are not in your database, `fanferro.idempotency.IdempotencyMiddleware`
-claims the message id in a store (implement `IdempotencyStore` on Redis/DynamoDB; claims expire
-so a crashed worker does not block a message forever), skips completed ids (`message.duplicate`)
-and retries messages another worker is processing. A handler that hands its message back
-(`message.retry()`, `requeue()`, `release()` or `dead_letter()`) leaves the id unclaimed, so the
-next delivery runs it again. `InMemoryIdempotencyStore` forgets expired ids; it suits tests and
-single-process workers.
+claims the message id in a store (implement `IdempotencyStore` on Redis/DynamoDB; `claim` may
+return a `Claim` or its string value) and skips completed ids (`message.duplicate`). A message
+whose id another worker holds is postponed by `retry_delay` (30 s) until that claim is completed
+or released, or expires after `lock_ttl` (15 minutes; a worker that crashed holds it that long).
+Postponements are not processing attempts, so they never use up `RetryPolicy.max_attempts`: on
+standard queues the message is sent back as a copy that keeps its attempt number (which also resets
+SQS's receive count); on FIFO queues its visibility changes, and only the consumer that postponed it
+leaves its next receive out of the attempt count (another consumer process counts it), and SQS
+counts every receive toward `max_receive_count`. A handler that hands its message back (`message.retry()`,
+`requeue()`, `release()` or `dead_letter()`) leaves the id unclaimed, so the next delivery runs it
+again. When the store fails to mark an id completed after the handler succeeded, the message is
+still acknowledged and the error reported (`consumer.error`): its claim then expires after
+`lock_ttl`. `InMemoryIdempotencyStore` forgets expired ids; it suits tests and single-process
+workers.
 
 ## Fan-out with filtering
 

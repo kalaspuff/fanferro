@@ -9,6 +9,9 @@ use crate::retry::{Backoff, RetrySettings};
 use crate::transport::sns_notification::SnsUnwrap;
 use crate::util::{duration_from_secs, whole_seconds};
 
+/// Most receive loops a consumer runs.
+const MAX_POLLERS: usize = 64;
+
 /// Maximum visibility timeout SQS allows.
 pub const MAX_VISIBILITY: Duration = Duration::from_secs(12 * 3600);
 
@@ -120,9 +123,22 @@ pub struct ConsumerConfig {
     /// (short polling), an empty receive pauses a second before the next one.
     #[serde(default = "d20")]
     pub wait_time: f64,
-    /// Concurrent receive loops.
+    /// Receive loops that always run (1-64): each keeps one `ReceiveMessage` call in flight.
     #[serde(default = "d1")]
     pub pollers: usize,
+    /// Most receive loops at once (`pollers` to 64; default: as many as `max_in_flight` has full
+    /// batches for, at least `pollers`). While receives come back full and a batch of in-flight
+    /// slots is free, another loop starts; the extra loops stop at the first receive that comes
+    /// back short, empty or failed, so an idle queue costs `pollers` long polls per `wait_time`.
+    #[serde(default)]
+    pub max_pollers: Option<usize>,
+    /// In-flight slots each extra receive loop adds to `max_in_flight` while it runs (0 to
+    /// `batch_size`; default 0: extra loops use the free slots of `max_in_flight` only). A
+    /// receive holds its slots during the round trip, so without them the receives in flight
+    /// take slots from the handlers. At most `max_in_flight + extra_poller_slots × (max_pollers
+    /// - pollers)` messages are leased.
+    #[serde(default)]
+    pub extra_poller_slots: usize,
     /// Optional receive rate limit.
     #[serde(default)]
     pub rate_limit: Option<RateLimitConfig>,
@@ -172,6 +188,8 @@ pub(crate) struct Settings {
     pub receive_batch_wait: Duration,
     pub wait_time: Duration,
     pub pollers: usize,
+    pub max_pollers: usize,
+    pub extra_poller_slots: usize,
     pub rate_limit: Option<(f64, u32)>,
     pub visibility_timeout: Duration,
     pub heartbeat_enabled: bool,
@@ -212,12 +230,26 @@ impl ConsumerConfig {
                 self.batch_size
             )));
         }
+        if self.extra_poller_slots > usize::from(self.batch_size) {
+            return Err(Error::config(format!(
+                "extra_poller_slots must be at most batch_size ({}), got {}",
+                self.batch_size, self.extra_poller_slots
+            )));
+        }
         let receive_batch_wait = duration_from_secs(self.receive_batch_wait, "receive_batch_wait")?;
         if receive_batch_wait > Duration::from_secs(20) {
             return Err(Error::config("receive_batch_wait must be at most 20 seconds"));
         }
-        if !(1..=64).contains(&self.pollers) {
+        if !(1..=MAX_POLLERS).contains(&self.pollers) {
             return Err(Error::config("pollers must be between 1 and 64"));
+        }
+        if let Some(max) = self.max_pollers
+            && !(self.pollers..=MAX_POLLERS).contains(&max)
+        {
+            return Err(Error::config(format!(
+                "max_pollers must be between pollers ({}) and {MAX_POLLERS}, got {max}",
+                self.pollers
+            )));
         }
         // SQS waits whole seconds: a fraction rounds up (truncated, it would be a short poll).
         let wait_time = whole_seconds(duration_from_secs(self.wait_time, "wait_time")?);
@@ -286,6 +318,10 @@ impl ConsumerConfig {
             receive_batch_wait,
             wait_time,
             pollers: self.pollers,
+            max_pollers: self.max_pollers.unwrap_or_else(|| {
+                self.max_in_flight.div_ceil(usize::from(self.batch_size)).clamp(self.pollers, MAX_POLLERS)
+            }),
+            extra_poller_slots: self.extra_poller_slots,
             rate_limit,
             visibility_timeout,
             heartbeat_enabled,
@@ -328,6 +364,8 @@ impl ConsumerConfig {
             receive_batch_wait: d_receive_batch_wait(),
             wait_time: d20(),
             pollers: d1(),
+            max_pollers: None,
+            extra_poller_slots: 0,
             rate_limit: None,
             visibility_timeout: d30(),
             heartbeat: HeartbeatConfig::default(),
@@ -375,6 +413,21 @@ mod tests {
         assert!(ConsumerConfig { batch_size: 5, min_receive_batch: Some(6), ..base.clone() }.validate().is_err());
         assert!(ConsumerConfig { receive_batch_wait: 21.0, ..base.clone() }.validate().is_err());
         assert!(ConsumerConfig { receive_batch_wait: -1.0, ..base }.validate().is_err());
+    }
+
+    #[test]
+    fn receive_loops_default_to_the_full_batches_in_flight() {
+        let base = ConsumerConfig::new("u");
+        let max = |config: ConsumerConfig| config.validate().unwrap().max_pollers;
+        assert_eq!(max(base.clone()), 1, "ten slots hold one batch");
+        assert_eq!(max(ConsumerConfig { max_in_flight: 110, ..base.clone() }), 11);
+        assert_eq!(max(ConsumerConfig { max_in_flight: 110, batch_size: 1, ..base.clone() }), 64);
+        assert_eq!(max(ConsumerConfig { pollers: 4, ..base.clone() }), 4, "at least the pollers");
+        assert_eq!(max(ConsumerConfig { max_in_flight: 110, max_pollers: Some(2), ..base.clone() }), 2);
+        assert!(ConsumerConfig { pollers: 4, max_pollers: Some(3), ..base.clone() }.validate().is_err());
+        assert!(ConsumerConfig { max_pollers: Some(65), ..base.clone() }.validate().is_err());
+        assert!(ConsumerConfig { extra_poller_slots: 10, ..base.clone() }.validate().is_ok());
+        assert!(ConsumerConfig { extra_poller_slots: 11, ..base }.validate().is_err());
     }
 
     #[test]

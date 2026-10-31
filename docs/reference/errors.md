@@ -7,8 +7,15 @@ and `status`.
 
 All of them are classes of `fanferro.errors` (also exported by `fanferro`), the module that
 tracebacks, the `error_type` of events and dead-letter metadata, and OpenTelemetry's `error.type`
-name: `fanferro.errors.AccessDeniedError`. Errors raised by the Rust core pickle with these
-attributes, so they reach the caller of a worker process as themselves.
+name: `fanferro.errors.AccessDeniedError`.
+
+Errors pickle with their attributes, so they reach the caller of a worker process
+(`ProcessPoolExecutor`, multiprocessing) or a task queue as themselves: a `ProvisioningError` with
+its `.report`, a `BatchPublishError` with its `.result`. A value that does not pickle is left out
+(`None` in the unpickled error), and only that value: a failed message whose body is an instance of
+a class defined in a function arrives with `body=None` but with its id, type and attributes, a
+failure's error that does not pickle as `error=None`. Copies (`copy.copy`, `copy.deepcopy`) keep
+every attribute. `AttributeValue` and `WireMessage` pickle too.
 
 | Exception | Raised when | Retryable |
 | --- | --- | --- |

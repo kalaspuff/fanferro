@@ -100,10 +100,11 @@ Publish options (keywords or `fanferro.OutgoingMessage`): `type`, `attributes`, 
 `delay` (queues), `sns_subject` (topics), `codec`, `envelope`.
 
 Consumer options: `concurrency`, `prefetch`, `batch_size`, `min_receive_batch`,
-`receive_batch_wait`, `wait_time`, `pollers`, `rate_limit`, `visibility_timeout`, `heartbeat`,
-`retry`, `dead_letter`, `shutdown`, `handler_timeout`, `ordering`, `strict_ordering`, `envelopes`,
-`middleware`, `auto_ack`, `settle_linger`, `sns_unwrap`, `auto_confirm_subscriptions`,
-`delete_offloaded_payloads`, `name`.
+`receive_batch_wait`, `wait_time`, `pollers`, `max_pollers`, `rate_limit`, `visibility_timeout`,
+`heartbeat`, `retry`, `dead_letter`, `shutdown`, `handler_timeout`, `ordering`, `strict_ordering`,
+`envelopes`, `middleware`, `auto_ack`, `settle_linger`, `sns_unwrap`, `auto_confirm_subscriptions`,
+`delete_offloaded_payloads`, `name`. For throughput, raise `concurrency`: receives follow (extra
+receive loops run while receives come back full), so `pollers` rarely needs changing.
 
 ## Credentials and region
 
@@ -268,6 +269,8 @@ async def test_flow() -> None:
 
 * Publishing before subscriptions exist: declare subscriptions on the client and enter it (`async with
   client:`) before publishing, or messages published to a topic with no subscribers are lost.
+  Subscriptions declared inside `async with client:` are resolved before their topic's next publish;
+  with `auto_provision=False`, `await subscription.resolve()` before publishing.
 * Sync handlers: handlers must be `async def`.
 * Creating a client per request: create it once and share it.
 * `max_receive_count` (SQS redrive) lower than `RetryPolicy.max_attempts`: SQS moves messages before
@@ -275,7 +278,8 @@ async def test_flow() -> None:
   SQS also counts the receives of messages handed back while an earlier message of their group was
   retried.
 * Using more than 10 attributes, empty attribute values, or names starting with `fanferro.`.
-* Combining matchers without parentheses: `(m.topic() == "a") | (m.topic() == "b")`.
+* Combining matchers without parentheses: `(m.topic() == "a") | (m.topic() == "b")`, or with
+  `and`, `or` and `not` (they raise `TypeError`): use `&`, `|` and `~`.
 * Building environment names by hand (`f"{env}-orders"`) instead of `Client(queue_prefix=...,
   topic_prefix=...)`: one forgotten prefix silently declares (and may create) an unprefixed
   resource. With the client prefixes set, a hand-built name gets the prefix twice.

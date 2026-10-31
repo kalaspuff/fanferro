@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 import fanferro
-from fanferro.idempotency import idempotent
+from fanferro.idempotency import Claim, InMemoryIdempotencyStore, idempotent
 from tests.conftest import ClientFactory
 from tests.helpers import OrderCreated, consume_until, drain_queue, wait_for
 
@@ -366,6 +366,90 @@ async def test_idempotent_consumer_runs_explicit_retries_again(client_factory: C
         await consume_until(consumer, lambda: len(attempts) == 2 or bool(duplicates))
     assert attempts == [1, 2]
     assert not duplicates
+
+
+@pytest.mark.parametrize("suffix", ["", ".fifo"])
+async def test_messages_claimed_elsewhere_wait_without_using_up_attempts(
+    client_factory: ClientFactory, name: Any, suffix: str
+) -> None:
+    # A claim held elsewhere (here: by a worker that crashed) postponed the message with a Retry
+    # each time, so it was dead-lettered after max_attempts while the claim was still live,
+    # without its handler ever running (#175).
+    client = client_factory()
+    base = name("claimed")
+    queue = client.queue(
+        f"{base}{suffix}", dead_letter=fanferro.DeadLetterQueue(f"{base}-dlq{suffix}", max_receive_count=50)
+    )
+    now = [0.0]
+    store = InMemoryIdempotencyStore(clock=lambda: now[0])
+    postponements: list[fanferro.Event] = []
+    failures: list[fanferro.Event] = []
+    client.on("message.requeued", postponements.append)
+    client.on("message.retry_scheduled", postponements.append)
+    client.on("message.failed", failures.append)
+    client.on("message.dead_lettered", failures.append)
+    consumer = client.consumer(
+        queue,
+        wait_time=1,
+        retry=fanferro.RetryPolicy(max_attempts=2, backoff=FAST_RETRY),
+        middleware=[idempotent(store, key=lambda message: message.id, lock_ttl=60, retry_delay=1)],
+    )
+    attempts: list[int] = []
+
+    @consumer.route(OrderCreated)
+    async def handle(message: fanferro.Message[OrderCreated]) -> None:
+        attempts.append(message.attempt)
+
+    assert await store.claim("order-1", lock_ttl=60) is Claim.ACQUIRED  # the crashed worker's claim
+    async with client:
+        await queue.send(OrderCreated(order_id=1), id="order-1", group_id="g" if suffix else None)
+        # Not consume_until twice: a stopping consumer hands back what it prefetched (a receive).
+        await consumer.start()
+        await wait_for(lambda: len(postponements) >= 3 or bool(attempts))  # more than max_attempts
+        assert attempts == []
+        now[0] = 61.0  # the claim expires
+        await consume_until(consumer, lambda: consumer.stats()["processed"] == 1)
+    assert attempts == [1]
+    assert failures == []
+    assert consumer.stats()["failed"] == 0
+    assert await store.claim("order-1", lock_ttl=60) is Claim.COMPLETED
+
+
+async def test_a_failed_completion_acks_the_message(client_factory: ClientFactory, name: Any) -> None:
+    # A complete() that raised failed the message although its handler had succeeded; the key
+    # stayed claimed, so every retry was postponed until the message was dead-lettered (#175).
+    client = client_factory()
+    queue = queue_with_dlq(client, name("uncompleted"))
+
+    class FlakyStore(InMemoryIdempotencyStore):
+        async def complete(self, key: str, *, ttl: float) -> None:
+            raise ConnectionError("store unavailable")
+
+    errors: list[fanferro.Event] = []
+    client.on("consumer.error", errors.append)
+    consumer = client.consumer(queue, wait_time=1, middleware=[idempotent(FlakyStore())])
+    processed: list[str] = []
+
+    @consumer.route(OrderCreated)
+    async def handle(message: fanferro.Message[OrderCreated]) -> None:
+        processed.append(message.id)
+
+    async with client:
+        await queue.send(OrderCreated(order_id=1), id="order-1")
+        await consume_until(consumer, lambda: bool(errors))
+        await wait_for(lambda: consumer.stats()["processed"] == 1)
+        counts: list[dict[str, int]] = []
+
+        async def gone() -> None:
+            while (count := await queue.approximate_count()) != {"visible": 0, "in_flight": 0, "delayed": 0}:
+                counts.append(count)
+                await asyncio.sleep(0.1)
+
+        await asyncio.wait_for(gone(), 10)  # acked, not retried
+    assert processed == ["order-1"]
+    assert consumer.stats()["failed"] == 0
+    assert [event.kind.value for event in errors] == ["consumer.error"]
+    assert "could not mark message order-1 as processed" in errors[0].message
 
 
 async def test_out_of_range_extensions_are_validation_errors(client_factory: ClientFactory, name: Any) -> None:

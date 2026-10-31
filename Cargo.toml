@@ -5,7 +5,7 @@ members = ["crates/fanferro-core", "crates/fanferro-py"]
 [workspace.package]
 version = "0.7.0"
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.99"
 license = "MIT"
 repository = "https://github.com/kalaspuff/fanferro"
 homepage = "https://github.com/kalaspuff/fanferro"

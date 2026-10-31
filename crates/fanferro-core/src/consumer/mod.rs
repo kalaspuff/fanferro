@@ -11,6 +11,11 @@
 //!
 //! * At most `max_in_flight` unsettled messages are leased at any time (buffered + processing):
 //!   pollers acquire one in-flight permit per requested message before calling `ReceiveMessage`.
+//! * `pollers` receive loops always run; while receives come back full and a batch of in-flight
+//!   permits is free, extra loops start (up to `max_pollers`), each ending at its first receive
+//!   that is not full, so the receives in flight follow the backlog and the free handler slots.
+//!   Each extra loop may add `extra_poller_slots` in-flight permits while it runs (the slots its
+//!   round trips hold), which are taken back once they are free after it ended.
 //! * A settlement first takes a settling permit (at most `max_settling` settlements run at once),
 //!   then hands the message's in-flight permit back: the next receive does not wait for the
 //!   delete round trip. A consumer therefore holds at most `max_in_flight + max_settling`
@@ -214,7 +219,7 @@ pub(crate) struct EngineInner {
     shutdown_token: CancellationToken,
     paused: watch::Sender<bool>,
     state: Mutex<EngineState>,
-    pollers: Mutex<Vec<JoinHandle<()>>>,
+    pollers: Mutex<Pollers>,
     /// Receive calls in flight (see [`EngineInner::begin_receive`]).
     receives: Mutex<ReceivesInFlight>,
     /// Leases dropped without a settlement are left to time out instead of released (see
@@ -231,6 +236,35 @@ pub(crate) struct EngineInner {
     orphaned_receives_until: Mutex<Option<Instant>>,
     /// Envelopes applied while decoding (see [`ConsumerEngine::with_envelopes`]).
     envelopes: Option<EnvelopeSet>,
+}
+
+/// The receive loops: `pollers` that always run, and extra ones while the queue keeps receives
+/// full (see [`EngineInner::add_poller`]).
+#[derive(Debug, Default)]
+struct Pollers {
+    handles: Vec<JoinHandle<()>>,
+    /// Loops running.
+    active: usize,
+    /// In-flight permits that ended extra loops added and that are still to be taken back
+    /// (they were in use when the loop ended).
+    surplus: usize,
+}
+
+/// A running receive loop; unregisters it when dropped.
+pub(crate) struct PollerSlot {
+    pub(crate) inner: Arc<EngineInner>,
+    /// In-flight permits the loop added (see `extra_poller_slots`).
+    added: usize,
+}
+
+impl Drop for PollerSlot {
+    fn drop(&mut self) {
+        let mut pollers = self.inner.pollers.lock();
+        pollers.active -= 1;
+        pollers.surplus += self.added;
+        self.inner.take_back_surplus(&mut pollers);
+        self.inner.metrics.pollers.add(-1);
+    }
 }
 
 /// The `ReceiveMessage` calls in flight.
@@ -323,6 +357,51 @@ impl EngineInner {
         receives.count += 1;
         receives.latest_start = Some(Instant::now());
         Some(ReceiveInFlight(self))
+    }
+
+    /// Starts another receive loop after a full receive, if a full batch of in-flight slots is
+    /// free and fewer than `max_pollers` loops run. It stops at its first receive that does not
+    /// come back full.
+    pub(crate) fn add_poller(self: &Arc<Self>) {
+        let mut pollers = self.pollers.lock();
+        // Under the lock: `stop_receiving` cancels before it takes the loops to wait for.
+        if self.receive_token.is_cancelled() || pollers.active >= self.settings.max_pollers || self.is_paused() {
+            return;
+        }
+        self.take_back_surplus(&mut pollers);
+        if self.permits.available_permits() < usize::from(self.settings.batch_size) {
+            return;
+        }
+        pollers.handles.retain(|handle| !handle.is_finished());
+        let handle = self.spawn_poller(&mut pollers, true);
+        pollers.handles.push(handle);
+    }
+
+    /// Spawns a receive loop (`extra`: one that ends at its first receive that is not full, and
+    /// adds `extra_poller_slots` in-flight permits while it runs).
+    fn spawn_poller(self: &Arc<Self>, pollers: &mut Pollers, extra: bool) -> JoinHandle<()> {
+        pollers.active += 1;
+        self.metrics.pollers.add(1);
+        let added = if extra { self.settings.extra_poller_slots } else { 0 };
+        // Permits an ended loop left behind are reused before new ones are added.
+        let reused = added.min(pollers.surplus);
+        pollers.surplus -= reused;
+        self.permits.add_permits(added - reused);
+        let slot = PollerSlot { inner: self.clone(), added };
+        self.runtime.spawn(poller::poll_loop(slot, extra))
+    }
+
+    /// Takes back the free permits ended extra loops added (see [`Pollers::surplus`]).
+    fn take_back_surplus(&self, pollers: &mut Pollers) {
+        if pollers.surplus > 0 {
+            pollers.surplus -= self.permits.forget_permits(pollers.surplus);
+        }
+    }
+
+    /// Takes back the free permits ended extra loops added, before a receive loop takes permits.
+    pub(crate) fn trim_permits(&self) {
+        let mut pollers = self.pollers.lock();
+        self.take_back_surplus(&mut pollers);
     }
 
     /// Registers leases for received messages and decodes them in order.
@@ -599,7 +678,7 @@ impl ConsumerEngine {
                 shutdown_token: CancellationToken::new(),
                 paused: watch::Sender::new(false),
                 state: Mutex::new(EngineState::Created),
-                pollers: Mutex::new(Vec::new()),
+                pollers: Mutex::new(Pollers::default()),
                 receives: Mutex::new(ReceivesInFlight::default()),
                 leave_dropped: AtomicBool::new(false),
                 background: Mutex::new(Vec::new()),
@@ -651,15 +730,20 @@ impl ConsumerEngine {
             background.push(inner.runtime.spawn(heartbeat::heartbeat_loop(inner.clone())));
         }
         *inner.background.lock() = background;
-        let pollers =
-            (0..inner.settings.pollers).map(|_| inner.runtime.spawn(poller::poll_loop(inner.clone()))).collect();
-        *inner.pollers.lock() = pollers;
+        {
+            let mut pollers = inner.pollers.lock();
+            for _ in 0..inner.settings.pollers {
+                let handle = inner.spawn_poller(&mut pollers, false);
+                pollers.handles.push(handle);
+            }
+        }
         inner.client.events().emit(EventKind::ConsumerStarted, || {
             Event::new(EventKind::ConsumerStarted, "consumer started")
                 .field("queue", inner.queue())
                 .field("max_in_flight", inner.settings.max_in_flight)
                 .field("min_receive_batch", inner.settings.min_receive_batch)
                 .field("pollers", inner.settings.pollers)
+                .field("max_pollers", inner.settings.max_pollers)
         });
         Ok(())
     }
@@ -755,7 +839,7 @@ impl ConsumerEngine {
         if abort {
             self.inner.abort_token.cancel();
         }
-        let pollers: Vec<_> = self.inner.pollers.lock().drain(..).collect();
+        let pollers = std::mem::take(&mut self.inner.pollers.lock().handles);
         for poller in pollers {
             let _ = poller.await;
         }

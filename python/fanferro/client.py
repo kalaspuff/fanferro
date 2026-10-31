@@ -266,6 +266,8 @@ class Client:
         self._pump_users = 0
         self._pump_task: asyncio.Task[None] | None = None
         self._entered = False
+        self._provisioned = False
+        """Whether everything declared was provisioned once (later subscriptions resolve before publishing)."""
 
     # -- connection ------------------------------------------------------------------------
 
@@ -591,7 +593,10 @@ class Client:
         """Declares (or returns the already declared) subscription of ``queue`` to ``topic``.
 
         Declaring it again returns the same subscription; settings that differ from the first
-        declaration raise :class:`~fanferro.ConfigurationError`.
+        declaration raise :class:`~fanferro.ConfigurationError`. A subscription declared after the
+        client provisioned everything (``async with client`` or ``await client.provision()``) is
+        resolved before the topic's next ``publish``, ``publish_batch`` or ``prepare``, so messages
+        published after the declaration reach the queue.
 
         Args:
             topic: Topic handle, or a topic name (the client's ``topic_prefix`` is prepended).
@@ -636,6 +641,10 @@ class Client:
             provisioning=provisioning,
         )
         self._subscriptions.append(subscription)
+        if self._provisioned:
+            # Provisioning already ran: without this, messages published to the topic before a
+            # consumer of the queue starts would reach no queue and be lost.
+            topic_handle._pending_subscriptions.append(subscription)
         return subscription
 
     def _declared_queue(self, name: str, *, prefixed: bool = True) -> Queue | None:
@@ -671,6 +680,8 @@ class Client:
         subscriptions, those of the same queue one after another. When a resource raises, the
         others finish first, and the error of the first in declaration order is raised.
         """
+        if not resources:
+            self._provisioned = True
         targets: list[Topic | Queue | Subscription] = list(resources) or [
             *self._topics.values(),
             *self._queues.values(),
@@ -827,8 +838,8 @@ class Client:
                 to add routes later with ``@consumer.route(...)``.
             **options: :class:`~fanferro.Consumer` options: ``concurrency``, ``prefetch``,
                 ``batch_size``, ``min_receive_batch``, ``receive_batch_wait``, ``wait_time``,
-                ``pollers``, ``rate_limit``, ``visibility_timeout``, ``heartbeat``, ``retry``,
-                ``dead_letter``, ``shutdown``, ``handler_timeout``, ``ordering``,
+                ``pollers``, ``max_pollers``, ``rate_limit``, ``visibility_timeout``, ``heartbeat``,
+                ``retry``, ``dead_letter``, ``shutdown``, ``handler_timeout``, ``ordering``,
                 ``strict_ordering``, ``envelopes``, ``middleware``, ``auto_ack``, ``settle_linger``,
                 ``sns_unwrap``, ``auto_confirm_subscriptions``, ``delete_offloaded_payloads``,
                 ``name``.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -470,3 +471,58 @@ async def test_a_missing_dead_letter_queue_is_looked_up_again_on_use(client_fact
     assert queue.dead_letter_queue is not None
     # Its queue's failed resolution put no back-off on it: it is found at once.
     assert (await queue.dead_letter_queue.resolve()).name == dlq_name
+
+
+async def test_subscriptions_declared_after_entering_resolve_before_publishing(
+    client_factory: ClientFactory, name: Any
+) -> None:
+    client = client_factory()
+    topic = client.topic(name("orders"))
+    async with client:
+        single, batch, prepared = (client.queue(name(suffix)) for suffix in ("single", "batch", "prepared"))
+        client.subscription(topic, single)
+        await topic.publish({"id": 1})
+        client.subscription(topic, batch)
+        await topic.publish_batch([{"id": 2}, {"id": 3}])
+        client.subscription(topic, prepared)
+        await client.publish_prepared(await topic.prepare({"id": 4}))
+        assert topic._pending_subscriptions == []
+        assert [json.loads(m.body)["id"] for m in await drain_queue(client, single)] == [1, 2, 3, 4]
+        assert sorted(json.loads(m.body)["id"] for m in await drain_queue(client, batch)) == [2, 3, 4]
+        assert [json.loads(m.body)["id"] for m in await drain_queue(client, prepared)] == [4]
+
+
+async def test_an_unavailable_late_subscription_stays_pending(client_factory: ClientFactory, name: Any) -> None:
+    events: list[fanferro.Event] = []
+    client = client_factory()
+    client.on("resource.missing", events.append)
+    topic = client.topic(name("orders"))
+    async with client:
+        queue = client.queue(name("work"))
+        subscription = client.subscription(topic, queue, provisioning=fanferro.Provisioning(on_missing="log"))
+        await topic.publish({"id": 1})  # the subscription is missing: logged, the publish goes ahead
+        assert len(events) == 1
+        assert topic._pending_subscriptions == [subscription]
+        await client_factory().subscription(topic.name, queue.name).resolve()
+        await subscription.resolve(force=True)
+        await topic.publish({"id": 2})
+        assert topic._pending_subscriptions == []
+        assert [json.loads(m.body)["id"] for m in await drain_queue(client, queue)] == [2]
+
+
+async def test_subscriptions_declared_without_provisioning_are_not_resolved_by_publishing(
+    memory_client: fanferro.Client, name: Any
+) -> None:
+    topic = memory_client.topic(name("orders"))
+    subscription = memory_client.subscription(topic, memory_client.queue(name("work")))
+    await topic.publish({"id": 1})
+    assert not subscription.resolved
+
+
+async def test_a_late_subscription_that_raises_fails_the_publish(memory_client: fanferro.Client, name: Any) -> None:
+    topic = memory_client.topic(name("orders"))
+    async with memory_client:
+        queue = memory_client.queue(name("work"))
+        memory_client.subscription(topic, queue, provisioning=EXISTING)
+        with pytest.raises(fanferro.ProvisioningError):
+            await topic.publish({"id": 1})
