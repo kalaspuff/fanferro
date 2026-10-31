@@ -146,7 +146,10 @@ class DeadLetterPolicy:
     Attributes:
         queue: Dead-letter queue name (the client's ``queue_prefix`` is prepended). Defaults to the
             queue's ``DeadLetterQueue`` declaration or the target of its ``RedrivePolicy``.
-        on_exhausted: Action when retries are exhausted (``"leave"`` lets SQS redrive do it).
+        on_exhausted: Action when retries are exhausted, also for messages received past
+            ``max_attempts``. ``"retry"`` keeps retrying with backoff, running the handler each time
+            (until SQS redrive moves the message, if the queue has a ``RedrivePolicy``); ``"leave"``
+            lets SQS redrive do it.
         on_decode_error: Action for messages that cannot be decoded (bad envelope or body).
         on_unroutable: Action for messages no route matches.
         on_missing_queue: Action when dead-lettering is requested but no dead-letter queue is known.

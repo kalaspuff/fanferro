@@ -37,6 +37,33 @@ async def test_retry_then_succeed(client_factory: ClientFactory, name: Any) -> N
     assert consumer.stats()["failed"] == 2
 
 
+async def test_on_exhausted_retry_runs_the_handler_again(client_factory: ClientFactory, name: Any) -> None:
+    # A message received past max_attempts got on_exhausted before routing: with "retry" it came
+    # back past max_attempts again and bounced forever without its handler running.
+    client = client_factory()
+    queue = queue_with_dlq(client, name("persistent"))
+    attempts: list[int] = []
+    consumer = client.consumer(
+        queue,
+        wait_time=1,
+        retry=fanferro.RetryPolicy(max_attempts=2, backoff=FAST_RETRY),
+        dead_letter=fanferro.DeadLetterPolicy(on_exhausted="retry"),
+    )
+
+    @consumer.route(OrderCreated)
+    async def handle(message: fanferro.Message[OrderCreated]) -> None:
+        attempts.append(message.attempt)
+        if message.attempt < 4:
+            raise ConnectionError("downstream unavailable")
+
+    async with client:
+        await queue.send(OrderCreated(order_id=1))
+        await consume_until(consumer, lambda: consumer.stats()["processed"] == 1)
+    assert attempts == [1, 2, 3, 4]
+    assert consumer.stats()["failed"] == 3
+    assert consumer.stats()["engine"].get("messages_dead_lettered", 0) == 0
+
+
 async def test_exhausted_retries_dead_letter_with_metadata(client_factory: ClientFactory, name: Any) -> None:
     client = client_factory()
     queue = queue_with_dlq(client, name("poison"))
