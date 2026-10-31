@@ -9,7 +9,14 @@ handlers with side effects should be idempotent. The :class:`IdempotencyMiddlewa
   ``release()``, or ``dead_letter()``, which a redrive may undo; a message handed back without a
   delay may arrive again before the handler returned, and is then retried after ``retry_delay``);
 * completed key: the message is acknowledged without running the handler (``message.duplicate``);
-* key in progress elsewhere: the message is retried later (another consumer is working on it).
+* key in progress elsewhere: the message is postponed by ``retry_delay`` seconds (another consumer
+  is working on it, or crashed while holding the claim, which expires after ``lock_ttl``).
+  Postponements are not processing attempts: they never use up ``RetryPolicy.max_attempts``, so a
+  message is not dead-lettered while a claim on it is live.
+
+A store that fails to mark a key completed after the handler succeeded does not fail the message:
+the error is reported (``consumer.error``) and the message is acknowledged; its claim expires after
+``lock_ttl``.
 
 For exactly-once *effects*, record the key in the same database transaction as the handler's
 writes (see ``docs/guides/patterns.md``); :class:`InMemoryIdempotencyStore` is for tests and
@@ -22,8 +29,7 @@ import time
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol
 
-from fanferro.actions import Retry
-from fanferro.consumer import Duplicate
+from fanferro.consumer import Duplicate, _Postpone, _report_error
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -48,8 +54,11 @@ class Claim(StrEnum):
 class IdempotencyStore(Protocol):
     """Storage for idempotency keys (implement it on Redis, DynamoDB or your SQL database)."""
 
-    async def claim(self, key: str, *, lock_ttl: float) -> Claim:
-        """Atomically claims ``key`` for ``lock_ttl`` seconds unless it is completed or claimed."""
+    async def claim(self, key: str, *, lock_ttl: float) -> Claim | str:
+        """Atomically claims ``key`` for ``lock_ttl`` seconds unless it is completed or claimed.
+
+        Returns a :class:`Claim` or its value (``"acquired"``, ``"completed"``, ``"in_progress"``).
+        """
         ...
 
     async def complete(self, key: str, *, ttl: float) -> None:
@@ -120,7 +129,9 @@ class IdempotencyMiddleware:
         key: Derives the key from a message (default: ``"<queue>:<message id>"``).
         ttl: How long completed keys are remembered (seconds; cover your maximum redelivery window).
         lock_ttl: How long an in-progress claim is held (should exceed the handler's run time).
-        retry_delay: Delay before retrying a message that is in progress elsewhere.
+            A message whose earlier delivery crashed while holding the claim waits this long.
+        retry_delay: Delay before a message that is in progress elsewhere is tried again
+            (postponements do not count as attempts of the retry policy).
     """
 
     def __init__(
@@ -141,11 +152,11 @@ class IdempotencyMiddleware:
     async def __call__(self, message: Message[Any], call_next: HandlerNext) -> None:
         """Runs the handler unless the message was already processed."""
         key = self.key(message)
-        claim = await self.store.claim(key, lock_ttl=self.lock_ttl)
-        if claim is Claim.COMPLETED:
+        claim = Claim(await self.store.claim(key, lock_ttl=self.lock_ttl))  # a store may return strings
+        if claim == Claim.COMPLETED:
             raise Duplicate(f"message {message.id} was already processed")
-        if claim is Claim.IN_PROGRESS:
-            raise Retry(f"message {message.id} is being processed elsewhere", delay=self.retry_delay)
+        if claim == Claim.IN_PROGRESS:
+            raise _Postpone(f"message {message.id} is being processed elsewhere", delay=self.retry_delay)
         try:
             await call_next(message)
         except BaseException:
@@ -156,9 +167,15 @@ class IdempotencyMiddleware:
             # redriven): its next delivery must run the handler again, not be skipped as a duplicate.
             await self.store.release(key)
             return
-        await self.store.complete(key, ttl=self.ttl)
+        try:
+            await self.store.complete(key, ttl=self.ttl)
+        except Exception as error:  # noqa: BLE001 - reported; the handler's effects are done
+            # Failing the message would run the handler again (or, while the claim is live,
+            # postpone it until it expires): the effects are done, so the message is acked.
+            _report_error(message, f"could not mark message {message.id} as processed", error)
 
 
 def idempotent(store: IdempotencyStore | None = None, **options: Any) -> IdempotencyMiddleware:
     """Creates an :class:`IdempotencyMiddleware` (in-memory store by default)."""
-    return IdempotencyMiddleware(store or InMemoryIdempotencyStore(), **options)
+    # Not `store or ...`: an empty InMemoryIdempotencyStore is falsy (it has a length).
+    return IdempotencyMiddleware(store if store is not None else InMemoryIdempotencyStore(), **options)
