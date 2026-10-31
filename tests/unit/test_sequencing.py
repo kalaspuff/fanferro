@@ -18,6 +18,7 @@ class _Consumer:
         self.tasks: list[asyncio.Task[None]] = []
         self.ran: list[str] = []
         self.released: list[str] = []
+        self.handed_back: dict[str, int] = {}
         self._waiting = 0
 
     def _spawn(self, coroutine: Any) -> None:
@@ -34,6 +35,12 @@ class _Consumer:
         for redelivered in self.redeliveries.get(delivery, []):
             self.sequencer.submit("g", cast(Any, redelivered))
         await asyncio.sleep(0)
+
+    def _note_handed_back(self, delivery: str) -> None:
+        self.handed_back[delivery] = self.handed_back.get(delivery, 0) + 1
+
+    def _forget_handed_back(self, delivery: str) -> None:
+        self.handed_back.pop(delivery, None)
 
     def _task_ended(self) -> None: ...
 
@@ -52,6 +59,8 @@ async def test_a_message_that_comes_back_hands_back_the_rest_of_its_group() -> N
     await consumer.run("m0", "m1", "m2", "m3")
     assert consumer.ran == ["m0", "m1"]
     assert consumer.released == ["m2", "m3"]
+    # Their next receives are not processing attempts; m0 left the queue.
+    assert consumer.handed_back == {"m2": 1, "m3": 1}
 
 
 async def test_a_redelivery_that_arrives_while_the_group_is_handed_back_is_processed() -> None:

@@ -341,6 +341,35 @@ async def test_an_immediate_fifo_retry_hands_the_group_back_once(client_factory:
     assert consumer.stats()["engine"]["messages_released"] == 2
 
 
+async def test_fifo_hand_backs_do_not_use_up_retries(client_factory: ClientFactory, name: Any) -> None:
+    """A group's later messages are handed back while its first one is retried: they are received
+    again unprocessed, which SQS counts, but these receives are not processing attempts."""
+    client = client_factory()
+    base = name("budget")
+    queue = client.queue(f"{base}.fifo", dead_letter=fanferro.DeadLetterQueue(f"{base}-dlq.fifo", max_receive_count=50))
+    attempts: list[tuple[int, int]] = []
+    retry = fanferro.RetryPolicy(max_attempts=3, backoff=fanferro.Backoff.immediate())
+    consumer = client.consumer(queue, wait_time=1, retry=retry)
+    dead: list[fanferro.Event] = []
+    client.on("message.dead_lettered", dead.append)
+
+    @consumer.route(OrderCreated)
+    async def handle(message: fanferro.Message[OrderCreated]) -> None:
+        order = message.body.order_id
+        attempts.append((order, message.attempt))
+        if order == 0 or (order == 1 and message.attempt == 1):
+            raise ConnectionError("downstream unavailable")
+
+    async with client:
+        await queue.send_batch(
+            [fanferro.OutgoingMessage(body=OrderCreated(order_id=i), group_id="g") for i in range(3)]
+        )
+        await consume_until(consumer, lambda: consumer.stats()["processed"] == 2)
+    # Message 0 uses its three attempts; 1 and 2, handed back meanwhile, still get theirs.
+    assert attempts == [(0, 1), (0, 2), (0, 3), (1, 1), (1, 2), (2, 1)]
+    assert len(dead) == 1
+
+
 class _RejectedDelete:
     """A delivery whose delete SQS rejects: the message comes back (at once here, instead of after
     its visibility timeout), and an awaited ack raises."""

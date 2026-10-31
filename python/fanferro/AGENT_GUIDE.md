@@ -263,7 +263,9 @@ async def test_flow() -> None:
 * Sync handlers: handlers must be `async def`.
 * Creating a client per request: create it once and share it.
 * `max_receive_count` (SQS redrive) lower than `RetryPolicy.max_attempts`: SQS moves messages before
-  fanferro's retries finish (fanferro logs a `config.warning`).
+  fanferro's retries finish (fanferro logs a `config.warning`). On FIFO queues keep it well above:
+  SQS also counts the receives of messages handed back while an earlier message of their group was
+  retried.
 * Using more than 10 attributes, empty attribute values, or names starting with `fanferro.`.
 * Combining matchers without parentheses: `(m.topic() == "a") | (m.topic() == "b")`.
 * Building environment names by hand (`f"{env}-orders"`) instead of `Client(queue_prefix=...,

@@ -155,6 +155,14 @@ Waiting for the delete adds its round trip to each message of a group (the delet
 background instead: faster per group, but a message whose delete fails is redelivered after the
 group's later messages.
 
+A message that was released unprocessed because an earlier message of its group was retried is
+received again, which SQS counts, but it was not a processing attempt: the consumer remembers its
+hand-backs, so `message.attempt` and `RetryPolicy.max_attempts` leave them out. SQS's
+`maxReceiveCount` counts them, and so does another consumer process that receives the group next:
+keep `max_receive_count` well above `max_attempts` on FIFO queues, or use `batch_size=1`, which
+never receives a group's later messages before its earlier ones are settled (one receive call per
+message).
+
 ## SNS subscriptions
 
 Messages from SNS arrive raw (default for subscriptions declared with fanferro) or wrapped in

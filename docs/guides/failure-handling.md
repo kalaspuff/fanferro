@@ -34,7 +34,8 @@ consumer = client.consumer(
   FIFO queue the copy goes behind the rest of its message group, which loses its order (consumers
   emit a `config.warning`); keep `"visibility"` there.
 
-`message.attempt` counts processing attempts across both (SQS receives plus requeues).
+`message.attempt` counts processing attempts across both (SQS receives plus requeues; not the
+receives of FIFO messages handed back unprocessed, see [FIFO queues](consuming.md#fifo-queues)).
 
 ## Dead-letter queues
 
