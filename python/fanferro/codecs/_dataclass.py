@@ -41,16 +41,17 @@ __all__ = ["DataclassCodec", "convert"]
 
 
 @functools.cache
-def _hints(cls: type) -> dict[str, Any]:
+def _hints(cls: type, *, include_extras: bool = False) -> dict[str, Any]:
     try:
-        return typing.get_type_hints(cls)
+        return typing.get_type_hints(cls, include_extras=include_extras)
     except NameError:
         parameters = getattr(cls, "__type_params__", ())
         if not parameters:
             raise
         # Early Python 3.12 releases (3.12.3, for one) do not resolve the type parameters of
         # `class Box[T]` in string annotations (`from __future__ import annotations`).
-        return typing.get_type_hints(cls, localns={parameter.__name__: parameter for parameter in parameters})
+        localns = {parameter.__name__: parameter for parameter in parameters}
+        return typing.get_type_hints(cls, localns=localns, include_extras=include_extras)
 
 
 # Converters are compiled once per target type: a function per type that checks and converts a
@@ -181,9 +182,23 @@ def _type_converter(target: Any) -> _Converter:
         return _mapping_converter(args)
     if isinstance(origin, type) and dataclasses.is_dataclass(origin):  # a generic dataclass: `Box[Item]`
         return _dataclass_converter(origin, dict(zip(_type_parameters(origin), args, strict=False)))
+    if typing.is_typeddict(target):
+        return _typed_dict_converter(target)
+    if typing.is_typeddict(origin):  # a generic TypedDict: `Page[Item]`
+        return _typed_dict_converter(origin, dict(zip(_type_parameters(origin), args, strict=False)))
+    if _is_named_tuple(target):
+        return _named_tuple_converter(target)
+    if _is_named_tuple(origin):  # a generic NamedTuple: `Pair[int]`
+        return _named_tuple_converter(origin, dict(zip(_type_parameters(origin), args, strict=False)))
+    if target in (tuple, set, frozenset):  # bare annotations: `tuple[Any, ...]`, `set[Any]`
+        return _sequence_converter(target, ())
     if isinstance(target, type):
         return _class_converter(target)
     return _identity
+
+
+def _is_named_tuple(target: Any) -> bool:
+    return isinstance(target, type) and issubclass(target, tuple) and hasattr(target, "_fields")
 
 
 def _union_converter(target: Any, args: tuple[Any, ...]) -> _Converter:
@@ -205,8 +220,16 @@ def _union_converter(target: Any, args: tuple[Any, ...]) -> _Converter:
 
 
 def _literal_converter(args: tuple[Any, ...]) -> _Converter:
+    # Enum members are written as their values (`Literal[Color.RED]` as "red"): matched by value,
+    # and of the same JSON type, so that `1` does not match a member whose value is `True`.
+    members = [(to_jsonable(arg.value), arg) for arg in args if isinstance(arg, enum.Enum)]
+    others = tuple(arg for arg in args if not isinstance(arg, enum.Enum))
+
     def convert_literal(value: Any, path: _Path) -> Any:
-        if value in args:
+        for written, member in members:
+            if written == value and type(written) is type(value):
+                return member
+        if value in others:
             return value
         raise DecodeError(f"{_render(path)}: expected one of {args!r}, got {value!r}")
 
@@ -308,6 +331,92 @@ def _dataclass_converter(target: type, types_by_parameter: Mapping[Any, Any] | N
     return convert_dataclass
 
 
+def _named_tuple_converter(target: type, types_by_parameter: Mapping[Any, Any] | None = None) -> _Converter:
+    """Named tuples, from objects (as fanferro writes them) or arrays (their fields in order)."""
+    compiled: list[tuple[str, str, _Converter, bool]] | None = None
+
+    def fields() -> list[tuple[str, str, _Converter, bool]]:
+        nonlocal compiled
+        hints = _hints(target)
+        defaults: Mapping[str, Any] = getattr(target, "_field_defaults", {})
+        compiled = [
+            (
+                name,
+                f".{name}",
+                _converter(_substitute(hints.get(name, Any), types_by_parameter or {})),
+                name not in defaults,
+            )
+            for name in getattr(target, "_fields", ())
+        ]
+        return compiled
+
+    def convert_named_tuple(value: Any, path: _Path) -> Any:
+        members = fields() if compiled is None else compiled
+        if isinstance(value, list):
+            required = sum(1 for *_, needed in members if needed)
+            if not required <= len(value) <= len(members):
+                expected = str(len(members)) if required == len(members) else f"{required}-{len(members)}"
+                raise DecodeError(f"{_render(path)}: expected {expected} items for {target.__name__}, got {len(value)}")
+            pairs = enumerate(zip(value, members, strict=False))
+            return target(*(convert_member(item, (path, i, _INDEX)) for i, (item, (_, _, convert_member, _)) in pairs))
+        if not isinstance(value, dict):
+            raise DecodeError(
+                f"{_render(path)}: expected an object or an array for {target.__name__}, got {type(value).__name__}"
+            )
+        kwargs = {}
+        for name, segment, convert_member, required in members:
+            if name in value:
+                kwargs[name] = convert_member(value[name], (path, segment, _FIELD))
+            elif required:
+                raise DecodeError(f"{_render(path)}: missing required field {name!r} for {target.__name__}")
+        return target(**kwargs)
+
+    return convert_named_tuple
+
+
+# Qualifiers of TypedDict keys, unwrapped from their hints (ReadOnly is new in Python 3.13).
+_KEY_QUALIFIERS = tuple(
+    qualifier
+    for qualifier in (typing.Annotated, typing.Required, typing.NotRequired, getattr(typing, "ReadOnly", None))
+    if qualifier is not None
+)
+
+
+def _typed_dict_converter(target: type, types_by_parameter: Mapping[Any, Any] | None = None) -> _Converter:
+    """TypedDicts: dicts whose declared keys are converted to their types (other keys are kept)."""
+    compiled: tuple[dict[str, _Converter], frozenset[str]] | None = None
+
+    def keys() -> tuple[dict[str, _Converter], frozenset[str]]:
+        nonlocal compiled
+        # `__required_keys__` ignores `Required`/`NotRequired` in string annotations (`from
+        # __future__ import annotations`): they are read from the hints.
+        required = set(getattr(target, "__required_keys__", ()))
+        converters = {}
+        for name, hint in _hints(target, include_extras=True).items():
+            while (origin := typing.get_origin(hint)) in _KEY_QUALIFIERS:
+                if origin is typing.Required:
+                    required.add(name)
+                elif origin is typing.NotRequired:
+                    required.discard(name)
+                hint = typing.get_args(hint)[0]
+            converters[name] = _converter(_substitute(hint, types_by_parameter or {}))
+        compiled = (converters, frozenset(required))
+        return compiled
+
+    def convert_typed_dict(value: Any, path: _Path) -> Any:
+        if not isinstance(value, dict):
+            raise DecodeError(f"{_render(path)}: expected an object for {target.__name__}, got {type(value).__name__}")
+        converters, required = keys() if compiled is None else compiled
+        for name in required:
+            if name not in value:
+                raise DecodeError(f"{_render(path)}: missing required key {name!r} for {target.__name__}")
+        return {
+            key: converters[key](item, (path, key, _KEY)) if key in converters else item for key, item in value.items()
+        }
+
+    return convert_typed_dict
+
+
 _PARSERS: dict[type, Callable[[Any], Any]] = {
     datetime.datetime: datetime.datetime.fromisoformat,
     datetime.date: datetime.date.fromisoformat,
@@ -390,7 +499,10 @@ def _converted(target: Any) -> bool:
     if typing.get_origin(target) in (tuple, set, frozenset) or target in (tuple, set, frozenset):
         return True
     return isinstance(target, type) and (
-        dataclasses.is_dataclass(target) or issubclass(target, enum.Enum) or target in _PARSERS
+        dataclasses.is_dataclass(target)
+        or issubclass(target, enum.Enum)
+        or target in _PARSERS
+        or _is_named_tuple(target)
     )
 
 
@@ -402,8 +514,9 @@ class DataclassCodec(SettingsEquality):
     """Encodes dataclass instances as JSON and decodes JSON into dataclasses.
 
     Nested dataclasses (generic ones too), lists, dicts (with int, float, bool or enum keys too),
-    tuples, sets, optionals/unions, literals, enums, datetimes, dates, UUIDs, Decimals, ``NewType``
-    and ``type`` aliases are converted according to the field type hints.
+    tuples, named tuples, sets, TypedDicts, optionals/unions, literals (of enum members too),
+    enums, datetimes, dates, UUIDs, Decimals, ``NewType`` and ``type`` aliases are converted
+    according to the field type hints.
     """
 
     name = "dataclass"

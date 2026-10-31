@@ -11,8 +11,9 @@ Built in, tried in this order: protobuf messages, pydantic models (and `list[Mod
 unions, `TypedDict` through `TypeAdapter`; bodies use field names unless the model serializes by
 alias or `PydanticCodec(by_alias=True)`, and decoding accepts names and aliases with pydantic 2.11
 or later), `msgspec.Struct`, dataclasses (nested, typed: enums, datetimes, UUIDs, Decimals,
-optionals, literals, `type` aliases, generic dataclasses, dicts with int, float, bool or enum
-keys...), `bytes`, `str`, JSON data. Library codecs only activate when the library is imported by
+optionals, literals of values or enum members, `type` aliases, generic dataclasses, named tuples
+from objects or arrays, `TypedDict` fields, bare `tuple` and `set`, dicts with int, float, bool or
+enum keys...), `bytes`, `str`, JSON data. Library codecs only activate when the library is imported by
 your application.
 
 Decoding is driven by the handler's annotation: `Message[Order]` decodes into `Order` with the
