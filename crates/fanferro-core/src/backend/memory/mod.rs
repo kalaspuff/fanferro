@@ -285,9 +285,69 @@ struct Enqueue {
     group_id: Option<String>,
     deduplication_id: Option<String>,
     trace_header: Option<String>,
-    dead_letter_source: Option<String>,
+    /// Set when a redrive policy moves the message from another queue.
+    redriven: Option<Redriven>,
     message_id: Option<String>,
     sent: Option<OffsetDateTime>,
+}
+
+/// What a message moved to a dead-letter queue by a redrive policy keeps from its source queue.
+struct Redriven {
+    source_arn: String,
+    /// SQS counts receives across all queues.
+    receive_count: u32,
+    first_receive: Option<OffsetDateTime>,
+}
+
+/// A queue's `RedrivePolicy`.
+struct RedrivePolicy {
+    target_arn: String,
+    max_receive_count: u32,
+}
+
+impl RedrivePolicy {
+    /// Parses a policy like SQS: a JSON object with a `deadLetterTargetArn` and a
+    /// `maxReceiveCount` of 1-1000 (a number or a string). The error is the reason SQS gives.
+    fn parse(raw: &str) -> std::result::Result<Self, String> {
+        let policy: serde_json::Value =
+            serde_json::from_str(raw).map_err(|_| "the policy is not a JSON object".to_string())?;
+        let target_arn = policy["deadLetterTargetArn"]
+            .as_str()
+            .ok_or_else(|| "Value for deadLetterTargetArn is missing".to_string())?
+            .to_string();
+        let max_receive_count = match &policy["maxReceiveCount"] {
+            serde_json::Value::Number(n) => n.as_u64(),
+            serde_json::Value::String(s) => s.parse().ok(),
+            serde_json::Value::Null => return Err("Value for maxReceiveCount is missing".into()),
+            _ => None,
+        }
+        .and_then(|count| u32::try_from(count).ok())
+        .filter(|count| (1..=1000).contains(count))
+        .ok_or_else(|| {
+            format!(
+                "Invalid value for maxReceiveCount: {}, valid values are from 1 to 1000 both inclusive.",
+                policy["maxReceiveCount"]
+            )
+        })?;
+        Ok(Self { target_arn, max_receive_count })
+    }
+
+    /// Validates a policy set on a queue (FIFO or not) like SQS: its target must exist and be of
+    /// the same type.
+    fn validate(state: &State, operation: &'static str, raw: &str, fifo: bool) -> Result<()> {
+        let reason = Self::parse(raw).and_then(|policy| {
+            match state.queues.values().find(|queue| queue.arn == policy.target_arn) {
+                None => Err("Dead letter target does not exist.".to_string()),
+                Some(target) if target.fifo != fifo => {
+                    Err("Dead-letter queue must be same type of queue as the source.".to_string())
+                }
+                Some(_) => Ok(()),
+            }
+        });
+        reason.map_err(|reason| {
+            invalid("sqs", operation, format!("Value {raw} for parameter RedrivePolicy is invalid. Reason: {reason}"))
+        })
+    }
 }
 
 fn enqueue(state: &mut State, queue_url: &str, operation: &'static str, request: Enqueue) -> Result<SendOutput> {
@@ -322,6 +382,8 @@ fn enqueue(state: &mut State, queue_url: &str, operation: &'static str, request:
     }
     let now = Instant::now();
     let mut deduplication_id = request.deduplication_id;
+    // SQS moves messages to a dead-letter queue without deduplicating them.
+    let deduplicate = request.redriven.is_none();
     if queue.fifo {
         if request.group_id.is_none() {
             return Err(aws_error(
@@ -339,7 +401,7 @@ fn enqueue(state: &mut State, queue_url: &str, operation: &'static str, request:
                 "Value for parameter DelaySeconds is invalid. Reason: The request include parameter that is not valid for this queue type.",
             ));
         }
-        if deduplication_id.is_none() {
+        if deduplication_id.is_none() && deduplicate {
             if queue.attributes.get("ContentBasedDeduplication").map(String::as_str) == Some("true") {
                 deduplication_id = Some(content_dedup_id(&request.body));
             } else {
@@ -351,6 +413,7 @@ fn enqueue(state: &mut State, queue_url: &str, operation: &'static str, request:
             }
         }
         if let Some(id) = &deduplication_id
+            && deduplicate
             && let Some((message_id, sequence_number)) =
                 queue.dedup.get(&queue.dedup_key(request.group_id.as_deref(), id), now)
         {
@@ -369,12 +432,17 @@ fn enqueue(state: &mut State, queue_url: &str, operation: &'static str, request:
     let sequence_number = queue.fifo.then_some(sequence);
     if let Some(id) = &deduplication_id
         && queue.fifo
+        && deduplicate
     {
         let key = queue.dedup_key(request.group_id.as_deref(), id);
         queue.dedup.insert(key, now, (message_id.clone(), sequence_number.clone()));
     }
     let md5_body = md5_of_body(&request.body);
     let md5_attributes = (!request.attributes.is_empty()).then(|| md5_of_attributes(&request.attributes));
+    let (receive_count, first_receive, dead_letter_source) = match request.redriven {
+        Some(redriven) => (redriven.receive_count, redriven.first_receive, Some(redriven.source_arn)),
+        None => (0, None, None),
+    };
     queue.messages.push(
         StoredMessage {
             message_id: message_id.clone(),
@@ -384,15 +452,15 @@ fn enqueue(state: &mut State, queue_url: &str, operation: &'static str, request:
             md5_of_attributes: md5_attributes.clone(),
             sent: request.sent.unwrap_or_else(OffsetDateTime::now_utc),
             available_at: now + delay,
-            receive_count: 0,
-            first_receive: None,
+            receive_count,
+            first_receive,
             receipt_handle: None,
             in_flight: false,
             group_id: request.group_id,
             deduplication_id,
             sequence_number: sequence_number.clone(),
             trace_header: request.trace_header,
-            dead_letter_source: request.dead_letter_source,
+            dead_letter_source,
         },
         now,
     );
@@ -406,55 +474,46 @@ fn enqueue(state: &mut State, queue_url: &str, operation: &'static str, request:
 }
 
 /// Moves messages that exhausted `maxReceiveCount` to the dead-letter queue.
+///
+/// A message stays in the source queue when the dead-letter queue does not exist (any more) or
+/// refuses it, for example because it is larger than the dead-letter queue's `MaximumMessageSize`.
 fn apply_redrive(state: &mut State, queue_url: &str) {
-    let Some(queue) = state.queues.get_mut(queue_url) else { return };
-    let Some(policy) =
-        queue.attributes.get("RedrivePolicy").and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-    else {
+    let Some(queue) = state.queues.get(queue_url) else { return };
+    let Some(policy) = queue.attributes.get("RedrivePolicy").and_then(|raw| RedrivePolicy::parse(raw).ok()) else {
         return;
     };
-    let max_receive_count = match &policy["maxReceiveCount"] {
-        serde_json::Value::Number(n) => n.as_u64(),
-        serde_json::Value::String(s) => s.parse().ok(),
-        _ => None,
-    };
-    let (Some(max_receive_count), Some(target_arn)) = (max_receive_count, policy["deadLetterTargetArn"].as_str())
-    else {
-        return;
-    };
+    let Some(target_url) = state.queue_url_by_arn(&policy.target_arn) else { return };
     let source_arn = queue.arn.clone();
-    // Only messages received before can have reached the count (unless it is zero).
-    let exhausted = |(sequence, message): (u64, &StoredMessage)| {
-        (u64::from(message.receive_count) >= max_receive_count).then_some(sequence)
-    };
-    let sequences: Vec<u64> = if max_receive_count == 0 {
-        queue.messages.visible().filter_map(exhausted).collect()
-    } else {
-        queue.messages.redelivered().filter_map(exhausted).collect()
-    };
-    let moved: Vec<StoredMessage> =
-        sequences.into_iter().filter_map(|sequence| queue.messages.remove(sequence)).collect();
-    if moved.is_empty() {
-        return;
-    }
-    let Some(target_url) = state.queue_url_by_arn(target_arn) else { return };
-    for message in moved {
-        let _ = enqueue(
-            state,
-            &target_url,
-            "Redrive",
-            Enqueue {
-                body: message.body,
-                attributes: message.attributes,
+    // Only messages received before can have reached the count.
+    let exhausted: Vec<(u64, Enqueue)> = queue
+        .messages
+        .redelivered()
+        .filter(|(_, message)| message.receive_count >= policy.max_receive_count)
+        .map(|(sequence, message)| {
+            let request = Enqueue {
+                body: message.body.clone(),
+                attributes: message.attributes.clone(),
                 delay: None,
-                group_id: message.group_id,
-                deduplication_id: message.deduplication_id.map(|id| format!("{id}-redrive")),
-                trace_header: message.trace_header,
-                dead_letter_source: Some(source_arn.clone()),
-                message_id: Some(message.message_id),
+                group_id: message.group_id.clone(),
+                deduplication_id: message.deduplication_id.clone(),
+                trace_header: message.trace_header.clone(),
+                redriven: Some(Redriven {
+                    source_arn: source_arn.clone(),
+                    receive_count: message.receive_count,
+                    first_receive: message.first_receive,
+                }),
+                message_id: Some(message.message_id.clone()),
                 sent: Some(message.sent),
-            },
-        );
+            };
+            (sequence, request)
+        })
+        .collect();
+    for (sequence, request) in exhausted {
+        if enqueue(state, &target_url, "Redrive", request).is_ok()
+            && let Some(queue) = state.queues.get_mut(queue_url)
+        {
+            queue.messages.remove(sequence);
+        }
     }
 }
 
@@ -529,7 +588,7 @@ impl SqsApi for MemorySqs {
                 group_id: request.group_id,
                 deduplication_id: request.deduplication_id,
                 trace_header: request.trace_header,
-                dead_letter_source: None,
+                redriven: None,
                 message_id: None,
                 sent: None,
             },
@@ -558,7 +617,7 @@ impl SqsApi for MemorySqs {
                         group_id: request.group_id,
                         deduplication_id: request.deduplication_id,
                         trace_header: request.trace_header,
-                        dead_letter_source: None,
+                        redriven: None,
                         message_id: None,
                         sent: None,
                     },
@@ -707,12 +766,10 @@ impl SqsApi for MemorySqs {
         if fifo_attribute != name.ends_with(".fifo") {
             return Err(invalid("sqs", "CreateQueue", "FIFO queue names must end with .fifo and set FifoQueue=true"));
         }
-        if let Some(policy) = attributes.get("RedrivePolicy")
-            && serde_json::from_str::<serde_json::Value>(policy).is_err()
-        {
-            return Err(invalid("sqs", "CreateQueue", "Invalid value for the parameter RedrivePolicy."));
-        }
         let mut state = self.0.state.lock();
+        if let Some(policy) = attributes.get("RedrivePolicy") {
+            RedrivePolicy::validate(&state, "CreateQueue", policy, fifo_attribute)?;
+        }
         if let Some(existing) = state.queues.values().find(|queue| queue.name == name) {
             let conflicting = attributes.iter().any(|(key, value)| existing.attributes.get(key) != Some(value));
             if conflicting {
@@ -764,16 +821,16 @@ impl SqsApi for MemorySqs {
     }
 
     async fn set_queue_attributes(&self, queue_url: &str, attributes: &StringMap) -> Result<()> {
-        if let Some(policy) = attributes.get("RedrivePolicy")
-            && !policy.is_empty()
-            && serde_json::from_str::<serde_json::Value>(policy).is_err()
-        {
-            return Err(invalid("sqs", "SetQueueAttributes", "Invalid value for the parameter RedrivePolicy."));
-        }
         if attributes.contains_key("FifoQueue") {
             return Err(invalid("sqs", "SetQueueAttributes", "FifoQueue cannot be changed"));
         }
         let mut state = self.0.state.lock();
+        let fifo = state.queues.get(queue_url).ok_or_else(|| queue_not_found("SetQueueAttributes"))?.fifo;
+        if let Some(policy) = attributes.get("RedrivePolicy")
+            && !policy.is_empty()
+        {
+            RedrivePolicy::validate(&state, "SetQueueAttributes", policy, fifo)?;
+        }
         let queue = state.queues.get_mut(queue_url).ok_or_else(|| queue_not_found("SetQueueAttributes"))?;
         for (key, value) in attributes {
             if value.is_empty() {
@@ -977,7 +1034,7 @@ fn publish_locked(inner: &Inner, state: &mut State, topic_arn: &str, request: Pu
                     None
                 },
                 trace_header: request.trace_header.clone(),
-                dead_letter_source: None,
+                redriven: None,
                 message_id: None,
                 sent: None,
             },

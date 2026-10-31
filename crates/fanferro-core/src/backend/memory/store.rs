@@ -89,6 +89,10 @@ impl Messages {
             self.hidden.insert((message.available_at, sequence));
         } else {
             self.visible.insert(sequence);
+            // Moved by a redrive policy with its receive count.
+            if message.receive_count > 0 {
+                self.redelivered.insert(sequence);
+            }
         }
         self.by_sequence.insert(sequence, message);
     }
