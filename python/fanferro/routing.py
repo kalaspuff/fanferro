@@ -224,7 +224,8 @@ class Router:
 
         Args:
             message_type: A message class (matches its type name and decodes into it) or a type name.
-                Omit it to route by the handler's annotation (typed handlers) or ``when`` only.
+                Omit it to route by the handler's annotation (typed handlers) or ``when`` only; a
+                handler of ``Message``, ``Message[Any]`` or an untyped body then matches every message.
             when: Additional matcher (attributes, headers, body fields, topic...).
             priority: Higher priorities are evaluated first.
             name: Route name used in events (defaults to the handler's qualified name).
@@ -261,4 +262,9 @@ class Router:
 
 
 def _is_generic_type(value: Any) -> bool:
-    return value in (bytes, str, dict, list, int, float, bool, object) or typing.get_origin(value) is not None
+    # Any is a class since Python 3.11 (isinstance(Any, type)), but names no message type.
+    return (
+        value is Any
+        or value in (bytes, str, dict, list, int, float, bool, object)
+        or typing.get_origin(value) is not None
+    )
