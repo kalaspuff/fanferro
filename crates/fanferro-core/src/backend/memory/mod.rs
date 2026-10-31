@@ -1213,8 +1213,16 @@ impl SnsApi for MemorySns {
         }
         let filter = filter_of(attributes.get("FilterPolicy"), attributes.get("FilterPolicyScope"), "Subscribe")?;
         let mut state = self.0.state.lock();
-        if !state.topics.contains_key(topic_arn) {
-            return Err(topic_not_found("Subscribe"));
+        let topic = state.topics.get(topic_arn).ok_or_else(|| topic_not_found("Subscribe"))?;
+        // SNS delivers to FIFO queues from FIFO topics only (a FIFO topic may deliver to standard queues).
+        if protocol == "sqs" && endpoint.ends_with(".fifo") && !topic.fifo {
+            return Err(aws_error(
+                "sns",
+                "Subscribe",
+                AwsErrorKind::InvalidRequest,
+                "InvalidParameter",
+                "Invalid parameter: Endpoint Reason: FIFO SQS Queues can not be subscribed to standard SNS topics",
+            ));
         }
         if let Some(existing) = state
             .subscriptions

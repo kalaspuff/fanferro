@@ -160,6 +160,30 @@ async fn assumed_subscriptions_make_no_calls() {
 }
 
 #[tokio::test]
+async fn fifo_queues_cannot_be_subscribed_to_standard_topics() {
+    // SNS refuses the subscription; it failed only when provisioning reached AWS.
+    let client = client();
+    let spec = |topic: &str, queue: &str| SubscriptionSpec {
+        topic_arn: format!("arn:aws:sns:us-east-1:000000000000:{topic}"),
+        queue_arn: format!("arn:aws:sqs:us-east-1:000000000000:{queue}"),
+        queue_url: format!("memory://us-east-1/000000000000/{queue}"),
+        attributes: StringMap::new(),
+        manage_queue_policy: true,
+        dead_letter_queue_url: None,
+        dead_letter_queue_arn: None,
+        policy: ProvisionPolicy { lookup: false, ..ProvisionPolicy::default() },
+    };
+    let err = client.ensure_subscription(&spec("events", "worker.fifo")).await.unwrap_err();
+    assert!(matches!(err, Error::Validation(_)), "{err:?}");
+    assert!(err.to_string().contains("a FIFO queue cannot be subscribed to a standard topic"), "{err}");
+    // FIFO topics deliver to FIFO and standard queues.
+    for queue in ["worker.fifo", "worker"] {
+        let report = client.ensure_subscription(&spec("events.fifo", queue)).await.unwrap();
+        assert_eq!(report.status, ProvisionStatus::Assumed);
+    }
+}
+
+#[tokio::test]
 async fn assumed_queue_urls_use_the_partition_of_the_region() {
     for (region, url) in [
         ("eu-west-1", "https://sqs.eu-west-1.amazonaws.com/000000000000/ghost"),

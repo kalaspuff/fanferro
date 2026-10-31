@@ -89,6 +89,20 @@ def test_redeclaring_a_name_returns_the_same_handle() -> None:
         client.queue("orders-worker", tags={"team": "orders"})
 
 
+def test_fifo_queues_cannot_be_subscribed_to_standard_topics() -> None:
+    # SNS refuses it: the declaration worked in tests and failed when provisioning on AWS.
+    client = memory_client()
+    with pytest.raises(fanferro.ConfigurationError, match=r"FIFO queue 'worker\.fifo' cannot be subscribed"):
+        client.subscription(client.topic("events"), client.queue("worker.fifo"))
+    with pytest.raises(fanferro.ConfigurationError, match="standard topic 'events'"):
+        client.subscription("events", "worker.fifo")
+    assert client.subscriptions == []
+    # FIFO topics deliver to FIFO and standard queues.
+    client.subscription("events.fifo", "worker.fifo")
+    client.subscription("events.fifo", "worker")
+    client.subscription("events", "worker")
+
+
 def test_redeclaring_with_the_same_settings_returns_the_handle() -> None:
     client = memory_client()
     attributes = fanferro.QueueAttributes(visibility_timeout=60)

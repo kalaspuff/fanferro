@@ -763,6 +763,11 @@ class Subscription(_Resource):
         manage_queue_policy: bool = True,
         provisioning: Provisioning | None = None,
     ) -> None:
+        if queue.fifo and not topic.fifo:
+            raise ConfigurationError(
+                f"the FIFO queue {queue.name!r} cannot be subscribed to the standard topic {topic.name!r}: SNS "
+                "delivers to FIFO queues from FIFO topics only (subscribe it to a FIFO topic, or use a standard queue)"
+            )
         super().__init__(client, f"{topic.name} -> {queue.name}", provisioning)
         self.topic = topic
         self.queue = queue

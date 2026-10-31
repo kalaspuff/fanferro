@@ -477,6 +477,27 @@ async fn sns_fifo_requires_group_and_dedups() {
 }
 
 #[tokio::test]
+async fn fifo_queues_cannot_be_subscribed_to_standard_topics() {
+    // The broker accepted it and delivered with a made-up message group, while SNS refuses it.
+    let (_, backend) = broker();
+    let fifo = StringMap::from([("FifoQueue".to_string(), "true".to_string())]);
+    let fifo_topic = StringMap::from([("FifoTopic".to_string(), "true".to_string())]);
+    let topic = backend.sns.create_topic("events", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let topic_fifo = backend.sns.create_topic("events.fifo", &fifo_topic, &StringMap::new()).await.unwrap();
+    let queue_url = backend.sqs.create_queue("worker.fifo", &fifo, &StringMap::new()).await.unwrap();
+    let queue_arn = backend.sqs.get_queue_attributes(&queue_url).await.unwrap()["QueueArn"].clone();
+    let standard_url = backend.sqs.create_queue("worker", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let standard_arn = backend.sqs.get_queue_attributes(&standard_url).await.unwrap()["QueueArn"].clone();
+    let err = backend.sns.subscribe(&topic, "sqs", &queue_arn, &StringMap::new()).await.unwrap_err();
+    assert_eq!(err.aws().unwrap().code.as_deref(), Some("InvalidParameter"));
+    assert!(err.to_string().contains("FIFO SQS Queues can not be subscribed to standard SNS topics"), "{err}");
+    assert!(backend.sns.list_subscriptions_by_topic(&topic).await.unwrap().is_empty());
+    backend.sns.subscribe(&topic_fifo, "sqs", &queue_arn, &StringMap::new()).await.unwrap();
+    backend.sns.subscribe(&topic_fifo, "sqs", &standard_arn, &StringMap::new()).await.unwrap();
+    backend.sns.subscribe(&topic, "sqs", &standard_arn, &StringMap::new()).await.unwrap();
+}
+
+#[tokio::test]
 async fn invalid_filter_policies_are_refused() {
     let (broker, backend) = broker();
     let topic = backend.sns.create_topic("events", &StringMap::new(), &StringMap::new()).await.unwrap();

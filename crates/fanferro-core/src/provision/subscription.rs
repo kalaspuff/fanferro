@@ -5,7 +5,7 @@ use super::policy_doc;
 use super::{ProvisionStatus, Report, SubscriptionSpec};
 use crate::backend::StringMap;
 use crate::client::Client;
-use crate::error::{ResourceKind, Result};
+use crate::error::{Error, ResourceKind, Result};
 use crate::events::EventKind;
 
 /// A resolved subscription.
@@ -25,6 +25,11 @@ impl Client {
     /// Provisions a subscription according to its spec and policy.
     pub async fn ensure_subscription(&self, spec: &SubscriptionSpec) -> Result<Report<SubscriptionInfo>> {
         let name = format!("{} -> {}", spec.topic_arn, spec.queue_arn);
+        if spec.queue_arn.ends_with(".fifo") && !spec.topic_arn.ends_with(".fifo") {
+            return Err(Error::validation(format!(
+                "{name}: a FIFO queue cannot be subscribed to a standard topic (SNS delivers to FIFO queues from FIFO topics only)"
+            )));
+        }
         let mut report: Report<SubscriptionInfo> = Report::new(ResourceKind::Subscription, name.clone());
         if !spec.policy.lookup {
             // No API calls (not even for the queue policy): the subscription ARN stays unknown.
