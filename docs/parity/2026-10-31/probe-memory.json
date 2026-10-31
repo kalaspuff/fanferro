@@ -1,0 +1,2367 @@
+{
+  "probe_version": 1,
+  "target": "memory",
+  "fanferro": "0.6.0",
+  "python": "3.15.0",
+  "endpoint_version": null,
+  "region": "us-east-1",
+  "started": "2026-10-31T15:59:24Z",
+  "scenarios": {
+    "errors.invalid_credentials": {
+      "status": "skipped",
+      "doc": "Credentials AWS does not know: lookups, sends and payload buckets.",
+      "facts": {},
+      "reason": "not applicable to memory"
+    },
+    "errors.missing_profile": {
+      "status": "skipped",
+      "doc": "A named profile that does not exist (no credentials can be loaded).",
+      "facts": {},
+      "reason": "not applicable to memory"
+    },
+    "payloads.failures": {
+      "status": "ok",
+      "doc": "Offloaded payloads that cannot be fetched: deleted objects (by S3 and by URL) and expired URLs.",
+      "seconds": 5.5,
+      "error": null,
+      "facts": {
+        "deleted_s3.object_key": "fanferro/<uuid>/<hex>",
+        "deleted_s3.events": [
+          {
+            "kind": "message.decode_failed",
+            "reason": null,
+            "error": {
+              "type": "ResourceNotFoundError",
+              "message": "s3:GetObject failed (not_found) [NoSuchKey]: The specified key does not exist.",
+              "kind": "not_found",
+              "code": "NoSuchKey",
+              "status": 404,
+              "category": "not_found",
+              "service": "s3",
+              "operation": "GetObject",
+              "retryable": false,
+              "aws_message": "The specified key does not exist.",
+              "info.request_id": false
+            }
+          },
+          {
+            "kind": "message.dead_lettered",
+            "reason": "decode failed",
+            "error": null
+          }
+        ],
+        "deleted_s3.counts": {
+          "visible": 0,
+          "in_flight": 0,
+          "delayed": 0
+        },
+        "deleted_url.object_key": "fanferro/<uuid>/<hex>",
+        "deleted_url.events": [
+          {
+            "kind": "message.decode_failed",
+            "reason": null,
+            "error": {
+              "type": "PayloadError",
+              "message": "payload error: payload URL is not accessible (HTTP 404); it may have expired",
+              "category": "payload",
+              "retryable": false,
+              "info.request_id": false
+            }
+          },
+          {
+            "kind": "message.dead_lettered",
+            "reason": "decode failed",
+            "error": null
+          }
+        ],
+        "deleted_url.counts": {
+          "visible": 0,
+          "in_flight": 0,
+          "delayed": 0
+        },
+        "deleted_with_delete_offloaded.object_key": "fanferro/<uuid>/<hex>",
+        "deleted_with_delete_offloaded.events": [
+          {
+            "kind": "message.duplicate",
+            "reason": "payload_deleted",
+            "error": null
+          }
+        ],
+        "deleted_with_delete_offloaded.counts": {
+          "visible": 0,
+          "in_flight": 0,
+          "delayed": 0
+        },
+        "expired_url.events": [
+          {
+            "kind": "message.decode_failed",
+            "reason": null,
+            "error": {
+              "type": "PayloadError",
+              "message": "payload error: payload URL expired at <time>: the message waited longer than the presign_ttl it was published with (raise it, or publish with reference=\"both\" so that consumers that can read the bucket fetch it from there)",
+              "category": "payload",
+              "retryable": false,
+              "info.request_id": false
+            }
+          },
+          {
+            "kind": "message.dead_lettered",
+            "reason": "decode failed",
+            "error": null
+          }
+        ],
+        "expired_url.counts": {
+          "visible": 0,
+          "in_flight": 0,
+          "delayed": 0
+        }
+      }
+    },
+    "payloads.roundtrip": {
+      "status": "ok",
+      "doc": "Offloaded payloads with each pointer kind and format, through a queue and through a topic.",
+      "seconds": 7.2,
+      "error": null,
+      "facts": {
+        "s3.send": "ok",
+        "s3.pointer": {
+          "bucket": "<run>-payloads",
+          "key": "fanferro/<uuid>/<hex>",
+          "has_url": false,
+          "format": "fanferro"
+        },
+        "s3.received": [
+          true
+        ],
+        "s3.received_pointer": [
+          true
+        ],
+        "url.send": "ok",
+        "url.pointer": {
+          "bucket": null,
+          "key": null,
+          "has_url": true,
+          "format": "fanferro"
+        },
+        "info.url.url": "memory://s3/<run>-payloads/fanferro/<uuid>/<hex>?<query>",
+        "url.received": [
+          true
+        ],
+        "url.received_pointer": [
+          true
+        ],
+        "both.send": "ok",
+        "both.pointer": {
+          "bucket": "<run>-payloads",
+          "key": "fanferro/<uuid>/<hex>",
+          "has_url": true,
+          "format": "fanferro"
+        },
+        "info.both.url": "memory://s3/<run>-payloads/fanferro/<uuid>/<hex>?<query>",
+        "both.received": [
+          true
+        ],
+        "both.received_pointer": [
+          true
+        ],
+        "aws_extended.send": "ok",
+        "aws_extended.pointer": {
+          "bucket": "<run>-payloads",
+          "key": "fanferro/<uuid>/<hex>",
+          "has_url": false,
+          "format": "aws_extended"
+        },
+        "aws_extended.received": [
+          true
+        ],
+        "aws_extended.received_pointer": [
+          true
+        ],
+        "sse_s3.send": "ok",
+        "sse_s3.pointer": {
+          "bucket": "<run>-payloads",
+          "key": "fanferro/<uuid>/<hex>",
+          "has_url": false,
+          "format": "fanferro"
+        },
+        "sse_s3.received": [
+          true
+        ],
+        "sse_s3.received_pointer": [
+          true
+        ],
+        "sse_kms.send": "ok",
+        "sse_kms.pointer": {
+          "bucket": "<run>-payloads",
+          "key": "fanferro/<uuid>/<hex>",
+          "has_url": false,
+          "format": "fanferro"
+        },
+        "sse_kms.received": [
+          true
+        ],
+        "sse_kms.received_pointer": [
+          true
+        ],
+        "info.warm_up": {
+          "rounds": 1,
+          "seconds": "<1s",
+          "live": true
+        },
+        "topic.publish": "ok",
+        "topic.offloaded": true,
+        "topic.received": [
+          true
+        ]
+      }
+    },
+    "provision.dead_letter_queue": {
+      "status": "ok",
+      "doc": "A queue with a dead-letter queue: the redrive policy as SQS returns it; drift checks.",
+      "seconds": 0.0,
+      "error": null,
+      "facts": {
+        "report": {
+          "status": "created",
+          "actions": [
+            "created queue"
+          ],
+          "drift": [],
+          "error": null,
+          "dead_letter": {
+            "status": "created",
+            "actions": [
+              "created queue"
+            ],
+            "drift": [],
+            "error": null,
+            "dead_letter": null
+          }
+        },
+        "redrive_policy": {
+          "deadLetterTargetArn": "arn:aws:sqs:<region>:<account>:<run>-work-dlq",
+          "maxReceiveCount": 3
+        },
+        "raw_redrive_policy": "{\"deadLetterTargetArn\":\"arn:aws:sqs:<region>:<account>:<run>-work-dlq\",\"maxReceiveCount\":3}",
+        "dlq_attributes": {
+          "VisibilityTimeout": "30",
+          "MessageRetentionPeriod": "1209600",
+          "DelaySeconds": "0",
+          "MaximumMessageSize": "1048576",
+          "ReceiveMessageWaitTimeSeconds": "0",
+          "SqsManagedSseEnabled": "true",
+          "KmsMasterKeyId": null,
+          "KmsDataKeyReusePeriodSeconds": null,
+          "FifoQueue": null,
+          "ContentBasedDeduplication": null,
+          "DeduplicationScope": null,
+          "FifoThroughputLimit": null,
+          "RedrivePolicy": null,
+          "RedriveAllowPolicy": null
+        },
+        "verify_same": "ok",
+        "verify_same_report": {
+          "status": "found",
+          "actions": [],
+          "drift": [],
+          "error": null,
+          "dead_letter": {
+            "status": "found",
+            "actions": [],
+            "drift": [],
+            "error": null,
+            "dead_letter": null
+          }
+        },
+        "fifo_with_fifo_dlq": "ok",
+        "fifo_redrive_policy": {
+          "deadLetterTargetArn": "arn:aws:sqs:<region>:<account>:<run>-fifo-work-dlq.fifo",
+          "maxReceiveCount": 3
+        }
+      }
+    },
+    "provision.fifo_queue": {
+      "status": "ok",
+      "doc": "A FIFO queue with high-throughput settings; drift checks.",
+      "seconds": 0.0,
+      "error": null,
+      "facts": {
+        "report": {
+          "status": "created",
+          "actions": [
+            "created queue"
+          ],
+          "drift": [],
+          "error": null,
+          "dead_letter": null
+        },
+        "attributes": {
+          "VisibilityTimeout": "30",
+          "MessageRetentionPeriod": "345600",
+          "DelaySeconds": "0",
+          "MaximumMessageSize": "1048576",
+          "ReceiveMessageWaitTimeSeconds": "0",
+          "SqsManagedSseEnabled": "true",
+          "KmsMasterKeyId": null,
+          "KmsDataKeyReusePeriodSeconds": null,
+          "FifoQueue": "true",
+          "ContentBasedDeduplication": "true",
+          "DeduplicationScope": "messageGroup",
+          "FifoThroughputLimit": "perMessageGroupId",
+          "RedrivePolicy": null,
+          "RedriveAllowPolicy": null
+        },
+        "fifo": true,
+        "verify_same": "ok",
+        "verify_same_report": {
+          "status": "found",
+          "actions": [],
+          "drift": [],
+          "error": null,
+          "dead_letter": null
+        }
+      }
+    },
+    "provision.foreign_resources": {
+      "status": "ok",
+      "doc": "Queues and topics of another account (or region) the credentials cannot use.",
+      "seconds": 0.0,
+      "error": null,
+      "facts": {
+        "queue_by_owner": {
+          "type": "ProvisioningError",
+          "message": "queue <run>-foreign-q does not exist (enable Provisioning(create=True) to create it)",
+          "category": "fanferro",
+          "retryable": false,
+          "report": {
+            "status": "missing",
+            "actions": [],
+            "drift": [],
+            "error": null,
+            "dead_letter": null
+          },
+          "info.request_id": false
+        },
+        "queue_by_url": {
+          "type": "ProvisioningError",
+          "message": "queue <run>-foreign-u does not exist (enable Provisioning(create=True) to create it)",
+          "category": "fanferro",
+          "retryable": false,
+          "report": {
+            "status": "missing",
+            "actions": [],
+            "drift": [],
+            "error": null,
+            "dead_letter": null
+          },
+          "info.request_id": false
+        },
+        "queue_by_url_send": {
+          "type": "ResourceUnavailableError",
+          "message": "queue '<run>-foreign-u' is unavailable (retrying resolution shortly): queue <run>-foreign-u does not exist (enable Provisioning(create=True) to create it)",
+          "category": "fanferro",
+          "retryable": true,
+          "info.request_id": false
+        },
+        "assumed_queue_send": {
+          "type": "ResourceNotFoundError",
+          "message": "sqs:SendMessage failed (not_found) [AWS.SimpleQueueService.NonExistentQueue]: The specified queue does not exist.",
+          "kind": "not_found",
+          "code": "AWS.SimpleQueueService.NonExistentQueue",
+          "status": 404,
+          "category": "not_found",
+          "service": "sqs",
+          "operation": "SendMessage",
+          "retryable": false,
+          "aws_message": "The specified queue does not exist.",
+          "info.request_id": false
+        },
+        "topic_by_arn": {
+          "type": "ProvisioningError",
+          "message": "topic <run>-foreign-t does not exist (enable Provisioning(create=True) to create it)",
+          "category": "fanferro",
+          "retryable": false,
+          "report": {
+            "status": "missing",
+            "actions": [],
+            "drift": [],
+            "error": null,
+            "dead_letter": null
+          },
+          "info.request_id": false
+        },
+        "assumed_topic_publish": {
+          "type": "ResourceNotFoundError",
+          "message": "sns:Publish failed (not_found) [NotFound]: Topic does not exist",
+          "kind": "not_found",
+          "code": "NotFound",
+          "status": 404,
+          "category": "not_found",
+          "service": "sns",
+          "operation": "Publish",
+          "retryable": false,
+          "aws_message": "Topic does not exist",
+          "info.request_id": false
+        },
+        "assumed_topic_in_other_region_publish": {
+          "type": "ResourceNotFoundError",
+          "message": "sns:Publish failed (not_found) [NotFound]: Topic does not exist",
+          "kind": "not_found",
+          "code": "NotFound",
+          "status": 404,
+          "category": "not_found",
+          "service": "sns",
+          "operation": "Publish",
+          "retryable": false,
+          "aws_message": "Topic does not exist",
+          "info.request_id": false
+        }
+      }
+    },
+    "provision.invalid_queue_attributes": {
+      "status": "ok",
+      "doc": "Attribute values SQS refuses: out of range, contradicting FIFO settings, a bad redrive policy.",
+      "seconds": 0.0,
+      "error": null,
+      "facts": {
+        "visibility_over_12h": "ok",
+        "retention_under_minute": "ok",
+        "max_size_over_1mib": "ok",
+        "max_size_under_1kib": "ok",
+        "delay_over_15min": "ok",
+        "wait_over_20s": "ok",
+        "fifo_attribute_on_standard": "ok",
+        "per_group_limit_with_queue_scope": "ok",
+        "redrive_to_missing_queue": {
+          "type": "ProvisioningError",
+          "message": "provisioning queue <run>-bad-redrive failed: sqs:CreateQueue failed (invalid_request) [InvalidParameterValue]: Value {\"deadLetterTargetArn\": \"arn:aws:sqs:<region>:<account>:<run>-nope\", \"maxReceiveCount\": 3} for parameter RedrivePolicy is invalid. Reason: Dead letter target does not exist.",
+          "category": "fanferro",
+          "retryable": false,
+          "report": {
+            "status": "failed",
+            "actions": [],
+            "drift": [],
+            "error": {
+              "type": "AwsError",
+              "message": "sqs:CreateQueue failed (invalid_request) [InvalidParameterValue]: Value {\"deadLetterTargetArn\": \"arn:aws:sqs:<region>:<account>:<run>-nope\", \"maxReceiveCount\": 3} for parameter RedrivePolicy is invalid. Reason: Dead letter target does not exist.",
+              "kind": "invalid_request",
+              "code": "InvalidParameterValue",
+              "status": 400,
+              "category": "invalid_request",
+              "service": "sqs",
+              "operation": "CreateQueue",
+              "retryable": false,
+              "aws_message": "Value {\"deadLetterTargetArn\": \"arn:aws:sqs:<region>:<account>:<run>-nope\", \"maxReceiveCount\": 3} for parameter RedrivePolicy is invalid. Reason: Dead letter target does not exist.",
+              "info.request_id": false
+            },
+            "dead_letter": null
+          },
+          "info.request_id": false
+        },
+        "unknown_attribute": "ok"
+      }
+    },
+    "provision.kms": {
+      "status": "ok",
+      "doc": "SSE-KMS with the AWS managed keys: attributes, a round trip, and SNS delivering to such a queue.",
+      "seconds": 1.1,
+      "error": null,
+      "facts": {
+        "queue_attributes": {
+          "VisibilityTimeout": "30",
+          "MessageRetentionPeriod": "345600",
+          "DelaySeconds": "0",
+          "MaximumMessageSize": "1048576",
+          "ReceiveMessageWaitTimeSeconds": "0",
+          "SqsManagedSseEnabled": "true",
+          "KmsMasterKeyId": "alias/aws/sqs",
+          "KmsDataKeyReusePeriodSeconds": "300",
+          "FifoQueue": null,
+          "ContentBasedDeduplication": null,
+          "DeduplicationScope": null,
+          "FifoThroughputLimit": null,
+          "RedrivePolicy": null,
+          "RedriveAllowPolicy": null
+        },
+        "topic_attributes": {
+          "DisplayName": "",
+          "FifoTopic": null,
+          "ContentBasedDeduplication": null,
+          "FifoThroughputScope": null,
+          "KmsMasterKeyId": "alias/aws/sns",
+          "SignatureVersion": null,
+          "TracingConfig": null
+        },
+        "info.warm_up": {
+          "rounds": 1,
+          "seconds": "<1s",
+          "live": true
+        },
+        "kms_queue_received": [
+          "direct",
+          "via-topic"
+        ],
+        "canary_received_via_topic": true
+      }
+    },
+    "provision.missing_resources": {
+      "status": "ok",
+      "doc": "Resources that do not exist, with ``Provisioning.existing()``: what the errors say.",
+      "seconds": 0.0,
+      "error": null,
+      "facts": {
+        "queue": {
+          "type": "ProvisioningError",
+          "message": "queue <run>-missing-queue does not exist (enable Provisioning(create=True) to create it)",
+          "category": "fanferro",
+          "retryable": false,
+          "report": {
+            "status": "missing",
+            "actions": [],
+            "drift": [],
+            "error": null,
+            "dead_letter": null
+          },
+          "info.request_id": false
+        },
+        "queue_send": {
+          "type": "ResourceUnavailableError",
+          "message": "queue '<run>-missing-queue' is unavailable (retrying resolution shortly): queue <run>-missing-queue does not exist (enable Provisioning(create=True) to create it)",
+          "category": "fanferro",
+          "retryable": true,
+          "info.request_id": false
+        },
+        "topic": {
+          "type": "ProvisioningError",
+          "message": "topic <run>-missing-topic does not exist (enable Provisioning(create=True) to create it)",
+          "category": "fanferro",
+          "retryable": false,
+          "report": {
+            "status": "missing",
+            "actions": [],
+            "drift": [],
+            "error": null,
+            "dead_letter": null
+          },
+          "info.request_id": false
+        },
+        "topic_publish": {
+          "type": "ResourceUnavailableError",
+          "message": "topic '<run>-missing-topic' is unavailable (retrying resolution shortly): topic <run>-missing-topic does not exist (enable Provisioning(create=True) to create it)",
+          "category": "fanferro",
+          "retryable": true,
+          "info.request_id": false
+        },
+        "subscription": {
+          "type": "ProvisioningError",
+          "message": "subscription arn:aws:sns:<region>:<account>:<run>-present-topic -> arn:aws:sqs:<region>:<account>:<run>-present-queue does not exist (enable Provisioning(create=True) to create it)",
+          "category": "fanferro",
+          "retryable": false,
+          "report": {
+            "status": "missing",
+            "actions": [],
+            "drift": [],
+            "error": null,
+            "dead_letter": null
+          },
+          "info.request_id": false
+        },
+        "subscription_report": {
+          "status": "missing",
+          "actions": [],
+          "drift": [],
+          "error": null,
+          "dead_letter": null
+        },
+        "queue_ignored": {
+          "type": "ResourceUnavailableError",
+          "message": "queue '<run>-missing-queue2' is not available",
+          "category": "fanferro",
+          "retryable": true,
+          "info.request_id": false
+        }
+      }
+    },
+    "provision.payload_buckets": {
+      "status": "ok",
+      "doc": "Payload buckets: created on demand, found again, and missing ones.",
+      "seconds": 0.0,
+      "error": null,
+      "facts": {
+        "create": "ok",
+        "create_again": "ok",
+        "existing": "ok",
+        "missing_enter": "ok",
+        "missing_send": {
+          "type": "ResourceNotFoundError",
+          "message": "s3:PutObject failed (not_found) [NoSuchBucket]: The specified bucket does not exist",
+          "kind": "not_found",
+          "code": "NoSuchBucket",
+          "status": 404,
+          "category": "not_found",
+          "service": "s3",
+          "operation": "PutObject",
+          "retryable": false,
+          "aws_message": "The specified bucket does not exist",
+          "info.request_id": false
+        }
+      }
+    },
+    "provision.queue_attributes": {
+      "status": "ok",
+      "doc": "A queue with every typed attribute and tags; drift checks; an update.",
+      "seconds": 0.0,
+      "error": null,
+      "facts": {
+        "report": {
+          "status": "created",
+          "actions": [
+            "created queue"
+          ],
+          "drift": [],
+          "error": null,
+          "dead_letter": null
+        },
+        "attributes": {
+          "VisibilityTimeout": "45",
+          "MessageRetentionPeriod": "3600",
+          "DelaySeconds": "1",
+          "MaximumMessageSize": "4096",
+          "ReceiveMessageWaitTimeSeconds": "2",
+          "SqsManagedSseEnabled": "true",
+          "KmsMasterKeyId": null,
+          "KmsDataKeyReusePeriodSeconds": null,
+          "FifoQueue": null,
+          "ContentBasedDeduplication": null,
+          "DeduplicationScope": null,
+          "FifoThroughputLimit": null,
+          "RedrivePolicy": null,
+          "RedriveAllowPolicy": {
+            "redrivePermission": "allowAll"
+          }
+        },
+        "verify_same": "ok",
+        "verify_same_report": {
+          "status": "found",
+          "actions": [],
+          "drift": [],
+          "error": null,
+          "dead_letter": null
+        },
+        "verify_changed": {
+          "type": "ProvisioningError",
+          "message": "queue <run>-attrs differs from its spec (VisibilityTimeout, tag:team); enable Provisioning(update=True) to fix it",
+          "category": "fanferro",
+          "retryable": false,
+          "report": {
+            "status": "found",
+            "actions": [],
+            "drift": [
+              [
+                "VisibilityTimeout",
+                "60",
+                "45",
+                true
+              ],
+              [
+                "tag:team",
+                "other",
+                "probe",
+                true
+              ]
+            ],
+            "error": null,
+            "dead_letter": null
+          },
+          "info.request_id": false
+        },
+        "update": "ok",
+        "update_report": {
+          "status": "updated",
+          "actions": [
+            "updated attributes: VisibilityTimeout",
+            "updated tags"
+          ],
+          "drift": [],
+          "error": null,
+          "dead_letter": null
+        },
+        "updated_visibility": "60"
+      }
+    },
+    "provision.queue_defaults": {
+      "status": "ok",
+      "doc": "A queue created without attributes: its default attributes, and a second lookup.",
+      "seconds": 0.0,
+      "error": null,
+      "facts": {
+        "report": {
+          "status": "created",
+          "actions": [
+            "created queue"
+          ],
+          "drift": [],
+          "error": null,
+          "dead_letter": null
+        },
+        "attributes": {
+          "VisibilityTimeout": "30",
+          "MessageRetentionPeriod": "345600",
+          "DelaySeconds": "0",
+          "MaximumMessageSize": "1048576",
+          "ReceiveMessageWaitTimeSeconds": "0",
+          "SqsManagedSseEnabled": "true",
+          "KmsMasterKeyId": null,
+          "KmsDataKeyReusePeriodSeconds": null,
+          "FifoQueue": null,
+          "ContentBasedDeduplication": null,
+          "DeduplicationScope": null,
+          "FifoThroughputLimit": null,
+          "RedrivePolicy": null,
+          "RedriveAllowPolicy": null
+        },
+        "attribute_names": [
+          "ApproximateNumberOfMessages",
+          "ApproximateNumberOfMessagesDelayed",
+          "ApproximateNumberOfMessagesNotVisible",
+          "CreatedTimestamp",
+          "DelaySeconds",
+          "LastModifiedTimestamp",
+          "MaximumMessageSize",
+          "MessageRetentionPeriod",
+          "QueueArn",
+          "ReceiveMessageWaitTimeSeconds",
+          "SqsManagedSseEnabled",
+          "VisibilityTimeout"
+        ],
+        "arn": "arn:aws:sqs:<region>:<account>:<run>-defaults",
+        "info.url": "memory://<region>/<account>/<run>-defaults",
+        "lookup_again": "ok",
+        "lookup_again_report": {
+          "status": "found",
+          "actions": [],
+          "drift": [],
+          "error": null,
+          "dead_letter": null
+        },
+        "counts": {
+          "visible": 0,
+          "in_flight": 0,
+          "delayed": 0
+        }
+      }
+    },
+    "provision.queue_deleted_recently": {
+      "status": "ok",
+      "doc": "A queue created again right after it was deleted (SQS refuses that for 60 seconds).",
+      "seconds": 0.0,
+      "error": null,
+      "facts": {
+        "create_again": "ok"
+      }
+    },
+    "provision.subscriptions": {
+      "status": "ok",
+      "doc": "Raw and wrapped subscriptions with attribute and body filter policies, the queue policy fanferro writes, and drift checks.",
+      "seconds": 0.0,
+      "error": null,
+      "facts": {
+        "raw.report": {
+          "status": "created",
+          "actions": [
+            "allowed arn:aws:sns:<region>:<account>:<run>-subs to send to arn:aws:sqs:<region>:<account>:<run>-subs-raw",
+            "created subscription"
+          ],
+          "drift": [],
+          "error": null,
+          "dead_letter": null
+        },
+        "raw.attributes": {
+          "Protocol": "sqs",
+          "RawMessageDelivery": "true",
+          "FilterPolicyScope": null,
+          "PendingConfirmation": "false",
+          "ConfirmationWasAuthenticated": "true"
+        },
+        "raw.filter_policy": {
+          "color": [
+            "red",
+            {
+              "prefix": "bl"
+            }
+          ],
+          "price": [
+            {
+              "numeric": [
+                ">",
+                10
+              ]
+            }
+          ]
+        },
+        "raw.arn_prefix": "arn:aws:sns:<region>:<account>:<run>-subs",
+        "raw.attribute_names": [
+          "ConfirmationWasAuthenticated",
+          "Endpoint",
+          "FilterPolicy",
+          "Owner",
+          "PendingConfirmation",
+          "Protocol",
+          "RawMessageDelivery",
+          "SubscriptionArn",
+          "TopicArn"
+        ],
+        "body.report": {
+          "status": "created",
+          "actions": [
+            "allowed arn:aws:sns:<region>:<account>:<run>-subs to send to arn:aws:sqs:<region>:<account>:<run>-subs-body",
+            "created subscription"
+          ],
+          "drift": [],
+          "error": null,
+          "dead_letter": null
+        },
+        "body.attributes": {
+          "Protocol": "sqs",
+          "RawMessageDelivery": "false",
+          "FilterPolicyScope": "MessageBody",
+          "PendingConfirmation": "false",
+          "ConfirmationWasAuthenticated": "true"
+        },
+        "body.filter_policy": {
+          "order": {
+            "total": [
+              {
+                "numeric": [
+                  ">=",
+                  100
+                ]
+              }
+            ]
+          }
+        },
+        "body.arn_prefix": "arn:aws:sns:<region>:<account>:<run>-subs",
+        "body.attribute_names": [
+          "ConfirmationWasAuthenticated",
+          "Endpoint",
+          "FilterPolicy",
+          "FilterPolicyScope",
+          "Owner",
+          "PendingConfirmation",
+          "Protocol",
+          "RawMessageDelivery",
+          "SubscriptionArn",
+          "TopicArn"
+        ],
+        "queue_policy": [
+          "{\"Action\": \"sqs:SendMessage\", \"Condition\": {\"ArnEquals\": {\"aws:SourceArn\": \"arn:aws:sns:<region>:<account>:<run>-subs\"}}, \"Effect\": \"Allow\", \"Principal\": {\"Service\": \"sns.amazonaws.com\"}, \"Resource\": \"arn:aws:sqs:<region>:<account>:<run>-subs-raw\"}"
+        ],
+        "raw.verify_same": "ok",
+        "raw.verify_same_report": {
+          "status": "found",
+          "actions": [],
+          "drift": [],
+          "error": null,
+          "dead_letter": null
+        },
+        "body.verify_same": "ok",
+        "body.verify_same_report": {
+          "status": "found",
+          "actions": [],
+          "drift": [],
+          "error": null,
+          "dead_letter": null
+        },
+        "update_filter": "ok",
+        "update_filter_report": {
+          "status": "updated",
+          "actions": [
+            "updated attribute FilterPolicy"
+          ],
+          "drift": [],
+          "error": null,
+          "dead_letter": null
+        }
+      }
+    },
+    "provision.topics": {
+      "status": "ok",
+      "doc": "Standard and FIFO topics with attributes and tags; drift checks.",
+      "seconds": 0.0,
+      "error": null,
+      "facts": {
+        "report": {
+          "status": "created",
+          "actions": [
+            "created topic"
+          ],
+          "drift": [],
+          "error": null,
+          "dead_letter": null
+        },
+        "attributes": {
+          "DisplayName": "Probe",
+          "FifoTopic": null,
+          "ContentBasedDeduplication": null,
+          "FifoThroughputScope": null,
+          "KmsMasterKeyId": null,
+          "SignatureVersion": "2",
+          "TracingConfig": "Active"
+        },
+        "attribute_names": [
+          "DisplayName",
+          "Owner",
+          "SignatureVersion",
+          "SubscriptionsConfirmed",
+          "SubscriptionsDeleted",
+          "SubscriptionsPending",
+          "TopicArn",
+          "TracingConfig"
+        ],
+        "arn": "arn:aws:sns:<region>:<account>:<run>-topic",
+        "fifo": "ok",
+        "fifo_attributes": {
+          "DisplayName": "",
+          "FifoTopic": "true",
+          "ContentBasedDeduplication": "true",
+          "FifoThroughputScope": "MessageGroup",
+          "KmsMasterKeyId": null,
+          "SignatureVersion": null,
+          "TracingConfig": null
+        },
+        "fifo_attribute_names": [
+          "ContentBasedDeduplication",
+          "DisplayName",
+          "FifoThroughputScope",
+          "FifoTopic",
+          "Owner",
+          "SubscriptionsConfirmed",
+          "SubscriptionsDeleted",
+          "SubscriptionsPending",
+          "TopicArn"
+        ],
+        "verify_same": "ok",
+        "verify_same_report": {
+          "status": "found",
+          "actions": [],
+          "drift": [],
+          "error": null,
+          "dead_letter": null
+        },
+        "verify_same_fifo": "ok",
+        "verify_same_fifo_report": {
+          "status": "found",
+          "actions": [],
+          "drift": [],
+          "error": null,
+          "dead_letter": null
+        },
+        "update": "ok",
+        "update_report": {
+          "status": "updated",
+          "actions": [
+            "updated attribute DisplayName"
+          ],
+          "drift": [],
+          "error": null,
+          "dead_letter": null
+        },
+        "fifo_attribute_on_standard": "ok",
+        "invalid_signature_version": "ok"
+      }
+    },
+    "sns.batches": {
+      "status": "ok",
+      "doc": "Publishing 12 messages in batches to a topic, and a batch with an invalid entry.",
+      "seconds": 1.1,
+      "error": null,
+      "facts": {
+        "info.warm_up": {
+          "rounds": 1,
+          "seconds": "<1s",
+          "live": true
+        },
+        "result": {
+          "ok": true,
+          "successful": 12
+        },
+        "invalid_entry": {
+          "type": "BatchPublishError",
+          "message": "1 of 2 messages failed to publish (first error: validation failed: attribute name \"\" must be 1-256 characters)",
+          "category": "fanferro",
+          "retryable": false,
+          "failed": [
+            {
+              "index": 1,
+              "error": {
+                "type": "ValidationError",
+                "message": "validation failed: attribute name \"\" must be 1-256 characters",
+                "category": "validation",
+                "retryable": false,
+                "info.request_id": false
+              }
+            }
+          ],
+          "info.request_id": false
+        },
+        "received": [
+          "good",
+          "m0",
+          "m1",
+          "m10",
+          "m11",
+          "m2",
+          "m3",
+          "m4",
+          "m5",
+          "m6",
+          "m7",
+          "m8",
+          "m9"
+        ]
+      }
+    },
+    "sns.deleted_topic": {
+      "status": "ok",
+      "doc": "Publishing to a topic after it was deleted, and deleting it again.",
+      "seconds": 0.0,
+      "error": null,
+      "facts": {
+        "publish": {
+          "type": "ProvisioningError",
+          "message": "topic <run>-gone-topic does not exist (enable Provisioning(create=True) to create it)",
+          "category": "fanferro",
+          "retryable": false,
+          "report": {
+            "status": "missing",
+            "actions": [],
+            "drift": [],
+            "error": null,
+            "dead_letter": null
+          },
+          "info.request_id": false
+        },
+        "publish_batch": {
+          "type": "ResourceUnavailableError",
+          "message": "topic '<run>-gone-topic' is unavailable (retrying resolution shortly): topic <run>-gone-topic does not exist (enable Provisioning(create=True) to create it)",
+          "category": "fanferro",
+          "retryable": true,
+          "info.request_id": false
+        },
+        "get_attributes": {
+          "type": "ResourceUnavailableError",
+          "message": "topic '<run>-gone-topic' is unavailable (retrying resolution shortly): topic <run>-gone-topic does not exist (enable Provisioning(create=True) to create it)",
+          "category": "fanferro",
+          "retryable": true,
+          "info.request_id": false
+        },
+        "delete_again": {
+          "type": "ResourceUnavailableError",
+          "message": "topic '<run>-gone-topic' is unavailable (retrying resolution shortly): topic <run>-gone-topic does not exist (enable Provisioning(create=True) to create it)",
+          "category": "fanferro",
+          "retryable": true,
+          "info.request_id": false
+        }
+      }
+    },
+    "sns.fanout": {
+      "status": "ok",
+      "doc": "A topic delivering to a raw and a wrapped subscription: bodies, attributes, SNS metadata.",
+      "seconds": 1.1,
+      "error": null,
+      "facts": {
+        "publish_right_after_provisioning": "ok",
+        "info.early_delivered": {
+          "raw": [
+            "early"
+          ],
+          "wrapped": [
+            "early"
+          ]
+        },
+        "info.warm_up": {
+          "rounds": 0,
+          "seconds": "<1s",
+          "live": true
+        },
+        "publish": {
+          "has_transport_id": true,
+          "sequence_number": null
+        },
+        "raw.received": [
+          {
+            "body": {
+              "label": "main"
+            },
+            "type": "probe.fanout.v1",
+            "content_type": "application/json",
+            "envelope": "raw",
+            "attributes": {
+              "bin": [
+                "Binary",
+                {
+                  "bytes": "0102"
+                }
+              ],
+              "n": [
+                "Number",
+                "3"
+              ],
+              "region": [
+                "String",
+                "eu"
+              ]
+            },
+            "raw_attribute_names": [
+              "bin",
+              "fanferro.id",
+              "fanferro.type",
+              "n",
+              "region"
+            ],
+            "receive_count": 1,
+            "group_id": null,
+            "has_sequence_number": false,
+            "topic_arn": null,
+            "trace_header": null,
+            "sns": null,
+            "sns_has_timestamp": false,
+            "has_sent_at": true,
+            "info.sqs_message_id": "<uuid>"
+          }
+        ],
+        "raw.message_id_matches": [
+          true
+        ],
+        "wrapped.received": [
+          {
+            "body": {
+              "label": "main"
+            },
+            "type": "probe.fanout.v1",
+            "content_type": "application/json",
+            "envelope": "raw",
+            "attributes": {
+              "bin": [
+                "Binary",
+                {
+                  "bytes": "0102"
+                }
+              ],
+              "n": [
+                "Number",
+                "3"
+              ],
+              "region": [
+                "String",
+                "eu"
+              ]
+            },
+            "raw_attribute_names": [
+              "bin",
+              "fanferro.id",
+              "fanferro.type",
+              "n",
+              "region"
+            ],
+            "receive_count": 1,
+            "group_id": null,
+            "has_sequence_number": false,
+            "topic_arn": "arn:aws:sns:<region>:<account>:<run>-fanout",
+            "trace_header": null,
+            "sns": {
+              "message_id": "<uuid>",
+              "sequence_number": null,
+              "subject": "Probe subject",
+              "topic_arn": "arn:aws:sns:<region>:<account>:<run>-fanout"
+            },
+            "sns_has_timestamp": true,
+            "has_sent_at": true,
+            "info.sqs_message_id": "<uuid>"
+          }
+        ],
+        "wrapped.sns_message_id_matches": true,
+        "wrapped.message_id_matches": [
+          true
+        ]
+      }
+    },
+    "sns.fifo": {
+      "status": "ok",
+      "doc": "A FIFO topic delivering to a FIFO and a standard queue: order, deduplication, group ids.",
+      "seconds": 1.1,
+      "error": null,
+      "facts": {
+        "provisioning_errors": [],
+        "publish_sequence_numbers": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "duplicate_same_transport_id": true,
+        "missing_group_id": {
+          "type": "ValidationError",
+          "message": "publishing to FIFO topic '<run>-fifo-topic.fifo' requires group_id",
+          "category": "fanferro",
+          "retryable": false,
+          "info.request_id": false
+        },
+        "fifo.received_by_group": {
+          "a": [
+            "m0",
+            "m2",
+            "m4"
+          ],
+          "b": [
+            "m1",
+            "m3",
+            "m5"
+          ]
+        },
+        "fifo.received": [
+          "m0",
+          "m1",
+          "m2",
+          "m3",
+          "m4",
+          "m5"
+        ],
+        "fifo.has_sequence_number": [
+          true
+        ],
+        "standard.received_by_group": null,
+        "standard.received": [
+          "m0",
+          "m1",
+          "m2",
+          "m3",
+          "m4",
+          "m5"
+        ],
+        "standard.has_sequence_number": [
+          false
+        ]
+      }
+    },
+    "sns.filter_policies": {
+      "status": "ok",
+      "doc": "Which messages SNS delivers for each filter policy operator (attributes and body).",
+      "seconds": 1.1,
+      "error": null,
+      "facts": {
+        "provisioning_errors": [],
+        "info.warm_up": {
+          "rounds": 1,
+          "seconds": "<1s",
+          "live": true
+        },
+        "publish.red": "ok",
+        "publish.blue": "ok",
+        "publish.green_10": "ok",
+        "publish.RED_20": "ok",
+        "publish.no_color": "ok",
+        "publish.array": "ok",
+        "publish.price_as_string": "ok",
+        "publish.decimal_price": "ok",
+        "all": [
+          "RED_20",
+          "array",
+          "blue",
+          "decimal_price",
+          "green_10",
+          "no_color",
+          "price_as_string",
+          "red"
+        ],
+        "matched.exact": [
+          "array",
+          "red"
+        ],
+        "matched.prefix": [
+          "blue",
+          "decimal_price"
+        ],
+        "matched.suffix": [
+          "blue",
+          "decimal_price"
+        ],
+        "matched.ignore_case": [
+          "RED_20",
+          "array",
+          "red"
+        ],
+        "matched.anything_but": [
+          "RED_20",
+          "array",
+          "blue",
+          "decimal_price",
+          "price_as_string"
+        ],
+        "matched.anything_but_prefix": [
+          "RED_20",
+          "red"
+        ],
+        "matched.numeric_range": [
+          "RED_20",
+          "decimal_price",
+          "no_color",
+          "red"
+        ],
+        "matched.numeric_equals": [
+          "decimal_price",
+          "red"
+        ],
+        "matched.exact_number": [
+          "decimal_price",
+          "red"
+        ],
+        "matched.exists": [
+          "RED_20",
+          "array",
+          "blue",
+          "decimal_price",
+          "green_10",
+          "price_as_string",
+          "red"
+        ],
+        "matched.not_exists": [
+          "no_color"
+        ],
+        "matched.wildcard": [
+          "red"
+        ],
+        "matched.cidr": [
+          "red"
+        ],
+        "matched.or": [
+          "blue",
+          "decimal_price",
+          "green_10",
+          "no_color"
+        ],
+        "matched.two_keys": [
+          "red"
+        ],
+        "matched.body_numeric": [
+          "decimal_price",
+          "green_10",
+          "red"
+        ],
+        "matched.body_ignore_case": [
+          "RED_20",
+          "blue",
+          "red"
+        ],
+        "matched.body_array": [
+          "array",
+          "red"
+        ],
+        "matched.body_not_exists": [
+          "RED_20",
+          "array",
+          "decimal_price",
+          "green_10",
+          "no_color",
+          "price_as_string",
+          "red"
+        ]
+      }
+    },
+    "sns.invalid_filter_policies": {
+      "status": "ok",
+      "doc": "Filter policies SNS refuses: unknown operators, too many keys or combinations, bad values.",
+      "seconds": 0.0,
+      "error": null,
+      "facts": {
+        "unknown_operator": {
+          "type": "ProvisioningError",
+          "message": "provisioning subscription arn:aws:sns:<region>:<account>:<run>-bad-filters -> arn:aws:sqs:<region>:<account>:<run>-bad-filters failed: sns:Subscribe failed (invalid_request) [InvalidParameter]: Invalid parameter: FilterPolicy: \"color\": unrecognized match type glob",
+          "category": "fanferro",
+          "retryable": false,
+          "report": {
+            "status": "failed",
+            "actions": [
+              "allowed arn:aws:sns:<region>:<account>:<run>-bad-filters to send to arn:aws:sqs:<region>:<account>:<run>-bad-filters"
+            ],
+            "drift": [],
+            "error": {
+              "type": "AwsError",
+              "message": "sns:Subscribe failed (invalid_request) [InvalidParameter]: Invalid parameter: FilterPolicy: \"color\": unrecognized match type glob",
+              "kind": "invalid_request",
+              "code": "InvalidParameter",
+              "status": 400,
+              "category": "invalid_request",
+              "service": "sns",
+              "operation": "Subscribe",
+              "retryable": false,
+              "aws_message": "Invalid parameter: FilterPolicy: \"color\": unrecognized match type glob",
+              "info.request_id": false
+            },
+            "dead_letter": null
+          },
+          "info.request_id": false
+        },
+        "six_keys": {
+          "type": "ProvisioningError",
+          "message": "provisioning subscription arn:aws:sns:<region>:<account>:<run>-bad-filters -> arn:aws:sqs:<region>:<account>:<run>-bad-filters failed: sns:Subscribe failed (invalid_request) [InvalidParameter]: Invalid parameter: FilterPolicy: Filter policy can not have more than 5 keys",
+          "category": "fanferro",
+          "retryable": false,
+          "report": {
+            "status": "failed",
+            "actions": [],
+            "drift": [],
+            "error": {
+              "type": "AwsError",
+              "message": "sns:Subscribe failed (invalid_request) [InvalidParameter]: Invalid parameter: FilterPolicy: Filter policy can not have more than 5 keys",
+              "kind": "invalid_request",
+              "code": "InvalidParameter",
+              "status": 400,
+              "category": "invalid_request",
+              "service": "sns",
+              "operation": "Subscribe",
+              "retryable": false,
+              "aws_message": "Invalid parameter: FilterPolicy: Filter policy can not have more than 5 keys",
+              "info.request_id": false
+            },
+            "dead_letter": null
+          },
+          "info.request_id": false
+        },
+        "151_combinations": {
+          "type": "ProvisioningError",
+          "message": "provisioning subscription arn:aws:sns:<region>:<account>:<run>-bad-filters -> arn:aws:sqs:<region>:<account>:<run>-bad-filters failed: sns:Subscribe failed (invalid_request) [InvalidParameter]: Invalid parameter: FilterPolicy: Filter policy is too complex: 151 combinations (at most 150)",
+          "category": "fanferro",
+          "retryable": false,
+          "report": {
+            "status": "failed",
+            "actions": [],
+            "drift": [],
+            "error": {
+              "type": "AwsError",
+              "message": "sns:Subscribe failed (invalid_request) [InvalidParameter]: Invalid parameter: FilterPolicy: Filter policy is too complex: 151 combinations (at most 150)",
+              "kind": "invalid_request",
+              "code": "InvalidParameter",
+              "status": 400,
+              "category": "invalid_request",
+              "service": "sns",
+              "operation": "Subscribe",
+              "retryable": false,
+              "aws_message": "Invalid parameter: FilterPolicy: Filter policy is too complex: 151 combinations (at most 150)",
+              "info.request_id": false
+            },
+            "dead_letter": null
+          },
+          "info.request_id": false
+        },
+        "numeric_not_a_number": {
+          "type": "ProvisioningError",
+          "message": "provisioning subscription arn:aws:sns:<region>:<account>:<run>-bad-filters -> arn:aws:sqs:<region>:<account>:<run>-bad-filters failed: sns:Subscribe failed (invalid_request) [InvalidParameter]: Invalid parameter: FilterPolicy: \"price\": expected a number, got \"ten\"",
+          "category": "fanferro",
+          "retryable": false,
+          "report": {
+            "status": "failed",
+            "actions": [],
+            "drift": [],
+            "error": {
+              "type": "AwsError",
+              "message": "sns:Subscribe failed (invalid_request) [InvalidParameter]: Invalid parameter: FilterPolicy: \"price\": expected a number, got \"ten\"",
+              "kind": "invalid_request",
+              "code": "InvalidParameter",
+              "status": 400,
+              "category": "invalid_request",
+              "service": "sns",
+              "operation": "Subscribe",
+              "retryable": false,
+              "aws_message": "Invalid parameter: FilterPolicy: \"price\": expected a number, got \"ten\"",
+              "info.request_id": false
+            },
+            "dead_letter": null
+          },
+          "info.request_id": false
+        },
+        "nested_in_attribute_scope": {
+          "type": "ProvisioningError",
+          "message": "provisioning subscription arn:aws:sns:<region>:<account>:<run>-bad-filters -> arn:aws:sqs:<region>:<account>:<run>-bad-filters failed: sns:Subscribe failed (invalid_request) [InvalidParameter]: Invalid parameter: FilterPolicy: \"order\": nested filter policies need the FilterPolicyScope MessageBody (attributes are not nested)",
+          "category": "fanferro",
+          "retryable": false,
+          "report": {
+            "status": "failed",
+            "actions": [],
+            "drift": [],
+            "error": {
+              "type": "AwsError",
+              "message": "sns:Subscribe failed (invalid_request) [InvalidParameter]: Invalid parameter: FilterPolicy: \"order\": nested filter policies need the FilterPolicyScope MessageBody (attributes are not nested)",
+              "kind": "invalid_request",
+              "code": "InvalidParameter",
+              "status": 400,
+              "category": "invalid_request",
+              "service": "sns",
+              "operation": "Subscribe",
+              "retryable": false,
+              "aws_message": "Invalid parameter: FilterPolicy: \"order\": nested filter policies need the FilterPolicyScope MessageBody (attributes are not nested)",
+              "info.request_id": false
+            },
+            "dead_letter": null
+          },
+          "info.request_id": false
+        },
+        "empty_values": {
+          "type": "ProvisioningError",
+          "message": "provisioning subscription arn:aws:sns:<region>:<account>:<run>-bad-filters -> arn:aws:sqs:<region>:<account>:<run>-bad-filters failed: sns:Subscribe failed (invalid_request) [InvalidParameter]: Invalid parameter: FilterPolicy: \"color\": empty arrays are not allowed",
+          "category": "fanferro",
+          "retryable": false,
+          "report": {
+            "status": "failed",
+            "actions": [],
+            "drift": [],
+            "error": {
+              "type": "AwsError",
+              "message": "sns:Subscribe failed (invalid_request) [InvalidParameter]: Invalid parameter: FilterPolicy: \"color\": empty arrays are not allowed",
+              "kind": "invalid_request",
+              "code": "InvalidParameter",
+              "status": 400,
+              "category": "invalid_request",
+              "service": "sns",
+              "operation": "Subscribe",
+              "retryable": false,
+              "aws_message": "Invalid parameter: FilterPolicy: \"color\": empty arrays are not allowed",
+              "info.request_id": false
+            },
+            "dead_letter": null
+          },
+          "info.request_id": false
+        },
+        "exists_not_boolean": {
+          "type": "ProvisioningError",
+          "message": "provisioning subscription arn:aws:sns:<region>:<account>:<run>-bad-filters -> arn:aws:sqs:<region>:<account>:<run>-bad-filters failed: sns:Subscribe failed (invalid_request) [InvalidParameter]: Invalid parameter: FilterPolicy: \"color\": exists takes true or false",
+          "category": "fanferro",
+          "retryable": false,
+          "report": {
+            "status": "failed",
+            "actions": [],
+            "drift": [],
+            "error": {
+              "type": "AwsError",
+              "message": "sns:Subscribe failed (invalid_request) [InvalidParameter]: Invalid parameter: FilterPolicy: \"color\": exists takes true or false",
+              "kind": "invalid_request",
+              "code": "InvalidParameter",
+              "status": 400,
+              "category": "invalid_request",
+              "service": "sns",
+              "operation": "Subscribe",
+              "retryable": false,
+              "aws_message": "Invalid parameter: FilterPolicy: \"color\": exists takes true or false",
+              "info.request_id": false
+            },
+            "dead_letter": null
+          },
+          "info.request_id": false
+        },
+        "body_scope_flat": "ok"
+      }
+    },
+    "sns.size_limits": {
+      "status": "ok",
+      "doc": "Messages exactly at and one byte over the 256 KiB topic limit, delivered raw and wrapped.",
+      "seconds": 1.1,
+      "error": null,
+      "facts": {
+        "info.topic_limit_attribute": null,
+        "info.warm_up": {
+          "rounds": 1,
+          "seconds": "<1s",
+          "live": true
+        },
+        "at_limit": "ok",
+        "at_limit_size": 262144,
+        "over_limit": {
+          "type": "MessageTooLargeError",
+          "message": "message too large: 262145 bytes exceeds the limit of 262144 bytes; enable large payload offloading (claim check) to send bigger messages",
+          "category": "message_too_large",
+          "retryable": false,
+          "size": 262145,
+          "limit": 262144,
+          "info.request_id": false
+        },
+        "raw_received": [
+          "at"
+        ],
+        "wrapped_received": [
+          "at"
+        ]
+      }
+    },
+    "sns.trace_header": {
+      "status": "ok",
+      "doc": "X-Ray trace headers: sent to a queue, published to a topic with and without active tracing.",
+      "seconds": 3.2,
+      "error": null,
+      "facts": {
+        "direct": [
+          "Root=1-5759e988-bd862e3fe1be46a994272793;Parent=53995c3f42cd8ad8;Sampled=1"
+        ],
+        "info.warm_up": {
+          "rounds": 1,
+          "seconds": "<1s",
+          "live": true
+        },
+        "passthrough.received": {
+          "traced": true,
+          "traced-batch": true
+        },
+        "info.passthrough.headers": {
+          "traced": "Root=1-5759e988-bd862e3fe1be46a994272793;Parent=53995c3f42cd8ad8;Sampled=1",
+          "traced-batch": "Root=1-5759e988-bd862e3fe1be46a994272793;Parent=53995c3f42cd8ad8;Sampled=1"
+        },
+        "active.received": {
+          "traced": true,
+          "traced-batch": true
+        },
+        "info.active.headers": {
+          "traced": "Root=1-5759e988-bd862e3fe1be46a994272793;Parent=53995c3f42cd8ad8;Sampled=1",
+          "traced-batch": "Root=1-5759e988-bd862e3fe1be46a994272793;Parent=53995c3f42cd8ad8;Sampled=1"
+        }
+      }
+    },
+    "sqs.batches": {
+      "status": "ok",
+      "doc": "Batches of 25 messages (three calls) and a batch with an invalid entry.",
+      "seconds": 2.0,
+      "error": null,
+      "facts": {
+        "result": {
+          "ok": true,
+          "successful": 25,
+          "failed": 0
+        },
+        "received": [
+          "m0",
+          "m1",
+          "m10",
+          "m11",
+          "m12",
+          "m13",
+          "m14",
+          "m15",
+          "m16",
+          "m17",
+          "m18",
+          "m19",
+          "m2",
+          "m20",
+          "m21",
+          "m22",
+          "m23",
+          "m24",
+          "m3",
+          "m4",
+          "m5",
+          "m6",
+          "m7",
+          "m8",
+          "m9"
+        ],
+        "attributes": [
+          "{\"batch\": [\"String\", \"yes\"], \"n\": [\"Number\", \"1\"]}"
+        ],
+        "invalid_entry": {
+          "type": "BatchPublishError",
+          "message": "1 of 2 messages failed to publish (first error: validation failed: attribute name \"bad name\" may only contain letters, digits, '_', '-' and '.')",
+          "category": "fanferro",
+          "retryable": false,
+          "failed": [
+            {
+              "index": 1,
+              "error": {
+                "type": "ValidationError",
+                "message": "validation failed: attribute name \"bad name\" may only contain letters, digits, '_', '-' and '.'",
+                "category": "validation",
+                "retryable": false,
+                "info.request_id": false
+              }
+            }
+          ],
+          "info.request_id": false
+        },
+        "fifo_result": {
+          "ok": true,
+          "with_sequence": 12
+        },
+        "fifo_received": [
+          "f0",
+          "f1",
+          "f2",
+          "f3",
+          "f4",
+          "f5",
+          "f6",
+          "f7",
+          "f8",
+          "f9",
+          "f10",
+          "f11"
+        ]
+      }
+    },
+    "sqs.bodies": {
+      "status": "ok",
+      "doc": "Bodies of every kind: text, binary, characters SQS refuses, an empty string, JSON scalars.",
+      "seconds": 1.0,
+      "error": null,
+      "facts": {
+        "send.text": "ok",
+        "send.emoji": "ok",
+        "send.nul": "ok",
+        "send.noncharacter": "ok",
+        "send.empty": {
+          "type": "AwsError",
+          "message": "sqs:SendMessage failed (invalid_request) [MissingParameter]: The request must contain the parameter MessageBody.",
+          "kind": "invalid_request",
+          "code": "MissingParameter",
+          "status": 400,
+          "category": "invalid_request",
+          "service": "sqs",
+          "operation": "SendMessage",
+          "retryable": false,
+          "aws_message": "The request must contain the parameter MessageBody.",
+          "info.request_id": false
+        },
+        "send.binary": "ok",
+        "send.empty_bytes": {
+          "type": "AwsError",
+          "message": "sqs:SendMessage failed (invalid_request) [MissingParameter]: The request must contain the parameter MessageBody.",
+          "kind": "invalid_request",
+          "code": "MissingParameter",
+          "status": 400,
+          "category": "invalid_request",
+          "service": "sqs",
+          "operation": "SendMessage",
+          "retryable": false,
+          "aws_message": "The request must contain the parameter MessageBody.",
+          "info.request_id": false
+        },
+        "send.json_null": "ok",
+        "send.json_number": "ok",
+        "received": {
+          "binary": {
+            "data": "0001feff",
+            "content_type": "application/octet-stream",
+            "encoding": null
+          },
+          "emoji": {
+            "data": "<hex>",
+            "content_type": "text/plain; charset=utf-8",
+            "encoding": null
+          },
+          "json_null": {
+            "data": "6e756c6c",
+            "content_type": "application/json",
+            "encoding": null
+          },
+          "json_number": {
+            "data": "3432",
+            "content_type": "application/json",
+            "encoding": null
+          },
+          "noncharacter": {
+            "data": "62616420efbfbe2063686172",
+            "content_type": "text/plain; charset=utf-8",
+            "encoding": null
+          },
+          "nul": {
+            "data": "6e756c20002063686172",
+            "content_type": "text/plain; charset=utf-8",
+            "encoding": null
+          },
+          "text": {
+            "data": "706c61696e2074657874",
+            "content_type": "text/plain; charset=utf-8",
+            "encoding": null
+          }
+        }
+      }
+    },
+    "sqs.consumer_stop": {
+      "status": "ok",
+      "doc": "Stopping a consumer during a 20 second long poll, then sending: when does the message arrive?",
+      "seconds": 3.0,
+      "error": null,
+      "facts": {
+        "stop_took": "<1s",
+        "received": [
+          "after-stop"
+        ],
+        "receive_counts": [
+          1
+        ],
+        "info.arrived_after": "<1s",
+        "arrived_within_visibility_timeout": true
+      }
+    },
+    "sqs.delay": {
+      "status": "ok",
+      "doc": "A per-message delay and a queue delay: when the messages become visible.",
+      "seconds": 4.0,
+      "error": null,
+      "facts": {
+        "info.delayed_count_seen": true,
+        "per_message_delay": "<5s",
+        "per_message_delay_at_least_2_5s": true,
+        "queue_delay_at_least_2_5s": true,
+        "fifo_per_message_delay": {
+          "type": "ValidationError",
+          "message": "validation failed: per-message delay is not supported by FIFO queues",
+          "category": "validation",
+          "retryable": false,
+          "info.request_id": false
+        },
+        "delay_over_15min": {
+          "type": "ValidationError",
+          "message": "validation failed: delay must be at most 15 minutes",
+          "category": "validation",
+          "retryable": false,
+          "info.request_id": false
+        }
+      }
+    },
+    "sqs.deleted_queue": {
+      "status": "ok",
+      "doc": "Using a queue after it was deleted: sends, counts, consumers, with and without provisioning.",
+      "seconds": 0.0,
+      "error": null,
+      "facts": {
+        "send": {
+          "type": "ProvisioningError",
+          "message": "queue <run>-deleted does not exist (enable Provisioning(create=True) to create it)",
+          "category": "fanferro",
+          "retryable": false,
+          "report": {
+            "status": "missing",
+            "actions": [],
+            "drift": [],
+            "error": null,
+            "dead_letter": null
+          },
+          "info.request_id": false
+        },
+        "send_batch": {
+          "type": "ResourceUnavailableError",
+          "message": "queue '<run>-deleted' is unavailable (retrying resolution shortly): queue <run>-deleted does not exist (enable Provisioning(create=True) to create it)",
+          "category": "fanferro",
+          "retryable": true,
+          "info.request_id": false
+        },
+        "approximate_count": {
+          "type": "ResourceUnavailableError",
+          "message": "queue '<run>-deleted' is unavailable (retrying resolution shortly): queue <run>-deleted does not exist (enable Provisioning(create=True) to create it)",
+          "category": "fanferro",
+          "retryable": true,
+          "info.request_id": false
+        },
+        "purge": {
+          "type": "ResourceUnavailableError",
+          "message": "queue '<run>-deleted' is unavailable (retrying resolution shortly): queue <run>-deleted does not exist (enable Provisioning(create=True) to create it)",
+          "category": "fanferro",
+          "retryable": true,
+          "info.request_id": false
+        },
+        "delete_again": {
+          "type": "ResourceUnavailableError",
+          "message": "queue '<run>-deleted' is unavailable (retrying resolution shortly): queue <run>-deleted does not exist (enable Provisioning(create=True) to create it)",
+          "category": "fanferro",
+          "retryable": true,
+          "info.request_id": false
+        },
+        "consumer_start": {
+          "type": "ResourceUnavailableError",
+          "message": "queue '<run>-deleted' is unavailable (retrying resolution shortly): queue <run>-deleted does not exist (enable Provisioning(create=True) to create it)",
+          "category": "fanferro",
+          "retryable": true,
+          "info.request_id": false
+        },
+        "send_with_ensure": "ok"
+      }
+    },
+    "sqs.fifo": {
+      "status": "ok",
+      "doc": "FIFO order per group, deduplication of a resent message, and group blocking across consumers.",
+      "seconds": 6.1,
+      "error": null,
+      "facts": {
+        "sequence_numbers_increase": true,
+        "duplicate_same_transport_id": true,
+        "duplicate_same_sequence_number": true,
+        "received_by_group": {
+          "a": [
+            "m0",
+            "m2",
+            "m4"
+          ],
+          "b": [
+            "m1",
+            "m3",
+            "m5"
+          ]
+        },
+        "received_attributes": [
+          "[\"fanferro.id\"]"
+        ],
+        "missing_group_id": {
+          "type": "ValidationError",
+          "message": "publishing to FIFO queue '<run>-order.fifo' requires group_id",
+          "category": "fanferro",
+          "retryable": false,
+          "info.request_id": false
+        },
+        "long_group_id": "ok",
+        "invalid_group_id": "ok",
+        "long_deduplication_id": "ok",
+        "blocked_while_in_flight": [],
+        "after_ack": [
+          "b1"
+        ],
+        "held": [
+          "b0"
+        ]
+      }
+    },
+    "sqs.fifo_deduplication": {
+      "status": "ok",
+      "doc": "Deduplication scopes (queue and message group) and content-based deduplication.",
+      "seconds": 3.0,
+      "error": null,
+      "facts": {
+        "queue.received": [
+          "a"
+        ],
+        "messageGroup.received": [
+          "a",
+          "b"
+        ],
+        "content_based.received": [
+          "content-0"
+        ]
+      }
+    },
+    "sqs.handler_actions": {
+      "status": "ok",
+      "doc": "Reject (dead-letter copy with metadata), Discard, Requeue (a new copy) and Retry.",
+      "seconds": 1.6,
+      "error": null,
+      "facts": {
+        "attempts": {
+          "discard": [
+            [
+              1,
+              1
+            ]
+          ],
+          "reject": [
+            [
+              1,
+              1
+            ]
+          ],
+          "requeue": [
+            [
+              1,
+              1
+            ],
+            [
+              2,
+              1
+            ]
+          ],
+          "retry": [
+            [
+              1,
+              1
+            ],
+            [
+              2,
+              2
+            ]
+          ]
+        },
+        "dead_lettered": [
+          {
+            "label": "reject",
+            "info": {
+              "attempt": "1",
+              "error_message": "invalid order",
+              "error_type": "fanferro.actions.Reject",
+              "message_id": "<uuid>",
+              "queue": "<run>-actions",
+              "reason": "invalid order",
+              "receive_count": 1,
+              "source": "arn:aws:sqs:<region>:<account>:<run>-actions",
+              "sqs_message_id": "<uuid>"
+            },
+            "attributes": {
+              "tenant": [
+                "String",
+                "acme"
+              ]
+            }
+          }
+        ],
+        "counts": {
+          "visible": 0,
+          "in_flight": 0,
+          "delayed": 0
+        }
+      }
+    },
+    "sqs.late_settlement": {
+      "status": "ok",
+      "doc": "Settling with the receipt handle of an earlier receive (the message became visible again and was received a second time), on a standard and a FIFO queue.",
+      "seconds": 8.0,
+      "error": null,
+      "facts": {
+        "standard.receive_counts": [
+          1,
+          2
+        ],
+        "standard.extend_old_handle": {
+          "type": "AwsError",
+          "message": "sqs:ChangeMessageVisibilityBatch failed (receipt_handle_invalid) [ReceiptHandleIsInvalid]: The input receipt handle is invalid.",
+          "kind": "receipt_handle_invalid",
+          "code": "ReceiptHandleIsInvalid",
+          "category": "receipt_handle_invalid",
+          "service": "sqs",
+          "operation": "ChangeMessageVisibilityBatch",
+          "retryable": false,
+          "aws_message": "The input receipt handle is invalid.",
+          "info.request_id": false
+        },
+        "standard.ack_old_handle": {
+          "type": "AwsError",
+          "message": "sqs:DeleteMessageBatch failed (receipt_handle_invalid) [InvalidParameterValue]: The receipt handle has expired.",
+          "kind": "receipt_handle_invalid",
+          "code": "InvalidParameterValue",
+          "category": "receipt_handle_invalid",
+          "service": "sqs",
+          "operation": "DeleteMessageBatch",
+          "retryable": false,
+          "aws_message": "The receipt handle has expired.",
+          "info.request_id": false
+        },
+        "standard.counts_after_old_ack": {
+          "visible": 0,
+          "in_flight": 1,
+          "delayed": 0
+        },
+        "standard.ack_current_handle": "ok",
+        "standard.counts_after": {
+          "visible": 0,
+          "in_flight": 0,
+          "delayed": 0
+        },
+        "standard.receives": 2,
+        "fifo.receive_counts": [
+          1,
+          2
+        ],
+        "fifo.extend_old_handle": {
+          "type": "AwsError",
+          "message": "sqs:ChangeMessageVisibilityBatch failed (receipt_handle_invalid) [ReceiptHandleIsInvalid]: The input receipt handle is invalid.",
+          "kind": "receipt_handle_invalid",
+          "code": "ReceiptHandleIsInvalid",
+          "category": "receipt_handle_invalid",
+          "service": "sqs",
+          "operation": "ChangeMessageVisibilityBatch",
+          "retryable": false,
+          "aws_message": "The input receipt handle is invalid.",
+          "info.request_id": false
+        },
+        "fifo.ack_old_handle": {
+          "type": "AwsError",
+          "message": "sqs:DeleteMessageBatch failed (receipt_handle_invalid) [InvalidParameterValue]: The receipt handle has expired.",
+          "kind": "receipt_handle_invalid",
+          "code": "InvalidParameterValue",
+          "category": "receipt_handle_invalid",
+          "service": "sqs",
+          "operation": "DeleteMessageBatch",
+          "retryable": false,
+          "aws_message": "The receipt handle has expired.",
+          "info.request_id": false
+        },
+        "fifo.counts_after_old_ack": {
+          "visible": 0,
+          "in_flight": 1,
+          "delayed": 0
+        },
+        "fifo.ack_current_handle": "ok",
+        "fifo.counts_after": {
+          "visible": 0,
+          "in_flight": 0,
+          "delayed": 0
+        },
+        "fifo.receives": 2
+      }
+    },
+    "sqs.native_redrive": {
+      "status": "ok",
+      "doc": "SQS moving a message to the dead-letter queue after ``maxReceiveCount`` receives.",
+      "seconds": 4.1,
+      "error": null,
+      "facts": {
+        "source_receive_counts": [
+          1,
+          2
+        ],
+        "dead_lettered": [
+          {
+            "label": "poison",
+            "receive_count": 3,
+            "same_message_id": true,
+            "same_sqs_message_id": true,
+            "source_arn": "arn:aws:sqs:<region>:<account>:<run>-redrive",
+            "attributes": {
+              "tenant": [
+                "String",
+                "acme"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "sqs.purge": {
+      "status": "ok",
+      "doc": "Purging a queue, and purging it again right away (SQS allows one purge per minute).",
+      "seconds": 0.0,
+      "error": null,
+      "facts": {
+        "purge": "ok",
+        "purge_again": "ok",
+        "emptied_within_10s": true
+      }
+    },
+    "sqs.retries": {
+      "status": "ok",
+      "doc": "A failed attempt retried by visibility after two seconds: receive count, attempt, timing.",
+      "seconds": 2.6,
+      "error": null,
+      "facts": {
+        "attempts": [
+          [
+            1,
+            1
+          ],
+          [
+            2,
+            2
+          ]
+        ],
+        "retry_waited_at_least_1_5s": true,
+        "counts": {
+          "visible": 0,
+          "in_flight": 0,
+          "delayed": 0
+        }
+      }
+    },
+    "sqs.roundtrip": {
+      "status": "ok",
+      "doc": "A message with attributes of every type, sent and received with MD5 verification.",
+      "seconds": 2.0,
+      "error": null,
+      "facts": {
+        "send": {
+          "has_transport_id": true,
+          "sequence_number": null
+        },
+        "info.send_size": 286,
+        "received": [
+          {
+            "body": {
+              "label": "roundtrip",
+              "nested": {
+                "a": [
+                  1,
+                  2.5,
+                  null,
+                  true
+                ]
+              }
+            },
+            "type": null,
+            "content_type": "application/json",
+            "envelope": "raw",
+            "attributes": {
+              "big": [
+                "Number",
+                "12345678901234567890"
+              ],
+              "bytes": [
+                "Binary",
+                {
+                  "bytes": "00ff10"
+                }
+              ],
+              "custom": [
+                "String.custom",
+                "x"
+              ],
+              "decimal": [
+                "Number",
+                "1.50"
+              ],
+              "float": [
+                "Number",
+                "2.5"
+              ],
+              "int": [
+                "Number",
+                "42"
+              ],
+              "number_custom": [
+                "Number.int",
+                "7"
+              ],
+              "text": [
+                "String",
+                "hello"
+              ],
+              "unicode": [
+                "String",
+                "räksmörgås ✓ 🎉"
+              ]
+            },
+            "raw_attribute_names": [
+              "big",
+              "bytes",
+              "custom",
+              "decimal",
+              "fanferro.id",
+              "float",
+              "int",
+              "number_custom",
+              "text",
+              "unicode"
+            ],
+            "receive_count": 1,
+            "group_id": null,
+            "has_sequence_number": false,
+            "topic_arn": null,
+            "trace_header": null,
+            "sns": null,
+            "sns_has_timestamp": false,
+            "has_sent_at": true,
+            "info.sqs_message_id": "<uuid>"
+          }
+        ],
+        "transport_id_matches": [
+          true
+        ],
+        "cloudevents": [
+          {
+            "body": {
+              "label": "ce"
+            },
+            "type": "message",
+            "content_type": "application/json",
+            "envelope": "cloudevents",
+            "attributes": {
+              "content-type": [
+                "String",
+                "application/cloudevents+json"
+              ],
+              "tenant": [
+                "String",
+                "acme"
+              ]
+            },
+            "raw_attribute_names": [
+              "content-type",
+              "fanferro.type",
+              "tenant"
+            ],
+            "receive_count": 1,
+            "group_id": null,
+            "has_sequence_number": false,
+            "topic_arn": null,
+            "trace_header": null,
+            "sns": null,
+            "sns_has_timestamp": false,
+            "has_sent_at": true,
+            "info.sqs_message_id": "<uuid>",
+            "source": "urn:probe",
+            "subject": "order/1",
+            "headers": {
+              "version": 2
+            }
+          }
+        ]
+      }
+    },
+    "sqs.size_limits": {
+      "status": "ok",
+      "doc": "Messages exactly at and one byte over the queue limits (a 1 KiB queue and the default).",
+      "seconds": 2.0,
+      "error": null,
+      "facts": {
+        "default_limit": 1048576,
+        "1k.at_limit": "ok",
+        "1k.at_limit_size": 1024,
+        "1k.over_limit": {
+          "type": "MessageTooLargeError",
+          "message": "message too large: 1025 bytes exceeds the limit of 1024 bytes; enable large payload offloading (claim check) to send bigger messages",
+          "category": "message_too_large",
+          "retryable": false,
+          "size": 1025,
+          "limit": 1024,
+          "info.request_id": false
+        },
+        "1k.received": [
+          [
+            "1k-at",
+            1000
+          ]
+        ],
+        "default.at_limit": "ok",
+        "default.at_limit_size": 1048576,
+        "default.over_limit": {
+          "type": "MessageTooLargeError",
+          "message": "message too large: 1048577 bytes exceeds the limit of 1048576 bytes; enable large payload offloading (claim check) to send bigger messages",
+          "category": "message_too_large",
+          "retryable": false,
+          "size": 1048577,
+          "limit": 1048576,
+          "info.request_id": false
+        },
+        "default.received": [
+          [
+            "default-at",
+            1048547
+          ]
+        ],
+        "attributes_count_towards_limit": {
+          "type": "MessageTooLargeError",
+          "message": "message too large: 1275 bytes exceeds the limit of 1024 bytes; enable large payload offloading (claim check) to send bigger messages",
+          "category": "message_too_large",
+          "retryable": false,
+          "size": 1275,
+          "limit": 1024,
+          "info.request_id": false
+        }
+      }
+    },
+    "sqs.visibility_limits": {
+      "status": "ok",
+      "doc": "Extending a message's visibility up to and past the 12 hour limit.",
+      "seconds": 0.0,
+      "error": null,
+      "facts": {
+        "extend_43100": "ok",
+        "extend_43200": "ok",
+        "extend_43201": "ok",
+        "release": "ok"
+      }
+    }
+  }
+}
