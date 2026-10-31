@@ -210,6 +210,37 @@ async fn long_poll_wakes_on_send_and_delays_apply() {
     assert!(started.elapsed() >= Duration::from_secs(3));
 }
 
+#[tokio::test(start_paused = true)]
+async fn long_poll_wakes_when_a_visibility_change_makes_a_message_visible_sooner() {
+    // Only a timeout of zero woke waiting long polls: a retry after 2 s reached a 20 s long poll
+    // when the poll ended, about 18 s late, while SQS returns the message once it is visible.
+    let (_, backend) = broker();
+    let url = backend.sqs.create_queue("q", &StringMap::new(), &StringMap::new()).await.unwrap();
+    backend.sqs.send_message(&url, send("retried")).await.unwrap();
+    let message = backend.sqs.receive_messages(receive(&url, 1, Some(30))).await.unwrap().remove(0);
+    let sqs = backend.sqs.clone();
+    let poll_url = url.clone();
+    let waiter = tokio::spawn(async move {
+        sqs.receive_messages(ReceiveRequest { wait_time: Duration::from_secs(20), ..receive(&poll_url, 10, None) })
+            .await
+    });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let started = Instant::now();
+    let results = backend
+        .sqs
+        .change_visibility_batch(
+            &url,
+            vec![VisibilityChange { receipt_handle: message.receipt_handle, timeout: Duration::from_secs(2) }],
+        )
+        .await
+        .unwrap();
+    assert!(results[0].is_ok());
+    let messages = waiter.await.unwrap().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].body, "retried");
+    assert_eq!(started.elapsed(), Duration::from_secs(2));
+}
+
 #[tokio::test]
 async fn validation_errors() {
     let (_, backend) = broker();

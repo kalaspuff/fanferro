@@ -84,6 +84,8 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   and `SQSLargePayloadSize` is reserved when publishing (#129)
 - The in-memory broker deduplicates FIFO messages per message group when the queue's
   `DeduplicationScope` is `messageGroup`, as SQS does (#130)
+- The in-memory broker wakes a waiting long poll when a visibility change makes a message visible
+  sooner, so a retry after 2 s arrives after 2 s instead of when the poll ends, as on SQS (#133)
 
 ## [0.5.0] - 2026-10-17
 
