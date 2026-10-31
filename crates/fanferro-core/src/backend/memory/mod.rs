@@ -66,6 +66,9 @@ fn aws_error(
     Error::from(AwsError::new(service, operation, kind, message).with_code(code).with_status(status))
 }
 
+/// How long SQS refuses to create a queue again after deleting it, and to purge a queue again.
+const SQS_COOLDOWN: Duration = Duration::from_secs(60);
+
 fn queue_not_found(operation: &'static str) -> Error {
     aws_error(
         "sqs",
@@ -177,6 +180,8 @@ struct Queue {
     /// FIFO deduplication key (see [`Queue::dedup_key`]) -> message id and sequence number.
     dedup: Dedup<(String, Option<String>)>,
     notify: Arc<Notify>,
+    /// When the queue was purged last (SQS allows one purge every 60 seconds).
+    purged_at: Option<Instant>,
 }
 
 impl Queue {
@@ -235,6 +240,8 @@ struct State {
     subscriptions: BTreeMap<String, Subscription>,
     buckets: BTreeMap<String, BTreeMap<String, StoredObject>>,
     retired_receipts: HashMap<String, String>,
+    /// When queues were deleted, by name (SQS refuses to create them again for 60 seconds).
+    deleted_queues: HashMap<String, Instant>,
     sequence: u64,
 }
 
@@ -939,6 +946,15 @@ impl SqsApi for MemorySqs {
         if let Some(policy) = attributes.get("RedrivePolicy") {
             RedrivePolicy::validate(&state, "CreateQueue", policy, fifo_attribute)?;
         }
+        if state.deleted_queues.get(name).is_some_and(|at| at.elapsed() < SQS_COOLDOWN) {
+            return Err(aws_error(
+                "sqs",
+                "CreateQueue",
+                AwsErrorKind::Throttling,
+                "AWS.SimpleQueueService.QueueDeletedRecently",
+                "You must wait 60 seconds after deleting a queue before you can create another with the same name.",
+            ));
+        }
         if let Some(existing) = state.queues.values().find(|queue| queue.name == name) {
             if let Some((key, _)) = attributes.iter().find(|(key, value)| existing.attributes.get(*key) != Some(value))
             {
@@ -985,6 +1001,7 @@ impl SqsApi for MemorySqs {
                 messages: Messages::default(),
                 dedup: Dedup::default(),
                 notify: Arc::new(Notify::new()),
+                purged_at: None,
             },
         );
         Ok(url)
@@ -1029,12 +1046,30 @@ impl SqsApi for MemorySqs {
         let mut state = self.0.state.lock();
         let queue = state.queues.remove(queue_url).ok_or_else(|| queue_not_found("DeleteQueue"))?;
         queue.notify.notify_waiters();
+        let now = Instant::now();
+        state.deleted_queues.retain(|_, at| now.duration_since(*at) < SQS_COOLDOWN);
+        state.deleted_queues.insert(queue.name, now);
         Ok(())
     }
 
     async fn purge_queue(&self, queue_url: &str) -> Result<()> {
         let mut state = self.0.state.lock();
-        state.queues.get_mut(queue_url).ok_or_else(|| queue_not_found("PurgeQueue"))?.messages.clear();
+        let queue = state.queues.get_mut(queue_url).ok_or_else(|| queue_not_found("PurgeQueue"))?;
+        let now = Instant::now();
+        if queue.purged_at.is_some_and(|at| now.duration_since(at) < SQS_COOLDOWN) {
+            return Err(Error::from(
+                AwsError::new(
+                    "sqs",
+                    "PurgeQueue",
+                    AwsErrorKind::Throttling,
+                    format!("Only one PurgeQueue operation on {} is allowed every 60 seconds.", queue.name),
+                )
+                .with_code("AWS.SimpleQueueService.PurgeQueueInProgress")
+                .with_status(403),
+            ));
+        }
+        queue.purged_at = Some(now);
+        queue.messages.clear();
         Ok(())
     }
 }

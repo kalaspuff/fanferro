@@ -13,7 +13,7 @@ and `status`.
 | `AwsError` | An AWS call failed (`kind`: throttling, transient, timeout, network, not_found, access_denied, invalid_request, kms, receipt_handle_invalid, service) | by kind |
 | `ResourceNotFoundError` | Queue/topic/subscription/object does not exist | no |
 | `AccessDeniedError` | Missing permissions or credentials | no |
-| `ThrottledError` | Throttled after SDK retries | yes |
+| `ThrottledError` | Throttled after SDK retries; also SQS refusing to create a queue again within 60 seconds of deleting it (`QueueDeletedRecently`) or to purge it again within 60 seconds (`PurgeQueueInProgress`) | yes |
 | `TransportError` | Network/HTTP/timeout/checksum failure outside the SDK | yes |
 | `PayloadError` | Storing or fetching a claim-check payload failed (also: URL not allowed) | no |
 | `PayloadIntegrityError` | Downloaded payload size or SHA-256 does not match | no |
