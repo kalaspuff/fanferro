@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import functools
 import signal
 import time
@@ -911,8 +912,14 @@ class Consumer:
                 continue
             self._last_activity = time.monotonic()
             self._client._telemetry.record_consumed(self.queue.name, len(deliveries))
-            for delivery in deliveries:
-                self._schedule(delivery)
+            self._schedule_all(deliveries)
+            # Not kept across the next wait for deliveries: a delivery nothing else holds must be
+            # dropped (released) when its task ends.
+            del deliveries
+
+    def _schedule_all(self, deliveries: list[Delivery]) -> None:
+        for delivery in deliveries:
+            self._schedule(delivery)
 
     def _schedule(self, delivery: Delivery) -> None:
         if self._sequenced and (group := delivery.group_id) is not None:
@@ -1010,14 +1017,30 @@ class Consumer:
                 return await self._process(delivery, slot)
             finally:
                 slot.release()
-        except Exception as error:
-            if not task:
-                raise
+        except Exception as error:  # noqa: BLE001 - deliberate catch-all; the error is reported, never swallowed silently
             self._task_failed(error)
+            await self._settle_failed_task(delivery)
             return None
         finally:
             if task:
                 self._task_ended()
+
+    async def _settle_failed_task(self, delivery: Delivery) -> None:
+        """Settles a message whose task failed unexpectedly, instead of leaving it leased.
+
+        A processed message is retried after the retry policy's backoff (its next receive counts
+        as an attempt, so ``max_attempts`` and the dead-letter policy still apply); one that never
+        started is released.
+        """
+        status = delivery.lease_status
+        if status == "buffered":
+            await self._release_quietly(delivery)
+        elif status == "active":
+            try:
+                delay = self.retry_policy.backoff.delay(max(delivery.receive_count, 1))
+                await delivery.nack(min(delay, _MAX_VISIBILITY_DELAY))
+            except Exception:  # noqa: BLE001 - last resort: make it visible again
+                await self._release_quietly(delivery)
 
     # -- processing ------------------------------------------------------------------------
 
@@ -1104,6 +1127,9 @@ class Consumer:
                 await self._failed(message, exc)
             finally:
                 telemetry.record_process(self.queue.name, monotonic() - started, error)
+                # The traceback refers to this frame: no cycle that holds the delivery until the
+                # garbage collector runs.
+                error = None
         # None when a settlement failed: the message comes back, so a FIFO group must wait for it.
         return None if message._settlement_failed else message.outcome
 
@@ -1220,7 +1246,7 @@ class Consumer:
         elif isinstance(error, Retry):
             action = "retry"
         else:
-            action = self.retry_policy.decide(error)
+            action = self._decide(message, error)
         exhausted = action in ("retry", "requeue") and self.retry_policy.exhausted(message.attempt)
         if exhausted:
             action = self.dead_letter_policy.on_exhausted
@@ -1248,6 +1274,24 @@ class Consumer:
             await self._settle_safely(message, "discard", error, reason=str(error) or "discarded")
         else:
             await self._settle_safely(message, "retry", error, delay=delay)
+
+    def _decide(self, message: Message[Any], error: BaseException) -> Literal["retry", "dead_letter", "discard"]:
+        """The retry policy's decision; one that raises (e.g. its ``classify``) is reported and skipped."""
+        policy = self.retry_policy
+        try:
+            return policy.decide(error)
+        except Exception as hook_error:  # noqa: BLE001 - deliberate catch-all; the error is reported, never swallowed silently
+            self._emit(
+                EventKind.CONSUMER_ERROR,
+                f"retry policy of consumer {self.name} failed to classify {type(error).__qualname__}; "
+                "the default classification applies",
+                message=message,
+                exception=hook_error,
+            )
+        try:
+            return dataclasses.replace(policy, classify=None).decide(error)
+        except Exception:  # noqa: BLE001 - a subclass whose decide() raises anyway: retry
+            return "retry"
 
     async def _postpone(self, message: Message[Any], delay: float) -> None:
         """Hands ``message`` back for ``delay`` seconds without spending a processing attempt."""

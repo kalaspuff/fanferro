@@ -78,7 +78,9 @@ These are relied upon across layers; tests cover each of them.
 1. **At-least-once, never silently dropped.** A received message is always settled: acked,
    retried (visibility), requeued, dead-lettered, released, or explicitly discarded with an event.
    Dropping a `Delivery` without settling releases the message (Rust `Drop`), unless it was left
-   to time out (`auto_ack=False`) or the consumer stops with `release_unfinished=False`.
+   to time out (`auto_ack=False`) or the consumer stops with `release_unfinished=False`. `Drop` is
+   the safety net, not the path: a message whose task fails unexpectedly is retried with the
+   backoff explicitly, and the dispatcher keeps no delivery in a local across awaits.
 2. **Bounded in-flight.** A consumer never holds more than `concurrency + prefetch` unsettled
    messages, plus one batch per extra receive loop when `prefetch` is left at its default
    (`extra_poller_slots`, [ADR 0012](adr/0012-receives-follow-the-backlog.md)); pollers acquire
