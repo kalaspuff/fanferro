@@ -914,3 +914,27 @@ async def test_a_fifo_group_whose_task_never_ran_works_after_a_restart(
         await queue.send({"id": "g1"}, group_id="g", deduplication_id="g1")
         await consumer.run_until_idle(idle_for=0.5, timeout=15)
     assert seen == ["g1"]
+
+
+async def test_a_message_sent_after_an_aborted_poll_waits_for_its_visibility_timeout(name: Any) -> None:
+    # docs/parity M10: SQS goes on serving a long poll a stopping consumer aborted, and a message
+    # sent meanwhile stays invisible for its visibility timeout. MemoryBroker(orphaned_polls=True)
+    # models that (MiniStack does not).
+    client = fanferro.testing.memory_client(broker=fanferro.MemoryBroker(orphaned_polls=True))
+    queue = client.queue(name("orphans"), attributes=fanferro.QueueAttributes(visibility_timeout=2))
+    received: list[fanferro.Message[Any]] = []
+
+    async def handle(message: fanferro.Message[Any]) -> None:
+        received.append(message)
+
+    async with client:
+        first = client.consumer(queue, handle, wait_time=3, name="first")
+        await first.start()
+        await asyncio.sleep(0.5)  # its long poll is in flight
+        await first.stop()  # aborts the poll
+        started = time.monotonic()
+        await queue.send({"n": 1})
+        second = client.consumer(queue, handle, wait_time=1, name="second")
+        await consume_until(second, lambda: len(received) == 1, timeout=15)
+    assert time.monotonic() - started >= 1.5, "taken by the aborted poll, then visible again"
+    assert received[0].receive_count == 2

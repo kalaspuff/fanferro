@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use fanferro_core::backend::BackendKind;
 use fanferro_core::backend::aws::AwsConfig;
-use fanferro_core::backend::memory::MemoryBroker;
+use fanferro_core::backend::memory::{MemoryBroker, MemoryOptions};
 use fanferro_core::consumer::{ConsumerConfig, ConsumerEngine};
 use fanferro_core::envelope::EnvelopeSet;
 use fanferro_core::events::{Event, EventKind, FieldValue};
@@ -214,9 +214,16 @@ pub struct PyMemoryBroker {
 #[pymethods]
 impl PyMemoryBroker {
     #[new]
-    #[pyo3(signature = (region="us-east-1".to_string(), account_id="000000000000".to_string()))]
-    fn new(region: String, account_id: String) -> Self {
-        Self { inner: MemoryBroker::new(region.clone(), account_id.clone()), region, account_id }
+    #[pyo3(signature = (region="us-east-1".to_string(), account_id="000000000000".to_string(), *, orphaned_polls=false))]
+    fn new(region: String, account_id: String, orphaned_polls: bool) -> Self {
+        let options = MemoryOptions { orphaned_polls };
+        Self { inner: MemoryBroker::with_options(region.clone(), account_id.clone(), options), region, account_id }
+    }
+
+    /// Whether long polls whose client aborted them go on until their wait time ends, as on SQS.
+    #[getter]
+    fn orphaned_polls(&self) -> bool {
+        self.inner.options().orphaned_polls
     }
 
     /// Region of the broker.

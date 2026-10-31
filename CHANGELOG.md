@@ -8,6 +8,13 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 
 ## [Unreleased]
 
+### Features
+
+- **memory:** `MemoryBroker(orphaned_polls=True)` serves long polls that a stopping consumer
+  aborted until their wait time ends, as SQS does: a message sent meanwhile stays invisible for its
+  visibility timeout. Off by default; consumers keep the messages they release while stopping out
+  of such polls on any backend that serves them (#155)
+
 ### Bug fixes
 
 - **memory:** The in-memory broker refuses queue attributes and names that SQS refuses, with SQS's
