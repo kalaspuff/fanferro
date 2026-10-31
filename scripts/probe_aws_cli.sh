@@ -14,9 +14,9 @@
 # services do. The output contains no credentials: --debug output (which has the signed headers) is
 # only read to find HTTP statuses, in a private temporary directory that is deleted on exit.
 #
-# Needs bash (3.2 or later), the AWS CLI (v2; v1 works too) and curl. Every resource is named
-# ffprobe-cli-<run>-... (inside the `probe_backends.py iam-policy`) and deleted on exit; set
-# AWS_CLI to run another command than `aws` (e.g. AWS_CLI="uvx --from awscli aws").
+# Needs bash (3.2 or later), the AWS CLI (v2; v1 works, but its presigned URLs may differ) and
+# curl. Every resource is named ffprobe-cli-<run>-... (inside the `probe_backends.py iam-policy`)
+# and deleted on exit; set AWS_CLI to run another command than `aws` (AWS_CLI="uvx --from awscli aws").
 
 # shellcheck disable=SC2016 # JMESPath literals (`null`) are not shell expansions
 
@@ -61,8 +61,8 @@ awscli() {
     fi
 }
 
-case "$(awscli --version 2>&1)" in
-    aws-cli/1.*) CLI_MAJOR=1 ;;
+case "$(awscli --version 2>&1 | grep -o 'aws-cli/[0-9]*' | head -n 1)" in
+    aws-cli/1) CLI_MAJOR=1 ;;
     *) CLI_MAJOR=2 ;;
 esac
 # Binary values: v2 takes base64, v1 the raw bytes.
@@ -256,7 +256,7 @@ probe sqs.change_visibility.released_message - sqs change-message-visibility --q
 # Where that was accepted the message is hidden again: release it for the next receive.
 awscli sqs change-message-visibility --queue-url "$QURL" --receipt-handle "$H1" --visibility-timeout 0 >/dev/null 2>&1
 probe sqs.receive_message.again 'Messages[0].{handle:ReceiptHandle,receive_count:Attributes.ApproximateReceiveCount}' \
-    sqs receive-message --queue-url "$QURL" --attribute-names All --wait-time-seconds 5
+    sqs receive-message --queue-url "$QURL" --attribute-names All --wait-time-seconds 5 --visibility-timeout 30
 H2="$(last_field handle)"
 probe sqs.delete_message.earlier_handle - sqs delete-message --queue-url "$QURL" --receipt-handle "$H1"
 probe sqs.counts_after_earlier_handle 'Attributes.{visible:ApproximateNumberOfMessages,in_flight:ApproximateNumberOfMessagesNotVisible}' \
@@ -273,7 +273,7 @@ probe sqs.expiry.first_receive 'Messages[0].{handle:ReceiptHandle,receive_count:
 E1="$(last_field handle)"
 sleep 3
 probe sqs.expiry.second_receive 'Messages[0].{handle:ReceiptHandle,receive_count:Attributes.ApproximateReceiveCount}' \
-    sqs receive-message --queue-url "$QURL" --attribute-names All --wait-time-seconds 5
+    sqs receive-message --queue-url "$QURL" --attribute-names All --wait-time-seconds 5 --visibility-timeout 30
 E2="$(last_field handle)"
 probe sqs.expiry.change_visibility_first_handle - sqs change-message-visibility --queue-url "$QURL" --receipt-handle "$E1" --visibility-timeout 30
 probe sqs.expiry.delete_first_handle - sqs delete-message --queue-url "$QURL" --receipt-handle "$E1"
