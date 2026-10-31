@@ -211,6 +211,16 @@ def describe_error(error: BaseException | None) -> dict[str, Any] | None:
     return facts
 
 
+def messages_as_info(facts: Any) -> Any:
+    """``facts`` with every error message turned into an ``info.`` fact (also nested ones)."""
+    if isinstance(facts, dict):
+        return {
+            (f"info.{key}" if key in {"message", "aws_message"} else key): messages_as_info(value)
+            for key, value in facts.items()
+        }
+    return facts
+
+
 def describe_report(report: fanferro.ProvisioningReport | None) -> dict[str, Any] | None:
     """The outcome of provisioning one resource."""
     if report is None:
@@ -322,9 +332,7 @@ class Probe:
             result = await awaitable
         except fanferro.FanferroError as error:
             facts = describe_error(error) or {}
-            if not messages:
-                facts = {(f"info.{k}" if k in {"message", "aws_message"} else k): v for k, v in facts.items()}
-            self.fact(key, facts)
+            self.fact(key, facts if messages else messages_as_info(facts))
             return None
         self.fact(key, "ok")
         return result
@@ -1060,6 +1068,7 @@ async def sqs_fifo(probe: Probe) -> None:
     await holder.start()
     try:
         await wait_until(lambda: bool(held), probe.target.delivery_timeout)
+        holder.pause()  # it must not take the group's next message once the first one is acked
         other_client = probe.client()
         async with Collector(probe, other_client, [other_client.queue(blocking.name)]) as other:
             other_queue = other_client.queue(blocking.name)
@@ -1340,6 +1349,7 @@ async def sqs_consumer_stop(probe: Probe) -> None:
     messages = await collect(probe, client, queue, 1)
     arrived = time.monotonic() - sent_at - probe.target.quiet
     probe.fact("received", [label_of(m) for m in messages])
+    probe.fact("receive_counts", [m.receive_count for m in messages])
     probe.fact("info.arrived_after", delay_bucket(arrived))
     probe.fact("arrived_within_visibility_timeout", arrived < 7)
 
@@ -1424,7 +1434,8 @@ async def sns_filter_policies(probe: Probe) -> None:
         "price_as_string": ({"price": "15", "color": "teal"}, {"total": "150"}),
         "decimal_price": ({"price": Decimal("15.000"), "color": "blue"}, {"total": 1.5e2}),
     }
-    client = probe.client()
+    # Logged rather than raised: a target that refuses one policy still runs the others.
+    client = probe.client(provisioning=Provisioning.ensure(on_error="log"))
     topic = client.topic(probe.name("filters"))
     canary = client.queue(probe.name("filters-all"))
     client.subscription(topic, canary)
@@ -1803,6 +1814,21 @@ def start_ministack() -> tuple[str, subprocess.Popen[bytes]]:
     raise SystemExit(f"MiniStack did not become healthy; see {log}")
 
 
+def emulator_version(target: Target) -> str | None:
+    """The version an emulator reports on its health endpoint (MiniStack and LocalStack have one)."""
+    if target.endpoint is None:
+        return None
+    for path in ("/_localstack/health", "/_ministack/health"):
+        try:
+            with urllib.request.urlopen(f"{target.endpoint}{path}", timeout=5) as response:
+                health = json.loads(response.read())
+        except (OSError, ValueError):
+            continue
+        if isinstance(health, dict) and health.get("version"):
+            return f"{health.get('edition', '')} {health['version']}".strip()
+    return None
+
+
 async def run_scenario(target: Target, run: str, item: Scenario, normalizer: Normalizer) -> dict[str, Any]:
     """Runs one scenario and returns its record."""
     if target.kind not in item.targets:
@@ -1900,6 +1926,7 @@ async def run_command(args: argparse.Namespace) -> int:
         "target": target.kind,
         "fanferro": fanferro.__version__,
         "python": platform.python_version(),
+        "endpoint_version": emulator_version(target),
         "region": target.region,
         "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "scenarios": {},
@@ -2002,12 +2029,17 @@ def compare_command(args: argparse.Namespace) -> int:
                 if result and result.get("error"):
                     lines.append(f"    {name}: {result['error']}")
         facts = [r["facts"] if r and r["status"] != "skipped" else None for r in results]
+        # A scenario that crashed or timed out stopped early: the facts it did not get to are not
+        # differences.
+        absent = ["<absent>" if r and r["status"] == "ok" else "<skipped>" for r in results]
         keys = list(dict.fromkeys(key for f in facts if f for key in f))
         for key in keys:
             info = key.startswith("info.")
             if info and not args.all:
                 continue
-            values = [f.get(key, "<absent>") if f is not None else "<skipped>" for f in facts]
+            values = [
+                f.get(key, missing) if f is not None else "<skipped>" for f, missing in zip(facts, absent, strict=True)
+            ]
             compared = [without_info(v) for v in values]
             present = [v for v in compared if v != "<skipped>"]
             same = all(v == present[0] for v in present)
@@ -2021,10 +2053,11 @@ def compare_command(args: argparse.Namespace) -> int:
                 continue
             marker = "  " if same or info else "≠ "
             if not same and all(isinstance(v, dict) and not is_error(v) for v in present):
-                flat = [flatten(v) if v != "<skipped>" else {} for v in compared]
-                for sub in dict.fromkeys(k for f in flat for k in f):
-                    sub_values = [f.get(sub, "<absent>") for f in flat]
-                    if any(v != sub_values[0] for v in sub_values):
+                flat = [flatten(v) if v != "<skipped>" else None for v in compared]
+                for sub in dict.fromkeys(k for f in flat if f is not None for k in f):
+                    sub_values = [f.get(sub, "<absent>") if f is not None else "<skipped>" for f in flat]
+                    shown = [v for v in sub_values if v != "<skipped>"]
+                    if any(v != shown[0] for v in shown):
                         lines.append(f"  {marker}{key}.{sub}")
                         lines.extend(rows(sub_values))
                 continue

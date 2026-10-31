@@ -48,6 +48,11 @@ uv run python scripts/probe_backends.py compare probe-aws.json probe-memory.json
   broker (`backend/memory`) or the error classification (`backend/aws/errors.rs`) to match AWS, or
   note why fanferro must behave differently. Facts named `info.*` (timings, URLs, request ids) are
   never counted as differences.
+* The recorded runs and every finding so far are in `docs/parity/README.md` (ADR 0011: real AWS is
+  the reference). Compare a memory run with `docs/parity/<date>/probe-aws.json` without AWS access;
+  record a new AWS run in a new dated directory and update the findings. A test of AWS behaviour
+  that MiniStack does not reproduce runs on the memory broker only, with a comment naming the
+  finding (e.g. `# docs/parity M2: MiniStack refuses earlier receipt handles`).
 * `scripts/probe_aws_cli.sh` makes the raw SQS, SNS, S3 and STS calls fanferro relies on with the
   AWS CLI (error codes and HTTP statuses as the services send them, receipt handle and FIFO
   semantics, limits, SNS notification documents, presigned URLs) and prints normalised results:

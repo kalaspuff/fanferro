@@ -189,7 +189,9 @@ receive_until() {
 }
 
 echo "probing $([ -n "$ENDPOINT" ] && echo "$ENDPOINT" || echo "AWS") ($REGION) with $(awscli --version 2>&1 | cut -d' ' -f1), run $RUN" >&2
-printf '# probe_aws_cli.sh: %s, AWS CLI v%s\n\n' "$([ -n "$ENDPOINT" ] && echo endpoint || echo aws)" "$CLI_MAJOR"
+VERSION=""
+[ -n "$ENDPOINT" ] && VERSION="$(curl -s "$ENDPOINT/_localstack/health" | sed -n -E 's/.*"version": *"([^"]*)".*/\1/p')"
+printf '# probe_aws_cli.sh: %s%s, AWS CLI v%s\n\n' "$([ -n "$ENDPOINT" ] && echo endpoint || echo aws)" "${VERSION:+ $VERSION}" "$CLI_MAJOR"
 
 # -- STS and credentials ------------------------------------------------------------------------
 
@@ -265,6 +267,42 @@ probe sqs.delete_message.current_handle - sqs delete-message --queue-url "$QURL"
 probe sqs.delete_message.again - sqs delete-message --queue-url "$QURL" --receipt-handle "$H2"
 probe sqs.change_visibility.deleted_message - sqs change-message-visibility --queue-url "$QURL" --receipt-handle "$H2" --visibility-timeout 10
 probe sqs.delete_message.garbage_handle - sqs delete-message --queue-url "$QURL" --receipt-handle not-a-handle
+
+# A released message (visibility 0) whose latest receipt handle is used once more: is it hidden again?
+VQ="$P-vis"
+awscli sqs create-queue --queue-name "$VQ" --attributes VisibilityTimeout=2 >/dev/null
+VQURL="$(queue_url "$VQ")"
+awscli sqs send-message --queue-url "$VQURL" --message-body '{"label":"released"}' >/dev/null
+probe sqs.released.receive 'Messages[0].{handle:ReceiptHandle}' sqs receive-message --queue-url "$VQURL" --wait-time-seconds 5 --visibility-timeout 30
+VR="$(last_field handle)"
+awscli sqs change-message-visibility --queue-url "$VQURL" --receipt-handle "$VR" --visibility-timeout 0 >/dev/null 2>&1
+sleep 1
+probe sqs.released.change_visibility_again - sqs change-message-visibility --queue-url "$VQURL" --receipt-handle "$VR" --visibility-timeout 20
+probe sqs.released.received_afterwards "$COUNT" sqs receive-message --queue-url "$VQURL" --wait-time-seconds 2
+awscli sqs purge-queue --queue-url "$VQURL" >/dev/null 2>&1
+# An earlier receipt handle after the message was received again: does a change of visibility apply?
+awscli sqs send-message --queue-url "$VQURL" --message-body '{"label":"earlier"}' >/dev/null
+sleep 1
+probe sqs.earlier_handle.first_receive 'Messages[0].{handle:ReceiptHandle,body:Body}' sqs receive-message --queue-url "$VQURL" --wait-time-seconds 5
+VE1="$(last_field handle)"
+sleep 3
+probe sqs.earlier_handle.second_receive 'Messages[0].{handle:ReceiptHandle,body:Body}' sqs receive-message --queue-url "$VQURL" --wait-time-seconds 5 --visibility-timeout 30
+probe sqs.earlier_handle.release - sqs change-message-visibility --queue-url "$VQURL" --receipt-handle "$VE1" --visibility-timeout 0
+probe sqs.earlier_handle.received_after_release 'Messages[].{body:Body,receive_count:Attributes.ApproximateReceiveCount}' \
+    sqs receive-message --queue-url "$VQURL" --attribute-names All --wait-time-seconds 2 --visibility-timeout 30
+
+# Number attributes: which values SQS accepts, and how it returns them.
+NQ="$P-numbers"
+awscli sqs create-queue --queue-name "$NQ" >/dev/null
+NQURL="$(queue_url "$NQ")"
+for number in 007 -0.50 1.0E2 +5 0.000 100 .5 -0 1e-3 12345678901234567890123456789012345678 123456789012345678901234567890123456789; do
+    probe "sqs.number.send.$number" '{md5_attributes:MD5OfMessageAttributes}' sqs send-message --queue-url "$NQURL" \
+        --message-body "$number" --message-attributes '{"n":{"DataType":"Number","StringValue":"'"$number"'"}}'
+done
+probe sqs.number.received 'sort_by(Messages, &Body)[].{sent:Body,received:MessageAttributes.n.StringValue,md5_attributes:MD5OfMessageAttributes}' \
+    sqs receive-message --queue-url "$NQURL" --message-attribute-names All --max-number-of-messages 10 --wait-time-seconds 2
+probe sqs.number.received_more 'sort_by(Messages, &Body)[].{sent:Body,received:MessageAttributes.n.StringValue,md5_attributes:MD5OfMessageAttributes}' \
+    sqs receive-message --queue-url "$NQURL" --message-attribute-names All --max-number-of-messages 10 --wait-time-seconds 2
 
 # The visibility timeout ran out and the message was received again: the first receipt handle.
 awscli sqs send-message --queue-url "$QURL" --message-body '{"label":"expiry"}' >/dev/null
@@ -383,6 +421,17 @@ probe sqs.fifo.expiry.second_receive 'Messages[0].{handle:ReceiptHandle,body:Bod
     sqs receive-message --queue-url "$FXURL" --attribute-names All --max-number-of-messages 1 --wait-time-seconds 2 --visibility-timeout 30
 probe sqs.fifo.expiry.delete_first_handle - sqs delete-message --queue-url "$FXURL" --receipt-handle "$FE1"
 probe sqs.fifo.expiry.change_visibility_first_handle - sqs change-message-visibility --queue-url "$FXURL" --receipt-handle "$FE1" --visibility-timeout 0
+# A FIFO message made visible again (visibility 0) whose latest receipt handle is used once more.
+awscli sqs send-message --queue-url "$FXURL" --message-body '{"label":"released"}' --message-group-id k --message-deduplication-id r1 >/dev/null
+# The expiry message's group is still in flight: only this one can be received.
+probe sqs.fifo.released.receive 'Messages[0].{handle:ReceiptHandle,body:Body}' \
+    sqs receive-message --queue-url "$FXURL" --max-number-of-messages 10 --wait-time-seconds 2 --visibility-timeout 30
+FR="$(last_field handle)"
+probe sqs.fifo.released.change_visibility_zero - sqs change-message-visibility --queue-url "$FXURL" --receipt-handle "$FR" --visibility-timeout 0
+sleep 1
+probe sqs.fifo.released.change_visibility_again - sqs change-message-visibility --queue-url "$FXURL" --receipt-handle "$FR" --visibility-timeout 10
+probe sqs.fifo.released.received_afterwards 'Messages[].Body' \
+    sqs receive-message --queue-url "$FXURL" --max-number-of-messages 10 --wait-time-seconds 2
 probe sqs.fifo.create_queue.per_group_limit_with_queue_scope QueueUrl sqs create-queue --queue-name "$P-g.fifo" \
     --attributes FifoQueue=true,DeduplicationScope=queue,FifoThroughputLimit=perMessageGroupId
 probe sqs.fifo.create_queue.high_throughput QueueUrl sqs create-queue --queue-name "$P-h.fifo" \
@@ -430,6 +479,8 @@ probe sns.create_topic.fifo_suffix_without_attribute TopicArn sns create-topic -
 probe sns.topic_attribute_names 'sort(keys(Attributes))' sns get-topic-attributes --topic-arn "$TARN"
 probe sns.topic_attributes 'Attributes.{DisplayName:DisplayName,SignatureVersion:SignatureVersion,TracingConfig:TracingConfig,SubscriptionsConfirmed:SubscriptionsConfirmed}' \
     sns get-topic-attributes --topic-arn "$TARN"
+probe sns.topic_default_policy 'Attributes.Policy' sns get-topic-attributes --topic-arn "$TARN"
+probe sns.topic_default_delivery_policy 'Attributes.EffectiveDeliveryPolicy' sns get-topic-attributes --topic-arn "$TARN"
 probe sns.set_topic_attributes.fifo - sns set-topic-attributes --topic-arn "$MTARN" --attribute-name FifoTopic --attribute-value true
 probe sns.set_topic_attributes.signature_version_3 - sns set-topic-attributes --topic-arn "$MTARN" --attribute-name SignatureVersion --attribute-value 3
 probe sns.attributes_after_mutations 'Attributes.{DisplayName:DisplayName,FifoTopic:FifoTopic,SignatureVersion:SignatureVersion}' \
@@ -437,6 +488,15 @@ probe sns.attributes_after_mutations 'Attributes.{DisplayName:DisplayName,FifoTo
 probe sns.get_topic_attributes.missing - sns get-topic-attributes --topic-arn "$TARN-missing"
 probe sns.publish.missing_topic MessageId sns publish --topic-arn "$TARN-missing" --message x
 probe sns.publish.other_region MessageId sns publish --topic-arn "arn:aws:sns:$OTHER_REGION:$ACCOUNT:$T" --message x
+probe sns.other_region.publish_batch - sns publish-batch --topic-arn "arn:aws:sns:$OTHER_REGION:$ACCOUNT:$T" \
+    --publish-batch-request-entries '[{"Id":"a","Message":"x"}]'
+probe sns.other_region.get_topic_attributes - sns get-topic-attributes --topic-arn "arn:aws:sns:$OTHER_REGION:$ACCOUNT:$T"
+probe sns.other_region.list_subscriptions - sns list-subscriptions-by-topic --topic-arn "arn:aws:sns:$OTHER_REGION:$ACCOUNT:$T"
+probe sns.other_region.subscribe - sns subscribe --topic-arn "arn:aws:sns:$OTHER_REGION:$ACCOUNT:$T" --protocol sqs \
+    --notification-endpoint "arn:aws:sqs:$REGION:$ACCOUNT:$P-raw"
+probe sns.other_region.set_topic_attributes - sns set-topic-attributes --topic-arn "arn:aws:sns:$OTHER_REGION:$ACCOUNT:$T" \
+    --attribute-name DisplayName --attribute-value x
+probe sns.other_region.delete_topic - sns delete-topic --topic-arn "arn:aws:sns:$OTHER_REGION:$ACCOUNT:$T"
 probe sns.publish.foreign_account MessageId sns publish --topic-arn "arn:aws:sns:$REGION:$FOREIGN_ACCOUNT:$T" --message x
 probe sns.publish.empty_message MessageId sns publish --topic-arn "$TARN" --message ""
 repeat x 262144 >"$WORK/body-262144"
@@ -489,6 +549,7 @@ case "$(last_string)" in arn:*) awscli sns unsubscribe --subscription-arn "$(las
 probe sns.subscription_attribute_names 'sort(keys(Attributes))' sns get-subscription-attributes --subscription-arn "$RAWSUB"
 probe sns.subscription_attributes 'Attributes.{RawMessageDelivery:RawMessageDelivery,PendingConfirmation:PendingConfirmation,ConfirmationWasAuthenticated:ConfirmationWasAuthenticated,FilterPolicyScope:FilterPolicyScope}' \
     sns get-subscription-attributes --subscription-arn "$RAWSUB"
+probe sns.subscription_principal 'Attributes.SubscriptionPrincipal' sns get-subscription-attributes --subscription-arn "$RAWSUB"
 probe sns.list_subscriptions_by_topic 'sort_by(Subscriptions, &Endpoint)[].{protocol:Protocol,endpoint:Endpoint}' sns list-subscriptions-by-topic --topic-arn "$TARN"
 
 PUBLISH_ATTRS='{"region":{"DataType":"String","StringValue":"eu"},"n":{"DataType":"Number","StringValue":"3.0"},"bin":{"DataType":"Binary","BinaryValue":"'"$BIN"'"},"arr":{"DataType":"String.Array","StringValue":"[\"a\",1,true]"}}'
@@ -535,6 +596,11 @@ probe sns.fifo.topic_attributes 'Attributes.{FifoTopic:FifoTopic,ContentBasedDed
     sns get-topic-attributes --topic-arn "$FTARN"
 probe sns.fifo.publish.no_group - sns publish --topic-arn "$FTARN" --message x --message-deduplication-id d
 probe sns.fifo.publish.no_deduplication_id - sns publish --topic-arn "$FTARN" --message x --message-group-id g
+probe sns.fifo.publish.group_id_129 - sns publish --topic-arn "$FTARN" --message x --message-group-id "$(repeat g 129)" --message-deduplication-id d0
+probe sns.fifo.publish.group_id_with_space - sns publish --topic-arn "$FTARN" --message x --message-group-id "a b" --message-deduplication-id d0
+probe sns.fifo.publish.deduplication_id_129 - sns publish --topic-arn "$FTARN" --message x --message-group-id g --message-deduplication-id "$(repeat d 129)"
+probe sns.fifo.publish_batch.group_id_with_space '{successful:length(Successful),failed:Failed}' sns publish-batch --topic-arn "$FTARN" \
+    --publish-batch-request-entries '[{"Id":"a","Message":"x","MessageGroupId":"a b","MessageDeduplicationId":"d9"}]'
 probe sns.fifo.publish.first '{id:MessageId,has_sequence:SequenceNumber != `null`}' sns publish --topic-arn "$FTARN" --message x --message-group-id g --message-deduplication-id d1
 FTFIRST="$(last_field id)"
 probe sns.fifo.publish.duplicate '{id:MessageId,has_sequence:SequenceNumber != `null`}' sns publish --topic-arn "$FTARN" --message y --message-group-id g --message-deduplication-id d1
@@ -574,6 +640,10 @@ fi
 probe s3.create_bucket.invalid_name - s3api create-bucket --bucket "$P-Bad_Name"
 probe s3.head_bucket - s3api head-bucket --bucket "$B"
 probe s3.head_bucket.missing - s3api head-bucket --bucket "$P-missing"
+probe s3.get_bucket_location - s3api get-bucket-location --bucket "$B"
+AWS_CLI="fake $AWS_CLI" probe credentials.invalid.s3_head_existing_bucket - s3api head-bucket --bucket "$B"
+AWS_CLI="fake $AWS_CLI" probe credentials.invalid.s3_get_bucket_location - s3api get-bucket-location --bucket "$B"
+AWS_CLI="fake $AWS_CLI" probe credentials.invalid.s3_list_objects - s3api list-objects-v2 --bucket "$B" --max-keys 0
 printf '%s' '{"label":"payload"}' >"$WORK/payload"
 probe s3.put_object '{etag:ETag,encryption:ServerSideEncryption}' s3api put-object --bucket "$B" --key fanferro/m1/sha --body "$WORK/payload" --content-type application/json
 probe s3.put_object.sse_s3 '{encryption:ServerSideEncryption}' s3api put-object --bucket "$B" --key fanferro/m2/sha --body "$WORK/payload" --server-side-encryption AES256

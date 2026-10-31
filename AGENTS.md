@@ -125,6 +125,9 @@ protocol issue), fix, keep the test.
   Helpers: `tests/helpers.py` (`consume_until`, `drain_queue`, `wait_for`).
 * Time-sensitive tests: keep visibility timeouts ≥ 2 s and use generous `wait_for` timeouts; a test
   that is flaky on MiniStack usually reveals a real protocol subtlety (see ADR 0007).
+* Real AWS is the reference, not MiniStack (ADR 0011): `docs/parity/README.md` lists how AWS,
+  MiniStack, LocalStack and the memory broker differ. Model AWS behaviour in the memory broker; test
+  what MiniStack gets wrong on the memory broker only.
 * Examples are tests: if you change the API, update `examples/` (they run in CI).
 
 ## Documentation duties
