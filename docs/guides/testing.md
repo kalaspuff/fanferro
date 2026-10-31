@@ -43,7 +43,8 @@ The broker models SQS/SNS/S3 behaviour that matters for processing, as real AWS 
 earlier receives, redrive to DLQs (the receive count carries over, and a `RedrivePolicy` SQS would
 refuse fails when it is set), FIFO groups and deduplication, delays, queue attributes SQS would
 refuse, the 60 seconds before a deleted queue's name can be used again and between two purges,
-SNS fan-out with filter policies, raw and wrapped delivery, presigned URLs. Filter policies support what SNS supports (exact values,
+SNS fan-out with filter policies (none to queues encrypted with `alias/aws/sqs`, which SNS cannot
+use), raw and wrapped delivery, X-Ray headers of active topics, presigned URLs. Filter policies support what SNS supports (exact values,
 `prefix`, `suffix`, `equals-ignore-case`, `wildcard`, `cidr`, `anything-but`, `numeric`, `exists`,
 `$or`, nested keys of `MessageBody` policies), with its limits, and a policy SNS would refuse fails
 when it is set. Share one `MemoryBroker` between clients with `memory_client(broker=broker)`;
