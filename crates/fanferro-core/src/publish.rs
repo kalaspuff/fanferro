@@ -197,10 +197,35 @@ fn validate(destination: &Destination, message: &OutgoingMessage) -> Result<()> 
                 destination.address()
             )));
         }
+        match &message.deduplication_id {
+            Some(id) if !is_fifo_id(id) => {
+                return Err(Error::validation(format!("deduplication_id must be {FIFO_ID_RULE}, got {id:?}")));
+            }
+            None if !destination.content_based_deduplication() && !is_fifo_id(&message.message_id) => {
+                return Err(Error::validation(format!(
+                    "the message id is the FIFO deduplication id unless deduplication_id is set: it must be {FIFO_ID_RULE}, got {:?}",
+                    message.message_id
+                )));
+            }
+            _ => {}
+        }
     } else if message.deduplication_id.is_some() {
         return Err(Error::validation("deduplication_id is only supported by FIFO queues and topics"));
     }
+    if let Some(group_id) = &message.group_id
+        && !is_fifo_id(group_id)
+    {
+        return Err(Error::validation(format!("group_id must be {FIFO_ID_RULE}, got {group_id:?}")));
+    }
     Ok(())
+}
+
+/// What SQS and SNS accept as a message group id and a deduplication id (docs/parity M8).
+const FIFO_ID_RULE: &str = "1-128 ASCII letters, digits and punctuation characters (no spaces)";
+
+/// Whether SQS and SNS accept `id` as a message group or deduplication id.
+pub(crate) fn is_fifo_id(id: &str) -> bool {
+    (1..=128).contains(&id.len()) && id.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
 fn entry_error(service: &'static str, operation: &'static str, error: &BatchEntryError) -> Error {
