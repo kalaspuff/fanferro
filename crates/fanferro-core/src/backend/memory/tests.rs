@@ -1205,3 +1205,23 @@ async fn aborted_long_polls_end_with_the_connection_by_default() {
     backend.sqs.send_message(&url, send("free")).await.unwrap();
     assert_eq!(backend.sqs.receive_messages(receive(&url, 10, None)).await.unwrap().len(), 1);
 }
+
+#[tokio::test(start_paused = true)]
+async fn aborted_long_polls_take_messages_that_become_visible_while_nobody_calls() {
+    // A message whose visibility timeout ended while an aborted poll waited went to the next live
+    // poll when nothing called the broker before the aborted poll's wait time was over.
+    let broker = MemoryBroker::with_options("us-east-1", "000000000000", MemoryOptions { orphaned_polls: true });
+    let backend = broker.backend();
+    let url =
+        backend.sqs.create_queue("q", &attributes(&[("VisibilityTimeout", "30")]), &StringMap::new()).await.unwrap();
+    backend.sqs.send_message(&url, send("returns")).await.unwrap();
+    assert_eq!(backend.sqs.receive_messages(receive(&url, 10, Some(2))).await.unwrap().len(), 1);
+    abort_a_long_poll(&backend, &url).await; // waits until second 20
+    tokio::time::advance(Duration::from_secs(25)).await; // visible again at second 2, unobserved
+    assert!(backend.sqs.receive_messages(receive(&url, 10, None)).await.unwrap().is_empty());
+    let stored = broker.queue_messages(&url).unwrap();
+    assert_eq!((stored[0].receive_count, stored[0].in_flight), (2, true), "the aborted poll took it");
+    tokio::time::advance(Duration::from_secs(10)).await; // 2 + 30 seconds after the start
+    let again = backend.sqs.receive_messages(receive(&url, 10, None)).await.unwrap();
+    assert_eq!(again[0].system.approximate_receive_count, 3);
+}

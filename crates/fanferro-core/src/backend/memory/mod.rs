@@ -202,6 +202,8 @@ struct Queue {
 /// A `ReceiveMessage` long poll whose client went away while it waited.
 #[derive(Clone, Debug)]
 struct Orphan {
+    /// When the client aborted the poll.
+    since: Instant,
     until: Instant,
     max_messages: u8,
     visibility_timeout: Option<Duration>,
@@ -370,8 +372,9 @@ impl MemoryBroker {
     /// Messages currently stored in a queue (visible, delayed and in flight), in order.
     pub fn queue_messages(&self, queue_url: &str) -> Result<Vec<MessageSnapshot>> {
         let mut state = self.inner.state.lock();
-        let queue = state.queues.get_mut(queue_url).ok_or_else(|| queue_not_found("Snapshot"))?;
         let now = Instant::now();
+        serve_orphans(&mut state, queue_url, now);
+        let queue = state.queues.get_mut(queue_url).ok_or_else(|| queue_not_found("Snapshot"))?;
         queue.messages.promote(now);
         Ok(queue
             .messages
@@ -641,13 +644,25 @@ fn enqueue(state: &mut State, queue_url: &str, operation: &'static str, request:
     })
 }
 
-/// Hands visible messages to the long polls of `queue_url` whose clients aborted them, oldest
-/// first: such a poll takes what it can, like any receive, and returns to nobody.
+/// Hands messages to the long polls of `queue_url` whose clients aborted them, oldest first: such
+/// a poll takes what it can, like any receive, and returns to nobody. The broker has no timer, so
+/// every operation that looks at the queue catches up first: a poll takes the messages visible at
+/// the first moment during its wait time that one was (as of that moment), or none.
 fn serve_orphans(state: &mut State, queue_url: &str, now: Instant) {
     loop {
         let Some(queue) = state.queues.get_mut(queue_url) else { return };
-        queue.orphans.retain(|orphan| orphan.until > now);
         let Some(orphan) = queue.orphans.first().cloned() else { return };
+        // The poll's wait time ends at `until`: a message visible from then on is not for it.
+        let ended = orphan.until <= now;
+        let last = if ended { orphan.until.checked_sub(Duration::from_millis(1)).unwrap_or(orphan.until) } else { now };
+        let first = queue.messages.earliest_available().map(|at| at.max(orphan.since));
+        let Some(at) = first.filter(|at| *at <= last) else {
+            if ended {
+                queue.orphans.remove(0);
+                continue;
+            }
+            return;
+        };
         let request = ReceiveRequest {
             queue_url: queue_url.to_string(),
             max_messages: orphan.max_messages,
@@ -655,13 +670,12 @@ fn serve_orphans(state: &mut State, queue_url: &str, now: Instant) {
             visibility_timeout: orphan.visibility_timeout,
             attempt_id: None,
         };
-        match try_receive(state, &request, now) {
-            Ok(received) if !received.is_empty() => {
-                if let Some(queue) = state.queues.get_mut(queue_url) {
-                    queue.orphans.remove(0);
-                }
-            }
-            _ => return,
+        let took = try_receive(state, &request, at).is_ok_and(|received| !received.is_empty());
+        if !took && orphan.until > now {
+            return; // still waiting
+        }
+        if let Some(queue) = state.queues.get_mut(queue_url) {
+            queue.orphans.remove(0);
         }
     }
 }
@@ -686,6 +700,7 @@ impl Drop for PollInFlight {
         let mut state = self.inner.state.lock();
         let Some(queue) = state.queues.get_mut(&self.queue_url) else { return };
         queue.orphans.push(Orphan {
+            since: now,
             until: self.until,
             max_messages: self.max_messages,
             visibility_timeout: self.visibility_timeout,
@@ -807,6 +822,8 @@ fn try_receive(state: &mut State, request: &ReceiveRequest, now: Instant) -> Res
     let sequences: Vec<u64> = queue
         .messages
         .visible()
+        // An aborted poll catching up receives as of an earlier moment (see `serve_orphans`).
+        .filter(|(_, message)| message.available_at <= now)
         .filter(|(_, message)| {
             !(fifo && message.group_id.as_deref().is_some_and(|g| queue.messages.group_in_flight(g)))
         })
@@ -1120,8 +1137,10 @@ impl SqsApi for MemorySqs {
 
     async fn get_queue_attributes(&self, queue_url: &str) -> Result<StringMap> {
         let mut state = self.0.state.lock();
+        let now = Instant::now();
+        serve_orphans(&mut state, queue_url, now);
         let queue = state.queues.get_mut(queue_url).ok_or_else(|| queue_not_found("GetQueueAttributes"))?;
-        queue.messages.promote(Instant::now());
+        queue.messages.promote(now);
         let mut attributes = queue.attributes.clone();
         let (visible, in_flight, delayed) = queue.messages.counts();
         attributes.insert("ApproximateNumberOfMessages".into(), visible.to_string());
