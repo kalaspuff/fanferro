@@ -100,6 +100,8 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   scheduled and cancelled (#137)
 - **codecs:** The dataclass codec decodes the `NamedTuple`, `TypedDict`, enum `Literal` and bare
   `tuple`/`set` fields it writes, instead of dead-lettering such messages (#138)
+- Batch publishes to SNS topics send the X-Ray trace header (`X-Amzn-Trace-Id`) of their entries,
+  with one `PublishBatch` call per trace header, instead of leaving it out (#139)
 
 ## [0.5.0] - 2026-10-17
 
