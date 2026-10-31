@@ -137,6 +137,21 @@ async def test_link_mode_and_errors(otel: Any, name: Any) -> None:
     assert any(event.name == "exception" for event in process.events)
 
 
+async def test_failed_publish_records_the_exception_once(otel: Any, name: Any) -> None:
+    tracer_provider, exporter, meter_provider, _ = otel
+    telemetry = fanferro.Telemetry(tracer_provider=tracer_provider, meter_provider=meter_provider)
+    client = testing.memory_client(telemetry=telemetry)
+    queue = client.queue(name("failed-publish"))
+    with pytest.raises(fanferro.EncodeError):
+        await queue.send(object())  # no codec can encode a plain object
+    producers = [span for span in exporter.get_finished_spans() if span.kind is SpanKind.PRODUCER]
+    assert len(producers) == 1
+    # mark_error() owns error recording on producer spans: the SDK must not add a second event.
+    assert [event.name for event in producers[0].events] == ["exception"]
+    assert producers[0].status.status_code is StatusCode.ERROR
+    await client.close()
+
+
 async def test_propagation_without_tracing(name: Any) -> None:
     provider = TracerProvider()
     tracer = provider.get_tracer("test")
