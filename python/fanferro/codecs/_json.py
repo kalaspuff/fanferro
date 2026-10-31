@@ -11,6 +11,7 @@ from typing import Any
 from fanferro.codecs._base import (
     JSON_CONTENT_TYPE,
     EncodedBody,
+    SettingsEquality,
     is_json_content_type,
     loads_json,
     media_type,
@@ -31,7 +32,7 @@ def _default_dumps(value: Any) -> bytes:
     return _ENCODER.encode(value).encode()
 
 
-class JsonCodec:
+class JsonCodec(SettingsEquality):
     """Encodes plain data as JSON and decodes JSON into plain data.
 
     Args:

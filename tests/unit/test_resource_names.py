@@ -7,6 +7,8 @@ from typing import Any
 import pytest
 
 import fanferro
+from fanferro.codecs import BytesCodec, DataclassCodec, JsonCodec, MsgspecCodec, ProtobufCodec, PydanticCodec, TextCodec
+from fanferro.envelopes import CloudEvents, CloudEventsProtobuf, Raw
 from fanferro.testing import memory_client
 
 
@@ -99,6 +101,44 @@ def test_redeclaring_with_the_same_settings_returns_the_handle() -> None:
     assert client.topic("orders", tags={"team": "orders"}) is topic
     with pytest.raises(fanferro.ConfigurationError, match=r"\(tags\)"):
         client.topic("orders", tags={"team": "billing"})
+
+
+def test_redeclaring_with_equal_envelopes_and_codecs_returns_the_handle() -> None:
+    # Envelopes and codecs compared by identity: CloudEvents() in two modules was a conflict.
+    client = memory_client()
+    queue = client.queue("jobs", envelope=CloudEvents(), codec=JsonCodec())
+    assert client.queue("jobs", envelope=CloudEvents(), codec=JsonCodec()) is queue
+    with pytest.raises(fanferro.ConfigurationError, match=r"other settings \(envelope\)"):
+        client.queue("jobs", envelope=CloudEvents(default_source="billing"))
+    with pytest.raises(fanferro.ConfigurationError, match=r"other settings \(codec\)"):
+        client.queue("jobs", codec=JsonCodec(content_type="application/vnd.acme+json"))
+    topic = client.topic("events", envelope=CloudEventsProtobuf(), codec=ProtobufCodec(json=True))
+    assert client.topic("events", envelope=CloudEventsProtobuf(), codec=ProtobufCodec(json=True)) is topic
+    with pytest.raises(fanferro.ConfigurationError, match=r"other settings \(envelope, codec\)"):
+        client.topic("events", envelope=Raw(), codec=ProtobufCodec())
+
+
+@pytest.mark.parametrize(
+    ("same", "other"),
+    [
+        (lambda: CloudEvents(), lambda: CloudEvents(content_type_attribute=False)),
+        (lambda: CloudEvents(), lambda: CloudEvents(type_attribute=None)),
+        (lambda: CloudEventsProtobuf(), lambda: CloudEventsProtobuf(default_source="billing")),
+        (lambda: Raw(), lambda: Raw(id_attribute=None)),
+        (lambda: Raw(), lambda: CloudEvents()),
+        (lambda: JsonCodec(), lambda: JsonCodec(dumps=repr)),
+        (lambda: JsonCodec(), lambda: DataclassCodec()),
+        (lambda: PydanticCodec(), lambda: PydanticCodec(strict=True)),
+        (lambda: MsgspecCodec(), lambda: TextCodec()),
+        (lambda: BytesCodec(), lambda: BytesCodec("application/pdf")),
+        (lambda: TextCodec(), lambda: TextCodec("text/csv")),
+    ],
+)
+def test_builtin_envelopes_and_codecs_are_equal_by_settings(same: Any, other: Any) -> None:
+    assert same() == same()
+    assert hash(same()) == hash(same())
+    assert same() != other()
+    assert len({same(), same(), other()}) == 2
 
 
 def test_queues_can_share_a_dead_letter_queue() -> None:

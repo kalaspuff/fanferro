@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from fanferro.codecs._base import OCTET_STREAM, TEXT_CONTENT_TYPE, EncodedBody, is_json_content_type
+from fanferro.codecs._base import OCTET_STREAM, TEXT_CONTENT_TYPE, EncodedBody, SettingsEquality, is_json_content_type
 from fanferro.errors import DecodeError
 
 __all__ = ["BytesCodec", "TextCodec"]
 
 
-class BytesCodec:
+class BytesCodec(SettingsEquality):
     """Passes ``bytes`` through unchanged (``application/octet-stream``)."""
 
     name = "bytes"
@@ -34,7 +34,7 @@ class BytesCodec:
         return None
 
 
-class TextCodec:
+class TextCodec(SettingsEquality):
     """Encodes ``str`` as UTF-8 text (``text/plain; charset=utf-8``)."""
 
     name = "text"

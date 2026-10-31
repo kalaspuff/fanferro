@@ -1,5 +1,6 @@
 //! Built-in envelopes exposed to Python. They implement the same protocol as custom
 //! Python envelopes: `name`, `wrap(payload) -> WireMessage`, `unwrap(wire) -> Payload | None`.
+//! Envelopes with the same settings are equal (declaring a resource again compares them).
 
 use std::sync::Arc;
 
@@ -32,7 +33,8 @@ pub fn builtin(envelope: &Bound<'_, PyAny>) -> Option<Arc<dyn Envelope>> {
 }
 
 /// CloudEvents 1.0 structured JSON envelope.
-#[pyclass(name = "CloudEventsEnvelope", module = "fanferro._core", frozen)]
+#[pyclass(name = "CloudEventsEnvelope", module = "fanferro._core", frozen, eq, hash)]
+#[derive(PartialEq, Eq, Hash)]
 pub struct PyCloudEvents {
     inner: CloudEventsJson,
 }
@@ -88,7 +90,8 @@ impl PyCloudEvents {
 }
 
 /// CloudEvents 1.0 protobuf (binary) envelope.
-#[pyclass(name = "CloudEventsProtobufEnvelope", module = "fanferro._core", frozen)]
+#[pyclass(name = "CloudEventsProtobufEnvelope", module = "fanferro._core", frozen, eq, hash)]
+#[derive(PartialEq, Eq, Hash)]
 pub struct PyCloudEventsProtobuf {
     inner: CloudEventsProtobuf,
 }
@@ -138,7 +141,8 @@ impl PyCloudEventsProtobuf {
 }
 
 /// Raw envelope (the default): the payload is the body; metadata travels in attributes.
-#[pyclass(name = "RawEnvelope", module = "fanferro._core", frozen)]
+#[pyclass(name = "RawEnvelope", module = "fanferro._core", frozen, eq, hash)]
+#[derive(PartialEq, Eq, Hash)]
 pub struct PyRaw {
     inner: RawEnvelope,
 }

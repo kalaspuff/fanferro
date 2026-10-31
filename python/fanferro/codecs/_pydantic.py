@@ -8,7 +8,14 @@ import sys
 import typing
 from typing import Any
 
-from fanferro.codecs._base import JSON_CONTENT_TYPE, EncodedBody, is_json_content_type, media_type, referenced_types
+from fanferro.codecs._base import (
+    JSON_CONTENT_TYPE,
+    EncodedBody,
+    SettingsEquality,
+    is_json_content_type,
+    media_type,
+    referenced_types,
+)
 from fanferro.errors import DecodeError, EncodeError
 
 __all__ = ["PydanticCodec"]
@@ -56,7 +63,7 @@ def _is_pydantic_dataclass(target: type) -> bool:
     return "__pydantic_validator__" in vars(target)
 
 
-class PydanticCodec:
+class PydanticCodec(SettingsEquality):
     """Encodes pydantic models with ``model_dump_json`` and validates JSON into models.
 
     Besides ``BaseModel`` subclasses it decodes typing constructs (``list[Model]``,

@@ -5,7 +5,13 @@ from __future__ import annotations
 import sys
 from typing import Any
 
-from fanferro.codecs._base import JSON_CONTENT_TYPE, PROTOBUF_CONTENT_TYPE, EncodedBody, is_json_content_type
+from fanferro.codecs._base import (
+    JSON_CONTENT_TYPE,
+    PROTOBUF_CONTENT_TYPE,
+    EncodedBody,
+    SettingsEquality,
+    is_json_content_type,
+)
 from fanferro.errors import DecodeError, EncodeError
 
 __all__ = ["ProtobufCodec"]
@@ -18,7 +24,7 @@ def _message_class() -> Any:
     return getattr(module, "Message", None)
 
 
-class ProtobufCodec:
+class ProtobufCodec(SettingsEquality):
     """Encodes protobuf messages with ``SerializeToString`` (or protobuf JSON).
 
     The default message type name of a protobuf class is its fully qualified name

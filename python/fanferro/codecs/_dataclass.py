@@ -28,6 +28,7 @@ from typing import Any
 from fanferro.codecs._base import (
     JSON_CONTENT_TYPE,
     EncodedBody,
+    SettingsEquality,
     is_json_content_type,
     loads_json,
     media_type,
@@ -397,7 +398,7 @@ def _converted(target: Any) -> bool:
 _ENCODER = json.JSONEncoder(separators=(",", ":"), ensure_ascii=False)
 
 
-class DataclassCodec:
+class DataclassCodec(SettingsEquality):
     """Encodes dataclass instances as JSON and decodes JSON into dataclasses.
 
     Nested dataclasses (generic ones too), lists, dicts (with int, float, bool or enum keys too),

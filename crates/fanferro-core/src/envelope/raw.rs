@@ -14,7 +14,7 @@ use crate::types::{AttributeValue, HeaderValue, Headers, MessageAttributes, Payl
 pub const IMPLICIT_CONTENT_TYPE: &str = "application/json";
 
 /// The raw (no envelope) format.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RawEnvelope {
     /// Attribute carrying the payload content type (`None` to omit).
     pub content_type_attribute: Option<String>,

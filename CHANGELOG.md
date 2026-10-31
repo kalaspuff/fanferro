@@ -75,6 +75,8 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 - **routing:** `functools.partial` handlers are accepted (#124)
 - **consumer:** A negative or NaN retry delay raises `ValueError` before the message is marked
   settled, so that it can still be settled (#125)
+- Declaring a topic or queue again with an equal envelope or codec (`CloudEvents()`, `JsonCodec()`)
+  returns it instead of raising `ConfigurationError` (#126)
 
 ## [0.5.0] - 2026-10-17
 
