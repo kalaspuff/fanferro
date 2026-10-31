@@ -26,6 +26,7 @@ from collections import deque
 from typing import TYPE_CHECKING, Any, Literal, Self
 
 from fanferro._core import Delivery, FanferroError, LeaseError, ShutdownError
+from fanferro._utils import optional_seconds
 from fanferro.actions import Discard, HandlerAction, Reject, Requeue, Retry
 from fanferro.codecs import is_json_content_type, media_type
 from fanferro.envelopes import CloudEvents, CloudEventsProtobuf, Envelope, Raw, default_envelopes, unwrap_first
@@ -1186,7 +1187,10 @@ class Consumer:
             error=str(error),
             error_type=type(error).__qualname__,
         )
-        delay = getattr(error, "delay", None)
+        try:
+            delay = optional_seconds(getattr(error, "delay", None), "delay")
+        except (TypeError, ValueError):
+            delay = None  # an exception's own ``delay`` attribute that is not a delay: the backoff applies
         if exhausted:
             await self._apply_action(message, action, "retries exhausted", error)  # type: ignore[arg-type]
         elif action == "dead_letter":

@@ -178,6 +178,38 @@ async def test_an_invalid_retry_delay_leaves_the_message_unsettled(client_factor
     assert errors == []
 
 
+class _DelayedError(Exception):
+    def __init__(self, delay: object) -> None:
+        super().__init__("not now")
+        self.delay = delay
+
+
+async def test_exceptions_with_an_invalid_delay_attribute_are_retried_with_the_backoff(
+    client_factory: ClientFactory, name: Any
+) -> None:
+    # The consumer takes the delay of a retry from the exception's ``delay`` attribute: one that is
+    # no delay must not break the failure handling (the message was neither settled nor reported).
+    client = client_factory()
+    queue = client.queue(name("bad-delay-error"))
+    attempts: list[int] = []
+    errors: list[fanferro.Event] = []
+    client.on("consumer.error", errors.append)
+    consumer = client.consumer(queue, wait_time=1, retry=fanferro.RetryPolicy(max_attempts=3, backoff=FAST_RETRY))
+
+    @consumer.route(OrderCreated)
+    async def handle(message: fanferro.Message[OrderCreated]) -> None:
+        attempts.append(message.attempt)
+        if message.attempt < 3:
+            raise _DelayedError(-1 if message.attempt == 1 else "soon")
+
+    async with client:
+        await queue.send(OrderCreated(order_id=1))
+        await consume_until(consumer, lambda: len(attempts) == 3)
+        await consumer.stop()
+    assert attempts == [1, 2, 3]
+    assert errors == []
+
+
 async def test_unsettled_messages_are_left_to_time_out(client_factory: ClientFactory, name: Any) -> None:
     # auto_ack=False: a message the handler does not settle comes back once its visibility timeout
     # ran out. It was released at once (and redelivered in a loop) when its delivery was dropped,
