@@ -987,6 +987,29 @@ async fn errors_carry_the_services_statuses_and_texts() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn fifo_topics_refuse_invalid_ids_instead_of_dropping_the_deliveries() {
+    // A FIFO topic accepted an id its FIFO subscribers refuse, and the delivery vanished.
+    let (_, backend) = broker();
+    let topic =
+        backend.sns.create_topic("t.fifo", &attributes(&[("FifoTopic", "true")]), &StringMap::new()).await.unwrap();
+    for (group, deduplication) in [("a b", "d"), ("g", &*"d".repeat(129))] {
+        let request = PublishRequest {
+            message: "m".into(),
+            group_id: Some(group.into()),
+            deduplication_id: Some(deduplication.into()),
+            ..PublishRequest::default()
+        };
+        let err = backend.sns.publish(&topic, request).await.unwrap_err();
+        let (code, message) = code_and_message(&err);
+        assert_eq!(code, "InvalidParameter");
+        assert!(
+            message.ends_with("can only include alphanumeric and punctuation characters. 1 to 128 in length."),
+            "{message}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn fifo_ids_are_validated_like_sqs() {
     // docs/parity M8: the broker accepted group and deduplication ids SQS refuses.
     let (_, backend) = broker();

@@ -1277,6 +1277,24 @@ fn publish_locked(inner: &Inner, state: &mut State, topic_arn: &str, request: Pu
                 "Invalid parameter: The MessageGroupId parameter is required for FIFO topics",
             ));
         }
+        // SNS refuses the ids SQS refuses (docs/parity M8; its text is open question O7).
+        for (parameter, id) in
+            [("MessageGroupId", &request.group_id), ("MessageDeduplicationId", &request.deduplication_id)]
+        {
+            if let Some(id) = id
+                && !crate::publish::is_fifo_id(id)
+            {
+                return Err(aws_error(
+                    "sns",
+                    "Publish",
+                    AwsErrorKind::InvalidRequest,
+                    "InvalidParameter",
+                    format!(
+                        "Invalid parameter: {parameter} Reason: {parameter} can only include alphanumeric and punctuation characters. 1 to 128 in length."
+                    ),
+                ));
+            }
+        }
         if deduplication_id.is_none() {
             if topic.attributes.get("ContentBasedDeduplication").map(String::as_str) == Some("true") {
                 deduplication_id = Some(content_dedup_id(&request.message));
