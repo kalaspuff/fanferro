@@ -11,7 +11,9 @@ When a handler raises:
 2. `RetryPolicy.classify(error)` (if set) may return `"retry"`, `"dead_letter"` or `"discard"`.
 3. `RetryPolicy.dead_letter_on` exceptions are dead-lettered immediately.
 4. Otherwise the message is retried, unless the attempt number reached `max_attempts`, in which
-   case `DeadLetterPolicy.on_exhausted` applies (default: dead-letter).
+   case `DeadLetterPolicy.on_exhausted` applies (default: dead-letter). `on_exhausted="retry"`
+   keeps retrying past `max_attempts`, with the backoff of each attempt, until the handler succeeds
+   (or SQS redrive moves the message).
 
 ```python
 consumer = client.consumer(
@@ -65,7 +67,7 @@ declaration, or the queue's `RedrivePolicy`. Without one, `on_missing_queue` app
 | Envelope/transport/codec cannot decode | `on_decode_error` (dead-letter) | `message.decode_failed` |
 | Transient decode failure (S3 download error) | retried with backoff | `message.decode_failed` |
 | No route matches | `on_unroutable` (dead-letter) | `message.unroutable` |
-| Attempt > `max_attempts` on receipt | `on_exhausted` (dead-letter) | `message.dead_lettered` |
+| Attempt > `max_attempts` on receipt | `on_exhausted` (dead-letter; `"retry"` runs the handler) | `message.dead_lettered` |
 | Idempotency: already processed | acked | `message.duplicate` |
 
 ## Poison messages and redrive

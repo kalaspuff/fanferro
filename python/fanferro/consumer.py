@@ -1071,7 +1071,12 @@ class Consumer:
     async def _handle(self, message: Message[Any], slot: _Slot) -> None:
         """Routes, decodes and runs the handler while holding ``slot``, then settles without it."""
         policy = self.retry_policy
-        if policy.max_attempts is not None and message.attempt > policy.max_attempts:
+        # With on_exhausted="retry", retries go on past max_attempts: the handler runs each time.
+        if (
+            policy.max_attempts is not None
+            and message.attempt > policy.max_attempts
+            and self.dead_letter_policy.on_exhausted != "retry"
+        ):
             slot.release()
             await self._apply_action(message, self.dead_letter_policy.on_exhausted, "maximum attempts exceeded", None)
             return

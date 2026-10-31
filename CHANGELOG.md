@@ -92,6 +92,8 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   count, so a consumer of the dead-letter queue sees the same attempt as on SQS (#134)
 - Subscribing a FIFO queue to a standard topic raises `ConfigurationError` when it is declared, and
   the in-memory broker refuses it like SNS, instead of failing only when provisioning on AWS (#135)
+- **consumer:** `DeadLetterPolicy(on_exhausted="retry")` runs the handler again for messages
+  received past `max_attempts` instead of retrying them forever without processing them (#136)
 
 ## [0.5.0] - 2026-10-17
 
