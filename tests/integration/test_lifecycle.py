@@ -829,3 +829,88 @@ async def test_tasks_cancelled_before_they_ran_are_forgotten(memory_client: fanf
         await queue.send(OrderCreated(order_id=2))
         await consumer.run_until_idle(idle_for=0.2, timeout=15)
     assert seen == [1, 2]
+
+
+class _WithholdingEngine:
+    """Delegates to a consumer's engine, but keeps the deliveries of one message group from the
+    dispatcher, so that stopping finds them buffered (received, not dispatched yet)."""
+
+    def __init__(self, engine: Any, group: str) -> None:
+        self._engine = engine
+        self._group = group
+        self.withheld: list[Any] = []
+
+    def __getattr__(self, attribute: str) -> Any:
+        return getattr(self._engine, attribute)
+
+    async def next_batch(self, limit: int, wait: float) -> list[Any]:
+        batch = await self._engine.next_batch(limit, wait)
+        self.withheld += [delivery for delivery in batch if delivery.group_id == self._group]
+        return [delivery for delivery in batch if delivery.group_id != self._group]
+
+    def drain_buffered(self) -> list[Any]:
+        withheld, self.withheld = self.withheld, []
+        return withheld + list(self._engine.drain_buffered())
+
+
+@pytest.mark.usefixtures("long_waits")
+async def test_buffered_fifo_messages_are_released_past_the_drain_deadline(
+    memory_client: fanferro.Client, name: Any
+) -> None:
+    # Without release_prefetched, stopping scheduled buffered deliveries even past the drain
+    # deadline, and cancelled their tasks before they ran: their group stayed in the sequencer, so
+    # after a restart the group's messages were queued behind it and never processed.
+    queue = memory_client.queue(f"{name('buffered')}.fifo")
+    seen: list[str] = []
+    blocked = asyncio.Event()
+    policy = fanferro.ShutdownPolicy(drain_timeout=0.3, cancel_timeout=1, release_prefetched=False)
+    consumer = memory_client.consumer(queue, wait_time=1, shutdown=policy)
+
+    @consumer.default
+    async def handle(message: fanferro.Message[Any]) -> None:
+        body = message.json()["id"]
+        if body == "a1" and not blocked.is_set():
+            blocked.set()
+            await asyncio.Event().wait()  # outlasts the drain deadline: cancelled and released
+        seen.append(body)
+
+    async with memory_client:
+        await consumer.start()
+        # The dispatcher has not run yet: it picks the engine up when it does.
+        engine = consumer._engine = _WithholdingEngine(consumer._engine, "b")
+        await queue.send({"id": "a1"}, group_id="a", deduplication_id="a1")
+        await queue.send({"id": "b1"}, group_id="b", deduplication_id="b1")
+        await asyncio.wait_for(blocked.wait(), 10)
+        await wait_for(lambda: len(engine.withheld) == 1)
+        await consumer.stop()
+        assert not consumer._sequencer._pending, "released, not scheduled for a task that never runs"
+        assert seen == []
+        await queue.send({"id": "b2"}, group_id="b", deduplication_id="b2")
+        await consume_until(consumer, lambda: len(seen) == 3, timeout=15)
+    assert [body for body in seen if body.startswith("b")] == ["b1", "b2"]
+
+
+@pytest.mark.usefixtures("long_waits")
+async def test_a_fifo_group_whose_task_never_ran_works_after_a_restart(
+    memory_client: fanferro.Client, name: Any
+) -> None:
+    # A group's task removes its entry from the sequencer when it ends; one cancelled before it ever
+    # ran never does, and the sequencer outlived the stop: the group's next messages were queued
+    # behind the stale entry without a task to process them.
+    queue = memory_client.queue(f"{name('stale-group')}.fifo")
+    seen: list[str] = []
+    consumer = memory_client.consumer(queue, wait_time=1)
+
+    @consumer.default
+    async def handle(message: fanferro.Message[Any]) -> None:
+        seen.append(message.json()["id"])
+
+    async with memory_client:
+        await consumer.start()
+        consumer._sequencer.submit("g", object())  # type: ignore[arg-type] - never processed
+        for task in list(consumer._tasks):
+            task.cancel()  # before it ran
+        await consumer.stop()
+        await queue.send({"id": "g1"}, group_id="g", deduplication_id="g1")
+        await consumer.run_until_idle(idle_for=0.5, timeout=15)
+    assert seen == ["g1"]

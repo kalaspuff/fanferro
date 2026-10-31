@@ -94,6 +94,10 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   the in-memory broker refuses it like SNS, instead of failing only when provisioning on AWS (#135)
 - **consumer:** `DeadLetterPolicy(on_exhausted="retry")` runs the handler again for messages
   received past `max_attempts` instead of retrying them forever without processing them (#136)
+- **consumer:** A FIFO message group no longer stays stuck after a consumer is stopped and started
+  again; with `ShutdownPolicy(release_prefetched=False)`, messages still buffered once the drain
+  deadline has passed are released (or left with `release_unfinished=False`) instead of being
+  scheduled and cancelled (#137)
 
 ## [0.5.0] - 2026-10-17
 
