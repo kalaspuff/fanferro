@@ -12,9 +12,10 @@ SNS delivery, error codes), and that the broker followed MiniStack, or neither, 
 
 ## Decision
 
-* Real AWS is the reference. The in-memory broker follows what the probes recorded on AWS
+* Real AWS is the reference. The in-memory broker is to follow what the probes recorded on AWS
   ([docs/parity](../parity/README.md)): the same outcome, error code, HTTP status and text, where
-  fanferro's users can see them.
+  fanferro's users can see them. Each difference is fixed, or recorded with the reason it stays;
+  `docs/parity` tracks which.
 * An emulator is never the reference. A behaviour an emulator does not reproduce is tested on the
   in-memory broker only, with a comment naming the finding in `docs/parity`.
 * A difference fanferro cannot remove (credentials, accounts, an emulator's bug) is recorded in
