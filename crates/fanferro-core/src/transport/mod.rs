@@ -116,8 +116,7 @@ impl Transport {
         {
             attributes.remove(reserved::ENCODING);
             // Before the upload, so that nothing is stored for a message that cannot be sent; the
-            // pointer adds one attribute.
-            validate_attributes(&attributes)?;
+            // pointer adds one attribute (counted first, so that the error gives the right limit).
             if attributes.len() >= MAX_ATTRIBUTES {
                 return Err(Error::validation(format!(
                     "a message whose payload is offloaded can carry at most {} attributes (the pointer to the payload \
@@ -127,6 +126,7 @@ impl Transport {
                     attributes.keys().cloned().collect::<Vec<_>>().join(", ")
                 )));
             }
+            validate_attributes(&attributes)?;
             let attributes_len = attributes_encoded_len(&attributes);
             if attributes_len > limit {
                 return Err(Error::MessageTooLarge { size: attributes_len, limit });
@@ -322,10 +322,13 @@ mod tests {
         // fail before anything is stored (it left an orphaned object).
         let (transport, _) = transport(Some(offload(10, PointerFormat::Fanferro)));
         let body = Bytes::from(vec![b'a'; 64]);
-        let ten: MessageAttributes = (0..10).map(|i| (format!("a{i}"), AttributeValue::string("v"))).collect();
-        let error = transport.encode(&WireMessage::new(body.clone(), ten), "id", 100_000).await.unwrap_err();
-        assert!(matches!(error, Error::Validation(_)), "{error:?}");
-        assert!(error.to_string().contains("at most 9 attributes"), "{error}");
+        for count in [10, 11] {
+            let attributes: MessageAttributes =
+                (0..count).map(|i| (format!("a{i}"), AttributeValue::string("v"))).collect();
+            let error = transport.encode(&WireMessage::new(body.clone(), attributes), "id", 100_000).await.unwrap_err();
+            assert!(matches!(error, Error::Validation(_)), "{error:?}");
+            assert!(error.to_string().contains("at most 9 attributes"), "{count}: {error}");
+        }
         let mut reserved_name = MessageAttributes::new();
         reserved_name.insert("AWS.trace".into(), AttributeValue::string("v"));
         let error = transport.encode(&WireMessage::new(body.clone(), reserved_name), "id", 100_000).await.unwrap_err();
