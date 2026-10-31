@@ -41,6 +41,9 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   `config.warning`: SNS cannot use that key and drops the messages silently. The in-memory broker
   drops such deliveries too, and gives deliveries of topics with active X-Ray tracing a parent of
   SNS's own, as SNS does (#153)
+- **payloads:** Provisioning a payload bucket with credentials S3 does not know fails with
+  `AccessDeniedError` instead of reporting the bucket as found (S3 answers `HeadBucket` with 403 for
+  both) (#154)
 
 ## [0.6.0] - 2026-10-31
 
