@@ -86,6 +86,10 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   `DeduplicationScope` is `messageGroup`, as SQS does (#130)
 - The in-memory broker wakes a waiting long poll when a visibility change makes a message visible
   sooner, so a retry after 2 s arrives after 2 s instead of when the poll ends, as on SQS (#133)
+- The in-memory broker refuses a `RedrivePolicy` SQS refuses (a missing target or one of the other
+  queue type, a `maxReceiveCount` outside 1-1000), keeps a message in its queue when the dead-letter
+  queue cannot take it, moves FIFO messages without deduplicating them, and keeps their receive
+  count, so a consumer of the dead-letter queue sees the same attempt as on SQS (#134)
 
 ## [0.5.0] - 2026-10-17
 

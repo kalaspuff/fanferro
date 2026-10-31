@@ -120,7 +120,135 @@ async fn redrive_moves_messages_to_dead_letter_queue() {
     assert_eq!(moved.len(), 1);
     assert_eq!(moved[0].body, "poison");
     assert!(moved[0].system.dead_letter_queue_source_arn.as_deref().unwrap().ends_with(":q"));
+    // SQS counts receives across all queues: two in the source queue, one in the dead-letter queue.
+    assert_eq!(moved[0].system.approximate_receive_count, 3);
+    assert!(moved[0].system.approximate_first_receive_timestamp.is_some());
     assert_eq!(broker.queue_messages(&url).unwrap().len(), 0);
+}
+
+/// Receives a message of `url` `count` times (with a visibility timeout of 1 s).
+async fn receive_times(backend: &Backend, url: &str, count: usize) {
+    for _ in 0..count {
+        assert_eq!(backend.sqs.receive_messages(receive(url, 10, Some(1))).await.unwrap().len(), 1);
+        tokio::time::advance(Duration::from_secs(2)).await;
+    }
+}
+
+fn redrive_policy(target_arn: &str, max_receive_count: &str) -> StringMap {
+    StringMap::from([(
+        "RedrivePolicy".to_string(),
+        format!(r#"{{"deadLetterTargetArn":"{target_arn}","maxReceiveCount":{max_receive_count}}}"#),
+    )])
+}
+
+#[tokio::test(start_paused = true)]
+async fn redrive_policies_are_validated_like_sqs() {
+    // Policies SQS refuses were accepted: a mistyped target made exhausted messages vanish, and a
+    // maxReceiveCount of 0 moved every message on its first receive.
+    let (_, backend) = broker();
+    let fifo = StringMap::from([("FifoQueue".to_string(), "true".to_string())]);
+    let dlq_url = backend.sqs.create_queue("dlq", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let dlq_arn = backend.sqs.get_queue_attributes(&dlq_url).await.unwrap()["QueueArn"].clone();
+    let fifo_dlq_url = backend.sqs.create_queue("dlq.fifo", &fifo, &StringMap::new()).await.unwrap();
+    let fifo_dlq_arn = backend.sqs.get_queue_attributes(&fifo_dlq_url).await.unwrap()["QueueArn"].clone();
+    let missing = dlq_arn.replace(":dlq", ":dlx");
+    for (name, policy, reason) in [
+        ("q", redrive_policy(&missing, "3"), "Dead letter target does not exist."),
+        ("q", redrive_policy(&dlq_arn, "0"), "Invalid value for maxReceiveCount: 0"),
+        ("q", redrive_policy(&dlq_arn, r#""1001""#), "Invalid value for maxReceiveCount: \"1001\""),
+        (
+            "q",
+            StringMap::from([("RedrivePolicy".to_string(), format!(r#"{{"deadLetterTargetArn":"{dlq_arn}"}}"#))]),
+            "maxReceiveCount is missing",
+        ),
+        ("q", redrive_policy(&fifo_dlq_arn, "3"), "same type of queue as the source"),
+        ("q.fifo", redrive_policy(&dlq_arn, "3"), "same type of queue as the source"),
+    ] {
+        let mut attributes = policy.clone();
+        if name.ends_with(".fifo") {
+            attributes.extend(fifo.clone());
+        }
+        let err = backend.sqs.create_queue(name, &attributes, &StringMap::new()).await.unwrap_err();
+        assert_eq!(err.aws().and_then(|aws| aws.code.as_deref()), Some("InvalidParameterValue"), "{err}");
+        assert!(err.to_string().contains(reason), "{err}");
+        // Setting it on an existing queue is refused the same way.
+        let url = backend.sqs.create_queue(name, &fifo_if(name), &StringMap::new()).await.unwrap();
+        let err = backend.sqs.set_queue_attributes(&url, &policy).await.unwrap_err();
+        assert!(err.to_string().contains(reason), "{err}");
+        backend.sqs.delete_queue(&url).await.unwrap();
+    }
+    for count in ["1", r#""1000""#] {
+        backend.sqs.create_queue("valid", &redrive_policy(&dlq_arn, count), &StringMap::new()).await.unwrap();
+        let url = backend.sqs.get_queue_url("valid", None).await.unwrap();
+        backend.sqs.delete_queue(&url).await.unwrap();
+    }
+}
+
+fn fifo_if(name: &str) -> StringMap {
+    if name.ends_with(".fifo") {
+        StringMap::from([("FifoQueue".to_string(), "true".to_string())])
+    } else {
+        StringMap::new()
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn redrive_keeps_messages_it_cannot_move() {
+    // Exhausted messages were removed before the move, so a dead-letter queue deleted first (during
+    // a teardown) or one refusing the message (a smaller MaximumMessageSize) lost them.
+    let (broker, backend) = broker();
+    let small = StringMap::from([("MaximumMessageSize".to_string(), "1024".to_string())]);
+    let dlq_url = backend.sqs.create_queue("dlq", &small, &StringMap::new()).await.unwrap();
+    let dlq_arn = backend.sqs.get_queue_attributes(&dlq_url).await.unwrap()["QueueArn"].clone();
+    let url = backend.sqs.create_queue("q", &redrive_policy(&dlq_arn, "1"), &StringMap::new()).await.unwrap();
+    let large = "x".repeat(2048);
+    backend.sqs.send_message(&url, send(&large)).await.unwrap();
+    receive_times(&backend, &url, 1).await;
+    // The dead-letter queue refuses it: it stays in the source queue, and is received again.
+    let again = backend.sqs.receive_messages(receive(&url, 10, Some(1))).await.unwrap();
+    assert_eq!(again.len(), 1);
+    assert_eq!(again[0].system.approximate_receive_count, 2);
+    assert!(broker.queue_messages(&dlq_url).unwrap().is_empty());
+    backend.sqs.delete_message_batch(&url, vec![again[0].receipt_handle.clone()]).await.unwrap();
+
+    // The dead-letter queue is gone: the message stays in the source queue.
+    backend.sqs.delete_queue(&dlq_url).await.unwrap();
+    backend.sqs.send_message(&url, send("small")).await.unwrap();
+    receive_times(&backend, &url, 1).await;
+    let left = backend.sqs.receive_messages(receive(&url, 10, Some(1))).await.unwrap();
+    assert_eq!(left.iter().map(|message| message.body.as_str()).collect::<Vec<_>>(), vec!["small"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn redrive_to_a_shared_fifo_dead_letter_queue_does_not_deduplicate() {
+    // Moves were sent with a deduplication id: the second of two copies with the same id, from
+    // two FIFO queues sharing the dead-letter queue, was dropped as a duplicate.
+    let (_, backend) = broker();
+    let fifo = StringMap::from([("FifoQueue".to_string(), "true".to_string())]);
+    let dlq_url = backend.sqs.create_queue("dlq.fifo", &fifo, &StringMap::new()).await.unwrap();
+    let dlq_arn = backend.sqs.get_queue_attributes(&dlq_url).await.unwrap()["QueueArn"].clone();
+    let mut attributes = redrive_policy(&dlq_arn, "1");
+    attributes.extend(fifo);
+    for name in ["a.fifo", "b.fifo"] {
+        let url = backend.sqs.create_queue(name, &attributes, &StringMap::new()).await.unwrap();
+        let request = SendRequest {
+            body: name.into(),
+            group_id: Some("g".into()),
+            deduplication_id: Some("same".into()),
+            ..SendRequest::default()
+        };
+        backend.sqs.send_message(&url, request).await.unwrap();
+        receive_times(&backend, &url, 1).await;
+        assert!(backend.sqs.receive_messages(receive(&url, 10, Some(1))).await.unwrap().is_empty());
+    }
+    let mut moved = Vec::new();
+    for _ in 0..2 {
+        let batch = backend.sqs.receive_messages(receive(&dlq_url, 10, Some(30))).await.unwrap();
+        let handles = batch.iter().map(|message| message.receipt_handle.clone()).collect();
+        moved.extend(batch.into_iter().map(|message| message.body));
+        backend.sqs.delete_message_batch(&dlq_url, handles).await.unwrap();
+    }
+    assert_eq!(moved, vec!["a.fifo", "b.fifo"]);
 }
 
 #[tokio::test(start_paused = true)]
