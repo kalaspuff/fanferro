@@ -28,7 +28,7 @@ from collections import deque
 from typing import TYPE_CHECKING, Any, Literal, Self
 
 from fanferro._core import Delivery, FanferroError, LeaseError, ShutdownError
-from fanferro._utils import optional_seconds
+from fanferro._utils import Duration, optional_seconds, seconds
 from fanferro.actions import Discard, HandlerAction, Reject, Requeue, Retry
 from fanferro.codecs import is_json_content_type, media_type
 from fanferro.envelopes import CloudEvents, CloudEventsProtobuf, Envelope, Raw, default_envelopes, unwrap_first
@@ -368,23 +368,23 @@ class Consumer:
         prefetch: int | None = None,
         batch_size: int = 10,
         min_receive_batch: int | None = None,
-        receive_batch_wait: float = 0.1,
-        wait_time: float = 20.0,
+        receive_batch_wait: Duration = 0.1,
+        wait_time: Duration = 20.0,
         pollers: int = 1,
         max_pollers: int | None = None,
         rate_limit: RateLimit | float | None = None,
-        visibility_timeout: float | None = None,
+        visibility_timeout: Duration | None = None,
         heartbeat: Heartbeat | bool = True,
         retry: RetryPolicy | None = None,
         dead_letter: DeadLetterPolicy | None = None,
         shutdown: ShutdownPolicy | None = None,
-        handler_timeout: float | None = None,
+        handler_timeout: Duration | None = None,
         ordering: Literal["auto", "fifo", "none"] = "auto",
         strict_ordering: bool = True,
         envelopes: Sequence[Envelope] | None = None,
         middleware: Sequence[ConsumeMiddleware] = (),
         auto_ack: bool = True,
-        settle_linger: float = 0.005,
+        settle_linger: Duration = 0.005,
         sns_unwrap: bool = True,
         auto_confirm_subscriptions: bool = False,
         delete_offloaded_payloads: bool = False,
@@ -397,16 +397,25 @@ class Consumer:
             raise ValueError("batch_size must be between 1 and 10")
         if min_receive_batch is not None and not 1 <= min_receive_batch <= batch_size:
             raise ValueError(f"min_receive_batch must be between 1 and batch_size ({batch_size})")
-        if not 0 <= receive_batch_wait <= 20:
-            raise ValueError("receive_batch_wait must be between 0 and 20 seconds")
-        if not 0 <= wait_time <= 20:
-            raise ValueError("wait_time must be between 0 and 20 seconds")
+        receive_batch_wait = seconds(receive_batch_wait, "receive_batch_wait")
+        if receive_batch_wait > 20:
+            raise ValueError(f"receive_batch_wait must be between 0 and 20 seconds, got {receive_batch_wait}")
+        wait_time = seconds(wait_time, "wait_time")
+        if wait_time > 20:
+            raise ValueError(f"wait_time must be between 0 and 20 seconds, got {wait_time}")
+        visibility_timeout = optional_seconds(visibility_timeout, "visibility_timeout")
+        if visibility_timeout is not None and visibility_timeout > 43200:
+            raise ValueError(f"visibility_timeout must be between 0 and 43200 seconds, got {visibility_timeout}")
+        handler_timeout = optional_seconds(handler_timeout, "handler_timeout")
+        if handler_timeout is not None and handler_timeout <= 0:
+            raise ValueError(f"handler_timeout must be positive (or None), got {handler_timeout}")
         if not 1 <= pollers <= 64:
             raise ValueError("pollers must be between 1 and 64")
         if max_pollers is not None and not pollers <= max_pollers <= 64:
             raise ValueError(f"max_pollers must be between pollers ({pollers}) and 64")
-        if not 0 <= settle_linger <= 1:
-            raise ValueError("settle_linger must be between 0 and 1 second")
+        settle_linger = seconds(settle_linger, "settle_linger")
+        if settle_linger > 1:
+            raise ValueError(f"settle_linger must be between 0 and 1 second, got {settle_linger}")
         self._client = client
         self.queue = queue
         self.router = router
@@ -721,12 +730,15 @@ class Consumer:
                 for sig in installed:
                     loop.remove_signal_handler(sig)
 
-    async def run_until_idle(self, *, idle_for: float = 0.3, timeout: float = 30.0) -> None:
+    async def run_until_idle(self, *, idle_for: Duration = 0.3, timeout: Duration = 30.0) -> None:
         """Processes messages until nothing has happened for ``idle_for`` seconds, then stops.
 
         Intended for tests and batch jobs. Raises :class:`TimeoutError` if the queue does not go
-        idle within ``timeout`` seconds (the consumer is stopped either way).
+        idle within ``timeout`` seconds (the consumer is stopped either way). Both take seconds or
+        a ``timedelta``.
         """
+        idle_for = seconds(idle_for, "idle_for")
+        timeout = seconds(timeout, "timeout")
         if self._state != "running":
             await self.start()
         deadline = time.monotonic() + timeout
@@ -752,7 +764,7 @@ class Consumer:
         finally:
             await self.stop()
 
-    async def stop(self, *, drain_timeout: float | Any | None = ..., abort_receives: bool | None = None) -> None:
+    async def stop(self, *, drain_timeout: Duration | Any | None = ..., abort_receives: bool | None = None) -> None:
         """Gracefully stops the consumer (see :class:`~fanferro.ShutdownPolicy`).
 
         A consumer that is starting is stopped as soon as its start completed. While a stop is in
@@ -760,9 +772,12 @@ class Consumer:
         then cuts it short (``drain_timeout=0`` stops waiting for handlers at once).
 
         Args:
-            drain_timeout: Overrides the policy's drain timeout (``None`` waits forever).
+            drain_timeout: Overrides the policy's drain timeout (seconds or a ``timedelta``; ``None``
+                waits forever).
             abort_receives: Overrides the policy's ``abort_receives``.
         """
+        if drain_timeout is not ...:
+            drain_timeout = optional_seconds(drain_timeout, "drain_timeout")
         if self._state == "starting" and self._starting is not None:
             await asyncio.shield(self._starting)
         if self._state == "running":

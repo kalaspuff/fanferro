@@ -137,6 +137,9 @@ possible 2,000 messages per second, where a single receive loop reached 450. Wit
 strict bound, and the extra loops only use its free slots
 ([ADR 0012](../adr/0012-receives-follow-the-backlog.md)).
 
+Options in seconds also take a `timedelta` (`handler_timeout=timedelta(minutes=5)`); values out of
+range raise `ValueError` when the consumer is created.
+
 Acks and retries are sent in batch calls (`DeleteMessageBatch`, `ChangeMessageVisibilityBatch`)
 of up to ten messages: a batch goes out as soon as it is full, also while earlier calls are still in
 flight, or `settle_linger` after its first settlement. When every running handler awaits an

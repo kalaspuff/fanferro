@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
+from fanferro._utils import Duration, seconds
 from fanferro.messages import BatchFailure, PreparedMessage, PublishResult
 
 if TYPE_CHECKING:
@@ -326,7 +327,7 @@ class OutboxRelay:
         client: The fanferro client.
         store: The outbox store.
         batch_size: Records claimed per round.
-        poll_interval: Pause after an empty round (seconds).
+        poll_interval: Pause after an empty round (seconds or a ``timedelta``).
         max_attempts: Failed attempts for good before a record is given up (``None``: retry it
             forever).
     """
@@ -337,7 +338,7 @@ class OutboxRelay:
         store: OutboxStore,
         *,
         batch_size: int = 50,
-        poll_interval: float = 1.0,
+        poll_interval: Duration = 1.0,
         max_attempts: int | None = 10,
     ) -> None:
         if max_attempts is not None and max_attempts < 1:
@@ -345,7 +346,7 @@ class OutboxRelay:
         self.client = client
         self.store = store
         self.batch_size = batch_size
-        self.poll_interval = poll_interval
+        self.poll_interval = seconds(poll_interval, "poll_interval")
         self.max_attempts = max_attempts
         self._stopped = asyncio.Event()
         self._warned_store = False

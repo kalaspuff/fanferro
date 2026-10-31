@@ -33,9 +33,11 @@ __all__ = [
 ]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class Backoff:
     """Retry delays: ``initial * multiplier ** (attempt - 1)``, capped at ``maximum``.
+
+    Delays are given in seconds or as a ``timedelta`` and kept as float seconds.
 
     Attributes:
         initial: Delay before the first retry (seconds).
@@ -46,19 +48,27 @@ class Backoff:
             retries after an outage).
     """
 
-    initial: float = 1.0
-    maximum: float = 300.0
-    multiplier: float = 2.0
-    jitter: bool = True
+    initial: float
+    maximum: float
+    multiplier: float
+    jitter: bool
 
-    def __post_init__(self) -> None:
-        if self.initial < 0 or self.maximum < 0 or self.multiplier < 1:
-            raise ValueError("backoff delays must be non-negative and the multiplier at least 1")
+    def __init__(
+        self, initial: Duration = 1.0, maximum: Duration = 300.0, multiplier: float = 2.0, jitter: bool = True
+    ) -> None:
+        if isinstance(multiplier, bool) or not isinstance(multiplier, int | float):
+            raise TypeError(f"multiplier must be a number, got {type(multiplier).__name__}")
+        if not multiplier >= 1:  # also NaN
+            raise ValueError(f"multiplier must be at least 1, got {multiplier!r}")
+        object.__setattr__(self, "initial", seconds(initial, "initial"))
+        object.__setattr__(self, "maximum", seconds(maximum, "maximum"))
+        object.__setattr__(self, "multiplier", multiplier)
+        object.__setattr__(self, "jitter", jitter)
 
     @classmethod
     def exponential(cls, initial: Duration = 1.0, maximum: Duration = 300.0, multiplier: float = 2.0) -> Backoff:
         """Exponential backoff with jitter."""
-        return cls(seconds(initial, "initial"), seconds(maximum, "maximum"), multiplier)
+        return cls(initial, maximum, multiplier)
 
     @classmethod
     def constant(cls, delay: Duration) -> Backoff:
@@ -164,7 +174,7 @@ class DeadLetterPolicy:
     include_error: bool = True
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class ShutdownPolicy:
     """Graceful shutdown of a consumer.
 
@@ -183,20 +193,35 @@ class ShutdownPolicy:
        ``consumer.draining`` event reports progress every ``progress_interval`` seconds.
     3. Still-running handlers are cancelled and get ``cancel_timeout`` seconds to unwind.
     4. Unfinished messages are released (``release_unfinished``) or left to time out.
+
+    The timeouts are given in seconds or as a ``timedelta`` and kept as float seconds.
     """
 
-    drain_timeout: float | None = 30.0
-    cancel_timeout: float = 10.0
-    progress_interval: float = 5.0
-    release_unfinished: bool = True
-    release_prefetched: bool = True
-    abort_receives: bool = True
+    drain_timeout: float | None
+    cancel_timeout: float
+    progress_interval: float
+    release_unfinished: bool
+    release_prefetched: bool
+    abort_receives: bool
 
-    def __post_init__(self) -> None:
-        if self.drain_timeout is not None and self.drain_timeout < 0:
-            raise ValueError("drain_timeout must be non-negative or None")
-        if self.cancel_timeout < 0 or self.progress_interval <= 0:
-            raise ValueError("cancel_timeout must be non-negative and progress_interval positive")
+    def __init__(
+        self,
+        drain_timeout: Duration | None = 30.0,
+        cancel_timeout: Duration = 10.0,
+        progress_interval: Duration = 5.0,
+        release_unfinished: bool = True,
+        release_prefetched: bool = True,
+        abort_receives: bool = True,
+    ) -> None:
+        interval = seconds(progress_interval, "progress_interval")
+        if interval <= 0:
+            raise ValueError(f"progress_interval must be positive, got {progress_interval!r}")
+        object.__setattr__(self, "drain_timeout", seconds(drain_timeout, "drain_timeout"))
+        object.__setattr__(self, "cancel_timeout", seconds(cancel_timeout, "cancel_timeout"))
+        object.__setattr__(self, "progress_interval", interval)
+        object.__setattr__(self, "release_unfinished", release_unfinished)
+        object.__setattr__(self, "release_prefetched", release_prefetched)
+        object.__setattr__(self, "abort_receives", abort_receives)
 
 
 @dataclass(frozen=True, slots=True)

@@ -104,7 +104,8 @@ Consumer options: `concurrency`, `prefetch`, `batch_size`, `min_receive_batch`,
 `heartbeat`, `retry`, `dead_letter`, `shutdown`, `handler_timeout`, `ordering`, `strict_ordering`,
 `envelopes`, `middleware`, `auto_ack`, `settle_linger`, `sns_unwrap`, `auto_confirm_subscriptions`,
 `delete_offloaded_payloads`, `name`. For throughput, raise `concurrency`: receives follow (extra
-receive loops run while receives come back full), so `pollers` rarely needs changing.
+receive loops run while receives come back full), so `pollers` rarely needs changing. Options and policy fields in seconds (and `delay=` in
+publishes, `Retry`, `Requeue` and settlements) also take a `timedelta`.
 
 ## Credentials and region
 

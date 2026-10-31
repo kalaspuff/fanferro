@@ -14,7 +14,7 @@ from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Literal
 
 from fanferro._core import Payload, Transport
-from fanferro._utils import LoopLocal
+from fanferro._utils import LoopLocal, optional_seconds
 from fanferro.errors import ConfigurationError, ResourceUnavailableError, ValidationError
 from fanferro.events import EventKind
 from fanferro.messages import (
@@ -276,7 +276,8 @@ class _Destination(_Resource):
             message_type=message_type,
             group_id=message.group_id,
             deduplication_id=message.deduplication_id,
-            delay=message.delay,
+            # Middleware may have set a timedelta after the message was created.
+            delay=optional_seconds(message.delay, "delay"),
             sns_subject=message.sns_subject,
             trace_header=message.trace_header,
         )
