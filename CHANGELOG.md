@@ -113,7 +113,7 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 
 ### Features
 
-- **payloads:** Client(bucket_prefix=...) prefixes the buckets of large payloads per environment (#132) (#132)
+- **payloads:** `Client(bucket_prefix=...)` prefixes the buckets of large payloads per environment (#132)
 
 ### Documentation
 
