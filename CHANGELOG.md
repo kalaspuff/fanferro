@@ -117,8 +117,8 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 
 ### Documentation
 
-- Agents that can push open their own pull requests (#56) (#56)
-- Changelog entries for the bug fixes since 0.5.0 (#119) (#119)
+- Agents that can push open their own pull requests (#56)
+- Changelog entries for the bug fixes since 0.5.0 (#119)
 
 ### Tests
 
