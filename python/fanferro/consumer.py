@@ -51,6 +51,8 @@ type ConsumerState = Literal["created", "starting", "running", "stopping", "stop
 
 _MAX_VISIBILITY_DELAY = 12 * 3600 - 60
 _MAX_REQUEUE_DELAY = 900.0
+_MAX_ATTRIBUTES = 10
+"""Message attributes SQS allows (a requeued copy needs one for ``fanferro.attempt``)."""
 _MAX_HANDED_BACK = 10_000
 """Messages whose hand-backs a consumer remembers (the oldest are forgotten first)."""
 _DELIVERY_WAIT = 0.5
@@ -63,6 +65,28 @@ class Duplicate(Discard):
 
     def __init__(self, reason: str = "duplicate message") -> None:
         super().__init__(reason)
+
+
+class _Postpone(HandlerAction):
+    """Hands a message back unprocessed for ``delay`` seconds, without spending a processing attempt.
+
+    Raised by the idempotency middleware for messages whose claim is held elsewhere.
+
+    Standard queues get a copy that keeps the attempt number (which also resets SQS's receive count
+    for a ``RedrivePolicy``); FIFO queues, and messages without room for ``fanferro.attempt``, change
+    the visibility, and only the consumer that postponed the message knows it was no attempt.
+    """
+
+    def __init__(self, reason: str, *, delay: float) -> None:
+        super().__init__(reason)
+        self.delay = delay
+
+
+def _report_error(message: Message[Any], text: str, error: BaseException) -> None:
+    """Reports an error of middleware that does not fail the message (``consumer.error``)."""
+    settler = message._settler
+    if isinstance(settler, _Settler):
+        settler._consumer._emit(EventKind.CONSUMER_ERROR, text, message=message, exception=error)
 
 
 class _Stats:
@@ -1169,6 +1193,9 @@ class Consumer:
                 EventKind.MESSAGE_FAILED, "handler failed after settling the message", message=message, exception=error
             )
             return
+        if isinstance(error, _Postpone):
+            await self._postpone(message, error.delay)
+            return
         if isinstance(error, Duplicate):
             self._stats.duplicates += 1
             self._emit(EventKind.MESSAGE_DUPLICATE, "duplicate message skipped", message=message)
@@ -1214,6 +1241,39 @@ class Consumer:
             await self._settle_safely(message, "discard", error, reason=str(error) or "discarded")
         else:
             await self._settle_safely(message, "retry", error, delay=delay)
+
+    async def _postpone(self, message: Message[Any], delay: float) -> None:
+        """Hands ``message`` back for ``delay`` seconds without spending a processing attempt."""
+        if message.settled or message.delivery is None:
+            return
+        delivery = message.delivery
+        attributes = message.raw_attributes
+        copy = not self._fifo and (len(attributes) < _MAX_ATTRIBUTES or "fanferro.attempt" in attributes)
+        message._begin("requeued" if copy else "retried")
+        try:
+            if copy:
+                # The copy's receive is attempt (attempt - 1) + 1: the same attempt as this one.
+                attempt = message.attempt - 1
+                await self._settler._call(
+                    message, lambda delivery: delivery.requeue(attempt, min(delay, _MAX_REQUEUE_DELAY))
+                )
+            else:
+                self._note_handed_back(delivery)  # its next receive here is not an attempt
+                await self._settler._call(message, lambda delivery: delivery.nack(min(delay, _MAX_VISIBILITY_DELAY)))
+        except (LeaseError, ShutdownError) as settle_error:
+            self._emit(
+                EventKind.MESSAGE_ACK_FAILED,
+                "could not postpone message; it will be redelivered",
+                message=message,
+                exception=settle_error,
+            )
+        except FanferroError as settle_error:
+            self._emit(
+                EventKind.CONSUMER_ERROR,
+                "failed to postpone message; it will be redelivered after its visibility timeout",
+                message=message,
+                exception=settle_error,
+            )
 
     async def _apply_action(
         self, message: Message[Any], action: FailureAction, reason: str, error: BaseException | None

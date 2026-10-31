@@ -69,6 +69,7 @@ declaration, or the queue's `RedrivePolicy`. Without one, `on_missing_queue` app
 | No route matches | `on_unroutable` (dead-letter) | `message.unroutable` |
 | Attempt > `max_attempts` on receipt | `on_exhausted` (dead-letter; `"retry"` runs the handler) | `message.dead_lettered` |
 | Idempotency: already processed | acked | `message.duplicate` |
+| Idempotency: claimed elsewhere (in progress, or its worker crashed) | postponed by `retry_delay`, not counted as an attempt | `message.requeued` (FIFO: `message.retry_scheduled`) |
 | Offloaded payload missing, with `delete_offloaded_payloads=True` | acked as already processed | `message.duplicate` |
 
 ## Poison messages and redrive
