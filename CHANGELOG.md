@@ -60,6 +60,18 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 - `Number` attributes with more than 38 significant digits raise `ValidationError` before sending,
   as SQS refuses them; the in-memory broker refuses them with SQS's text (#160)
 
+### Documentation
+
+- How real AWS, MiniStack, LocalStack and the in-memory broker differ, as measured by
+  `scripts/probe_backends.py` and `scripts/probe_aws_cli.sh` on all four, with every finding and
+  what fanferro did about it: [Parity with AWS](docs/parity/README.md), summarised in the README
+  (#145, #157, #161)
+
+### Build and CI
+
+- GitHub releases of 0.x versions are full releases, no longer pre-releases; an older tag released
+  again does not become the latest release (#161)
+
 ## [0.6.0] - 2026-10-31
 
 ### Behaviour changes
