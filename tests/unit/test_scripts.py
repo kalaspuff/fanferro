@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -136,16 +137,76 @@ def test_release_merges_hand_written_entries_with_generated_ones(
     )
     changelog.write_text(CHANGELOG.format(unreleased=unreleased).replace("0.2.0", "0.1.1"))
     generated = (
-        "## [0.3.0] - 2026-10-11\n\n### Features\n\n- Thing (#7) (#7)\n\n### Bug fixes\n\n"
-        "- **consumer:** Fixed (#8) (#8)\n- Also fixed (#9) (#9)\n- Another fix (#10) (#10)\n\n"
-        "### Documentation\n\n- Docs for the fix (#9) (#9)"
+        "## [0.3.0] - 2026-10-11\n\n### Features\n\n- Thing (#7)\n\n### Bug fixes\n\n"
+        "- **consumer:** Fixed (#8)\n- Also fixed (#9)\n- Another fix (#10) (#10)\n\n"
+        "### Documentation\n\n- Docs for the fix (#9)"
     )
     release.update_changelog("0.3.0", generated=generated)
     notes = load("release_notes").section(changelog.read_text(), "0.3.0")
     assert notes == (
         "### Behaviour changes\n\n- Changed.\n\n### Bug fixes\n\n"
         "- **consumer:** Fixed, as described by hand (#8)\n- Also fixed by hand (#9)\n- Another fix (#10) (#10)\n\n"
-        "### Features\n\n- Thing (#7) (#7)"
+        "### Features\n\n- Thing (#7)"
+    )
+
+
+def _cliff_commit(message: str, group: str, pr_number: int | None) -> dict[str, object]:
+    remote = {
+        "username": None,
+        "pr_author": None,
+        "pr_title": None,
+        "pr_number": pr_number,
+        "pr_numbers": [pr_number] if pr_number else [],
+        "pr_labels": [],
+        "is_first_time": False,
+    }
+    no_remote = {**remote, "pr_number": None, "pr_numbers": []}
+    person = {"name": "a", "email": "a@example.com", "timestamp": 0}
+    return {
+        "id": message,
+        "message": message,
+        "group": group,
+        "scope": None,
+        "breaking": False,
+        "links": [],
+        "conventional": True,
+        "merge_commit": False,
+        "author": person,
+        "committer": person,
+        "remote": remote,
+        "github": remote,
+        **dict.fromkeys(("gitlab", "gitea", "bitbucket", "azure_devops"), no_remote),
+    }
+
+
+@pytest.mark.skipif(shutil.which("uvx") is None, reason="needs uvx to run git-cliff")
+def test_changelog_template_lists_each_pull_request_once(tmp_path: Path) -> None:
+    # With a GitHub token (as in the "Prepare release" workflow) git-cliff knows each commit's pull
+    # request, and the subjects of squash merges end with its number already.
+    context = [
+        {
+            "version": "v0.3.0",
+            "timestamp": 0,
+            "commits": [
+                _cliff_commit("fix the thing (#5)", "<!-- 1 -->Bug fixes", 5),
+                _cliff_commit("add the other thing", "<!-- 0 -->Features", 7),
+                _cliff_commit("pushed directly", "<!-- 0 -->Features", None),
+            ],
+            "submodule_commits": {},
+            **{key: {"contributors": []} for key in ("github", "gitlab", "gitea", "bitbucket", "azure_devops")},
+        }
+    ]
+    path = tmp_path / "context.json"
+    path.write_text(json.dumps(context))
+    result = subprocess.run(
+        ["uvx", load("release").GIT_CLIFF, "--config", "cliff.toml", "--from-context", str(path), "--strip", "all"],
+        cwd=SCRIPTS.parent,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout.strip().partition("\n")[2].strip() == (
+        "### Features\n\n- Add the other thing (#7)\n- Pushed directly\n\n### Bug fixes\n\n- Fix the thing (#5)"
     )
 
 
