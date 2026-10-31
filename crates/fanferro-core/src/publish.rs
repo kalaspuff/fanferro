@@ -442,14 +442,19 @@ impl Client {
             backoff: self.inner.config.publish_retry.backoff()?,
             max_attempts: self.inner.config.publish_retry.max_attempts.max(1),
         };
+        let by_trace_header = self.inner.config.split_batches_by_trace_header && destination.service() == "sns";
+        let chunks = if by_trace_header {
+            chunk_by_trace_header(pending, destination.is_fifo(), destination.max_message_size())
+        } else {
+            chunk_by_size(pending, destination.max_message_size())
+        };
         if destination.is_fifo() {
             // One batch call at a time, and the retries of a batch before the next batch: entries
             // sent later must not overtake earlier ones of their message group.
-            for chunk in chunk_by_size(pending, destination.max_message_size()) {
+            for chunk in chunks {
                 self.send_with_retries(destination, vec![chunk], 1, &retry, &mut results).await;
             }
         } else {
-            let chunks = chunk_by_size(pending, destination.max_message_size());
             self.send_with_retries(destination, chunks, MAX_CONCURRENT_BATCH_CALLS, &retry, &mut results).await;
         }
         let results: Vec<Result<Receipt>> = results
@@ -576,6 +581,30 @@ fn chunk_by_size(entries: Vec<(usize, Prepared)>, max_total: usize) -> Vec<Vec<(
         chunks.push(current);
     }
     chunks
+}
+
+/// Batch calls whose entries have the same trace header, each [`chunk_by_size`]: runs of
+/// consecutive entries when `ordered` (FIFO: the chunks are sent in order), otherwise one group per
+/// header, in the order of first appearance.
+fn chunk_by_trace_header(
+    entries: Vec<(usize, Prepared)>,
+    ordered: bool,
+    max_total: usize,
+) -> Vec<Vec<(usize, Prepared)>> {
+    let mut groups: Vec<Vec<(usize, Prepared)>> = Vec::new();
+    for entry in entries {
+        let header = entry.1.trace_header.as_deref();
+        let group = if ordered {
+            groups.last_mut().filter(|group| group[0].1.trace_header.as_deref() == header)
+        } else {
+            groups.iter_mut().find(|group| group[0].1.trace_header.as_deref() == header)
+        };
+        match group {
+            Some(group) => group.push(entry),
+            None => groups.push(vec![entry]),
+        }
+    }
+    groups.into_iter().flat_map(|group| chunk_by_size(group, max_total)).collect()
 }
 
 #[cfg(test)]

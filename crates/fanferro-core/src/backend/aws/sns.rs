@@ -27,7 +27,7 @@ impl AwsSns {
         Self { client }
     }
 
-    /// One `PublishBatch` call, with `trace_header` as the request's `X-Amzn-Trace-Id` header.
+    /// A `PublishBatch` call, with `trace_header` as the request's `X-Amzn-Trace-Id` header.
     async fn publish_batch_call(
         &self,
         topic_arn: &str,
@@ -171,91 +171,8 @@ impl SnsApi for AwsSns {
     }
 
     async fn publish_batch(&self, topic_arn: &str, entries: Vec<PublishRequest>) -> Result<BatchResult<PublishOutput>> {
-        // PublishBatch has no trace header per entry, only the request's: entries with different
-        // headers are sent in separate calls. On FIFO topics, runs of consecutive entries, one call
-        // after the other (stopping at a failed call), so that no message overtakes an earlier one;
-        // on standard topics, one call per header, all at once.
-        let fifo = topic_arn.ends_with(".fifo");
-        let count = entries.len();
-        let mut groups: Vec<(Option<String>, Vec<usize>, Vec<PublishRequest>)> = Vec::new();
-        for (index, entry) in entries.into_iter().enumerate() {
-            let group = if fifo {
-                groups.last_mut().filter(|(header, ..)| *header == entry.trace_header)
-            } else {
-                groups.iter_mut().find(|(header, ..)| *header == entry.trace_header)
-            };
-            match group {
-                Some((_, indices, requests)) => {
-                    indices.push(index);
-                    requests.push(entry);
-                }
-                None => groups.push((entry.trace_header.clone(), vec![index], vec![entry])),
-            }
-        }
-        if groups.len() <= 1 {
-            let (header, _, requests) = groups.pop().unwrap_or_default();
-            return self.publish_batch_call(topic_arn, header, requests).await;
-        }
-        let mut results: Vec<Option<std::result::Result<PublishOutput, BatchEntryError>>> =
-            (0..count).map(|_| None).collect();
-        let mut outcomes = Vec::with_capacity(groups.len());
-        if fifo {
-            let mut failed: Option<Error> = None;
-            for (header, indices, requests) in groups {
-                let outcome = match &failed {
-                    // Not sent: retried together with the failed call's entries, in order.
-                    Some(err) => Err(err.clone()),
-                    None => self.publish_batch_call(topic_arn, header, requests).await,
-                };
-                if let Err(err) = &outcome {
-                    failed.get_or_insert_with(|| err.clone());
-                }
-                outcomes.push((indices, outcome));
-            }
-        } else {
-            let calls = groups.into_iter().map(|(header, indices, requests)| async move {
-                (indices, self.publish_batch_call(topic_arn, header, requests).await)
-            });
-            outcomes = futures::future::join_all(calls).await;
-        }
-        // Nothing was published: the batch failed as a whole.
-        if outcomes.iter().all(|(_, outcome)| outcome.is_err())
-            && let Some((_, Err(err))) = outcomes.first()
-        {
-            return Err(err.clone());
-        }
-        for (indices, outcome) in outcomes {
-            match outcome {
-                Ok(entries) => {
-                    for (index, entry) in indices.into_iter().zip(entries) {
-                        results[index] = Some(entry);
-                    }
-                }
-                Err(err) => {
-                    let aws = err.aws().cloned();
-                    let entry = BatchEntryError {
-                        code: aws.as_ref().and_then(|a| a.code.clone()).unwrap_or_else(|| "InternalError".into()),
-                        message: Some(err.to_string()),
-                        sender_fault: !err.is_retryable(),
-                    };
-                    for index in indices {
-                        results[index] = Some(Err(entry.clone()));
-                    }
-                }
-            }
-        }
-        Ok(results
-            .into_iter()
-            .map(|slot| {
-                slot.unwrap_or_else(|| {
-                    Err(BatchEntryError {
-                        code: "MissingBatchResult".into(),
-                        message: Some("the service returned no result for this entry".into()),
-                        sender_fault: false,
-                    })
-                })
-            })
-            .collect())
+        let trace_header = crate::backend::shared_trace_header(&entries).map(str::to_string);
+        self.publish_batch_call(topic_arn, trace_header, entries).await
     }
 
     async fn create_topic(&self, name: &str, attributes: &StringMap, tags: &StringMap) -> Result<String> {
@@ -440,9 +357,8 @@ mod tests {
     /// A `PublishBatch` request as the server saw it: its trace header and its messages.
     type Call = (Option<String>, Vec<String>);
 
-    /// Serves `PublishBatch`, recording each call, and fails the calls whose messages include
-    /// `fail` with a retryable error.
-    async fn server(fail: Option<&'static str>) -> (String, Arc<Mutex<Vec<Call>>>) {
+    /// Serves `PublishBatch`, recording each call.
+    async fn server() -> (String, Arc<Mutex<Vec<Call>>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let calls: Arc<Mutex<Vec<Call>>> = Arc::default();
@@ -482,30 +398,20 @@ mod tests {
                                 .collect::<Vec<_>>()
                         };
                         let (ids, messages) = (field(".Id"), field(".Message"));
-                        let failed = fail.is_some_and(|fail| messages.iter().any(|message| message == fail));
                         calls.lock().push((trace_header, messages));
-                        let response = if failed {
-                            let error = "<ErrorResponse><Error><Type>Receiver</Type><Code>InternalError</Code>\
-                                <Message>try again</Message></Error><RequestId>r</RequestId></ErrorResponse>";
-                            format!(
-                                "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\n\r\n{error}",
-                                error.len()
-                            )
-                        } else {
-                            let members: String = ids
-                                .iter()
-                                .map(|id| format!("<member><Id>{id}</Id><MessageId>m-{id}</MessageId></member>"))
-                                .collect();
-                            let xml = format!(
-                                "<PublishBatchResponse><PublishBatchResult><Successful>{members}</Successful><Failed/>\
-                                 </PublishBatchResult><ResponseMetadata><RequestId>r</RequestId></ResponseMetadata>\
-                                 </PublishBatchResponse>"
-                            );
-                            format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: text/xml\r\nContent-Length: {}\r\n\r\n{xml}",
-                                xml.len()
-                            )
-                        };
+                        let members: String = ids
+                            .iter()
+                            .map(|id| format!("<member><Id>{id}</Id><MessageId>m-{id}</MessageId></member>"))
+                            .collect();
+                        let xml = format!(
+                            "<PublishBatchResponse><PublishBatchResult><Successful>{members}</Successful><Failed/>\
+                             </PublishBatchResult><ResponseMetadata><RequestId>r</RequestId></ResponseMetadata>\
+                             </PublishBatchResponse>"
+                        );
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/xml\r\nContent-Length: {}\r\n\r\n{xml}",
+                            xml.len()
+                        );
                         connection.get_mut().write_all(response.as_bytes()).await.unwrap();
                     }
                 });
@@ -549,58 +455,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn batches_carry_the_trace_headers_of_their_entries() {
+    async fn a_batch_sends_the_trace_header_its_entries_share() {
         // PublishBatch has no trace header per entry: the request header was left out, so batch
         // publishes to SNS lost the X-Ray trace context that single publishes carry.
-        let (endpoint, calls) = server(None).await;
+        let (endpoint, calls) = server().await;
         let backend = sns(endpoint).await;
         let topic = "arn:aws:sns:us-east-1:000000000000:events";
         let results = backend.sns.publish_batch(topic, vec![entry("1", Some(A)), entry("2", Some(A))]).await.unwrap();
         assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 2);
         assert_eq!(sorted(&calls), vec![(Some(A.to_string()), vec!["1".to_string(), "2".to_string()])]);
-
-        // Different headers: one call per header (at once on a standard topic), results in order.
-        calls.lock().clear();
-        let entries = vec![entry("1", Some(A)), entry("2", Some(B)), entry("3", None), entry("4", Some(A))];
-        let results = backend.sns.publish_batch(topic, entries).await.unwrap();
-        let ids: Vec<String> = results.into_iter().map(|result| result.unwrap().message_id).collect();
-        assert_eq!(ids, vec!["m-0", "m-0", "m-0", "m-1"], "ids are those of each call's entries");
-        assert_eq!(
-            sorted(&calls),
-            vec![
-                (None, vec!["3".to_string()]),
-                (Some(A.to_string()), vec!["1".to_string(), "4".to_string()]),
-                (Some(B.to_string()), vec!["2".to_string()]),
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn fifo_batches_keep_their_order_across_trace_headers() {
-        let (endpoint, calls) = server(Some("3")).await;
-        let backend = sns(endpoint).await;
-        let topic = "arn:aws:sns:us-east-1:000000000000:events.fifo";
-        let entries = vec![entry("1", Some(A)), entry("2", Some(A)), entry("3", Some(B)), entry("4", Some(A))];
-        let results = backend.sns.publish_batch(topic, entries).await.unwrap();
-        // Runs of consecutive entries, one call after the other; a failed call stops the rest,
-        // which fail with its retryable error instead of overtaking it.
-        assert_eq!(
-            *calls.lock(),
-            vec![
-                (Some(A.to_string()), vec!["1".to_string(), "2".to_string()]),
-                (Some(B.to_string()), vec!["3".to_string()]),
-            ]
-        );
-        assert!(results[0].is_ok() && results[1].is_ok());
-        for result in &results[2..] {
-            let error = result.clone().unwrap_err();
-            assert_eq!(error.code, "InternalError");
-            assert!(!error.sender_fault, "retryable");
+        // Entries with different headers (or some without one): one call, without a header.
+        for entries in [vec![entry("3", Some(A)), entry("4", Some(B))], vec![entry("5", Some(A)), entry("6", None)]] {
+            calls.lock().clear();
+            backend.sns.publish_batch(topic, entries).await.unwrap();
+            assert_eq!(calls.lock().len(), 1);
+            assert_eq!(calls.lock()[0].0, None);
         }
-        // Nothing published: the batch fails as a whole.
-        calls.lock().clear();
-        let error = backend.sns.publish_batch(topic, vec![entry("3", Some(B)), entry("5", Some(A))]).await.unwrap_err();
-        assert!(error.is_retryable(), "{error:?}");
-        assert_eq!(calls.lock().len(), 1);
     }
 }

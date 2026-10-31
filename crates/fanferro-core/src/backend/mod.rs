@@ -196,6 +196,14 @@ pub struct PublishRequest {
     pub trace_header: Option<String>,
 }
 
+/// The trace header of a `PublishBatch` call: SNS takes one per request, not one per entry, so
+/// it is sent when every entry has the same one (the core splits batches by trace header when the
+/// client's `split_batches_by_trace_header` is set).
+pub(crate) fn shared_trace_header(entries: &[PublishRequest]) -> Option<&str> {
+    let first = entries.first()?.trace_header.as_deref()?;
+    entries.iter().all(|entry| entry.trace_header.as_deref() == Some(first)).then_some(first)
+}
+
 /// Result of a successful publish.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PublishOutput {

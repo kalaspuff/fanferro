@@ -100,8 +100,10 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   scheduled and cancelled (#137)
 - **codecs:** The dataclass codec decodes the `NamedTuple`, `TypedDict`, enum `Literal` and bare
   `tuple`/`set` fields it writes, instead of dead-lettering such messages (#138)
-- Batch publishes to SNS topics send the X-Ray trace header (`X-Amzn-Trace-Id`) of their entries,
-  with one `PublishBatch` call per trace header, instead of leaving it out (#139)
+- Batch publishes to SNS topics send the X-Ray trace header (`X-Amzn-Trace-Id`) when their entries
+  share it, instead of leaving it out; `Client(split_batches_by_trace_header=True)` sends entries
+  with different headers in separate calls. The in-memory broker keeps a batch's trace header only
+  when its entries share it, like SNS (#139)
 - **consumer:** A retry or a release waits for a heartbeat extension of the message that is in
   flight, which could otherwise reach SQS after it and hide the message for another visibility
   timeout (#140)
