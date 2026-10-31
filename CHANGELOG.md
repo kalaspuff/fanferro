@@ -82,6 +82,8 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   body (#128)
 - **payloads:** Legacy AWS extended client pointers (`SQSLargePayloadSize`, `MessageS3Pointer`) are read,
   and `SQSLargePayloadSize` is reserved when publishing (#129)
+- The in-memory broker deduplicates FIFO messages per message group when the queue's
+  `DeduplicationScope` is `messageGroup`, as SQS does (#130)
 
 ## [0.5.0] - 2026-10-17
 
