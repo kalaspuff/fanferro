@@ -1163,3 +1163,45 @@ async fn active_tracing_gives_deliveries_a_parent_of_sns() {
         assert!(parts[1].starts_with("Parent=") && parts[1].len() == "Parent=".len() + 16, "{received}");
     }
 }
+
+/// Starts a 20 second long poll and aborts it after a second, as a consumer that stops does.
+async fn abort_a_long_poll(backend: &Backend, url: &str) {
+    let poll = ReceiveRequest { wait_time: Duration::from_secs(20), ..receive(url, 10, None) };
+    let aborted = tokio::time::timeout(Duration::from_secs(1), backend.sqs.receive_messages(poll)).await;
+    assert!(aborted.is_err(), "the poll was still waiting");
+}
+
+#[tokio::test(start_paused = true)]
+async fn aborted_long_polls_take_messages_until_their_wait_time_ends() {
+    // docs/parity M10: SQS goes on serving a long poll whose client went away; a message sent
+    // meanwhile is received by nobody and comes back after its visibility timeout.
+    let broker = MemoryBroker::with_options("us-east-1", "000000000000", MemoryOptions { orphaned_polls: true });
+    let backend = broker.backend();
+    assert!(backend.orphaned_polls);
+    let url =
+        backend.sqs.create_queue("q", &attributes(&[("VisibilityTimeout", "5")]), &StringMap::new()).await.unwrap();
+    abort_a_long_poll(&backend, &url).await;
+    backend.sqs.send_message(&url, send("taken")).await.unwrap();
+    assert!(backend.sqs.receive_messages(receive(&url, 10, None)).await.unwrap().is_empty());
+    let stored = broker.queue_messages(&url).unwrap();
+    assert_eq!((stored[0].receive_count, stored[0].in_flight), (1, true));
+    tokio::time::advance(Duration::from_secs(5)).await;
+    let received = backend.sqs.receive_messages(receive(&url, 10, None)).await.unwrap();
+    assert_eq!(received[0].system.approximate_receive_count, 2);
+    // It took one batch; and once its wait time is over, nothing more.
+    backend.sqs.delete_message_batch(&url, vec![received[0].receipt_handle.clone()]).await.unwrap();
+    abort_a_long_poll(&backend, &url).await;
+    tokio::time::advance(Duration::from_secs(19)).await;
+    backend.sqs.send_message(&url, send("after")).await.unwrap();
+    assert_eq!(backend.sqs.receive_messages(receive(&url, 10, None)).await.unwrap().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn aborted_long_polls_end_with_the_connection_by_default() {
+    let (broker, backend) = broker();
+    assert!(!backend.orphaned_polls && broker.options() == MemoryOptions::default());
+    let url = backend.sqs.create_queue("q", &StringMap::new(), &StringMap::new()).await.unwrap();
+    abort_a_long_poll(&backend, &url).await;
+    backend.sqs.send_message(&url, send("free")).await.unwrap();
+    assert_eq!(backend.sqs.receive_messages(receive(&url, 10, None)).await.unwrap().len(), 1);
+}

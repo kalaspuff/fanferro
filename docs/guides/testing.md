@@ -50,6 +50,13 @@ use), raw and wrapped delivery, X-Ray headers of active topics, presigned URLs. 
 when it is set. Share one `MemoryBroker` between clients with `memory_client(broker=broker)`;
 inspect queues with `broker.queue_messages(url)`.
 
+A long poll that a stopping consumer aborts ends with the connection on the broker. SQS goes on
+serving it until its wait time ends, and a message sent meanwhile goes to it and stays invisible for
+its visibility timeout. `MemoryBroker(orphaned_polls=True)` models that, to test shutdowns and
+deployments as they behave on SQS; it is off by default, so that a test that stops a consumer and
+goes on at once does not wait for visibility timeouts. fanferro's consumers keep the messages they
+release while stopping out of such polls, on SQS and on such a broker.
+
 ## Against an emulator
 
 [MiniStack](https://github.com/ministackorg/ministack) runs without Docker:
