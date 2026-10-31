@@ -91,7 +91,7 @@ result = await events.publish(InvoicePaid(invoice_id="inv-1", amount_cents=1299)
 | Prepare (outbox) | `prepared = await topic.prepare(obj)`, `prepared.to_json()`, `await client.publish_prepared(prepared)` |
 | Consume | `consumer = client.consumer(queue, ...)`, `@consumer.route(Type)`, `await consumer.run()` |
 | Route | `fanferro.Router()`, `router.route(Type, when=matchers..., priority=...)`, `router.default` |
-| Settle manually | `await message.ack() / retry(delay=) / requeue() / dead_letter(reason) / release() / discard(reason)` |
+| Settle manually | `await message.ack() / retry(delay=) / requeue() / dead_letter(reason) / release() / discard(reason)` (settles when called; await the returned `Settlement` for SQS's confirmation) |
 | Observe | `client.on("message.*", hook)`, `LoggingConfig(...)`, `Telemetry(...)`, `client.metrics()` |
 | Test | `fanferro.testing.memory_client()`, `fanferro.testing.build_message(obj)`, `consumer.run_until_idle()` |
 

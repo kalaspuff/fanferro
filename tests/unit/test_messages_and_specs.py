@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 from decimal import Decimal
@@ -65,6 +66,76 @@ async def test_invalid_retry_delays_settle_nothing(delay: Any) -> None:
     await message.retry(delay=2)
     assert settler.calls == [("retry", {"delay": 2.0, "error": None})]
     assert fanferro.Retry(delay=3).delay == fanferro.Requeue(delay=3).delay == 3.0
+
+
+class _FailingSettler(RecordingSettler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate = asyncio.Event()
+        self.gate.set()
+
+    async def dead_letter(self, message: fanferro.Message[Any], reason: str, error: BaseException | None) -> None:
+        await self.gate.wait()
+        await asyncio.sleep(0)
+        raise fanferro.LeaseError("lease lost")
+
+
+async def test_settlement_methods_settle_when_called() -> None:
+    # They were coroutine functions: without ``await`` nothing happened (#179).
+    settler = RecordingSettler()
+    message = build_message({"a": 1}, settler=settler)
+    settlement = message.dead_letter("invalid")
+    assert isinstance(settlement, fanferro.Settlement)
+    assert settlement.operation == "dead_letter"
+    assert message.settled
+    assert message.outcome == "dead_lettered"
+    assert settler.calls == [("dead_letter", {"reason": "invalid", "error": None})]
+    await settlement
+    await settlement  # awaiting again is harmless
+    assert settlement.done()
+    assert "Settlement('dead_letter'" in repr(settlement)
+
+
+async def test_awaiting_a_settlement_raises_its_error() -> None:
+    message = build_message({"a": 1}, settler=_FailingSettler())
+    settlement = message.dead_letter()
+    assert message.settled
+    assert not settlement.done()
+    with pytest.raises(fanferro.LeaseError, match="lease lost"):
+        await settlement
+    assert settlement.done()
+
+
+def test_settlements_outside_an_event_loop() -> None:
+    settler = RecordingSettler()
+    message = build_message({"a": 1}, settler=settler)
+    settlement = message.discard("test")
+    assert settlement.done()
+    assert settler.calls == [("discard", {"reason": "test"})]
+    with pytest.raises(RuntimeError, match="needs a running event loop"):
+        build_message({"a": 1}, settler=_FailingSettler()).dead_letter()
+
+
+async def test_settlements_without_a_settler() -> None:
+    message = build_message({"a": 1})
+    message._settler = None
+    settlement = message.release()
+    assert settlement.done()
+    await settlement
+    assert message.outcome == "released"
+
+
+async def test_a_cancelled_wait_does_not_stop_the_settlement() -> None:
+    settler = _FailingSettler()
+    settler.gate.clear()
+    message = build_message({"a": 1}, settler=settler)
+    settlement = message.dead_letter()
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(settlement, timeout=0.01)
+    assert not settlement.done()
+    settler.gate.set()
+    with pytest.raises(fanferro.LeaseError):
+        await settlement
 
 
 def test_internal_attributes_are_hidden() -> None:

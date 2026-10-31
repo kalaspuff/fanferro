@@ -8,9 +8,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Coroutine, Generator, Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal, Protocol
@@ -37,6 +38,7 @@ __all__ = [
     "PayloadPointer",
     "PreparedMessage",
     "PublishResult",
+    "Settlement",
     "Settler",
     "attribute_python_value",
     "to_attribute_value",
@@ -143,6 +145,68 @@ class Settler(Protocol):
 _UNSET: Any = object()
 
 
+class Settlement:
+    """The confirmation of a settlement that :class:`Message` started (``message.ack()``...).
+
+    The settlement methods record the decision and start the settlement when they are called;
+    awaiting the returned object waits until SQS confirmed it and raises its error, if any. In a
+    consumer, a settlement that the handler did not await still completes: the consumer waits for
+    it after the handler returns, reports a failure as it does for automatic acks, and emits a
+    ``config.warning`` event about the missing ``await``.
+    """
+
+    __slots__ = ("_awaited", "_error", "_task", "operation")
+
+    def __init__(self, operation: str, coroutine: Coroutine[Any, Any, None] | None) -> None:
+        self.operation: str = operation
+        """The method that started the settlement (``"ack"``, ``"dead_letter"``, ``"extend"``...)."""
+        self._awaited = False
+        self._error: BaseException | None = None
+        self._task: asyncio.Task[None] | None = None
+        if coroutine is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._run_now(coroutine)
+            return
+        # Eagerly: the settlement starts (and joins the engine's batch) before the method returns.
+        # (Python < 3.14 needs the loop passed to start a task eagerly.)
+        self._task = asyncio.Task(coroutine, loop=loop, name=f"fanferro-{operation}", eager_start=True)
+
+    def _run_now(self, coroutine: Coroutine[Any, Any, None]) -> None:
+        """Runs a settlement outside an event loop (test settlers complete without suspending)."""
+        try:
+            coroutine.send(None)
+        except StopIteration:
+            return
+        except Exception as error:  # noqa: BLE001 - kept for whoever awaits the settlement
+            self._error = error
+            return
+        coroutine.close()
+        raise RuntimeError(f"message.{self.operation}() needs a running event loop")
+
+    def done(self) -> bool:
+        """Whether the settlement completed (successfully or not)."""
+        return self._task is None or self._task.done()
+
+    def __await__(self) -> Generator[Any, None, None]:
+        self._awaited = True
+        task = self._task
+        if task is None:
+            if self._error is not None:
+                raise self._error
+            return
+        if not task.done():
+            # Shielded: a handler cancelled while it waits (handler_timeout) does not stop it.
+            yield from asyncio.shield(task).__await__()
+        task.result()
+
+    def __repr__(self) -> str:
+        state = "done" if self.done() else "pending"
+        return f"Settlement({self.operation!r}, {state})"
+
+
 class Message[T]:
     """A received message.
 
@@ -153,7 +217,9 @@ class Message[T]:
 
     Handlers normally just return (the message is acked) or raise (the retry policy applies).
     The settlement methods (:meth:`ack`, :meth:`retry`, :meth:`dead_letter`, ...) settle a
-    message explicitly; once settled, the consumer does nothing further with it.
+    message explicitly; once settled, the consumer does nothing further with it. They settle the
+    message when called and return a :class:`Settlement`: ``await`` it to wait for SQS's
+    confirmation (a settlement that is not awaited still completes, see :class:`Settlement`).
     """
 
     __slots__ = (
@@ -163,6 +229,7 @@ class Message[T]:
         "_json",
         "_settled",
         "_settlement_failed",
+        "_settlements",
         "_settler",
         "_slot",
         "attributes",
@@ -207,6 +274,7 @@ class Message[T]:
         self._settler = settler
         self._settled = False
         self._settlement_failed = False  # a settlement call raised (see the consumer's _Settler)
+        self._settlements: list[Settlement] | None = None  # started by the methods below
         self._slot: Any = None  # the consumer's handler slot while the handler runs
         self._body: Any = body
         self._data: tuple[Payload, bytes] | None = None  # (payload, its data): read once per payload
@@ -236,6 +304,7 @@ class Message[T]:
         message._settler = settler
         message._settled = False
         message._settlement_failed = False
+        message._settlements = None
         message._slot = None
         message._body = _UNSET
         message._data = None
@@ -424,13 +493,25 @@ class Message[T]:
         self.outcome = outcome
         return self._settler
 
-    async def ack(self) -> None:
-        """Deletes the message: processing succeeded."""
-        settler = self._begin("acked")
-        if settler is not None:
-            await settler.ack(self)
+    def _start(self, operation: str, coroutine: Coroutine[Any, Any, None] | None) -> Settlement:
+        settlement = Settlement(operation, coroutine)
+        if settlement._task is not None:
+            if self._settlements is None:
+                self._settlements = [settlement]
+            else:
+                self._settlements.append(settlement)
+        return settlement
 
-    async def retry(self, *, delay: float | None = None, error: BaseException | None = None) -> None:
+    def ack(self) -> Settlement:
+        """Deletes the message: processing succeeded.
+
+        Like every settlement method, it settles the message when called and returns a
+        :class:`Settlement` to await for SQS's confirmation (``await message.ack()``).
+        """
+        settler = self._begin("acked")
+        return self._start("ack", settler.ack(self) if settler is not None else None)
+
+    def retry(self, *, delay: float | None = None, error: BaseException | None = None) -> Settlement:
         """Retries later (after ``delay`` seconds, or the retry policy's backoff).
 
         Raises:
@@ -438,10 +519,9 @@ class Message[T]:
         """
         delay = optional_seconds(delay, "delay")  # before _begin: an invalid delay settles nothing
         settler = self._begin("retried")
-        if settler is not None:
-            await settler.retry(self, delay, error)
+        return self._start("retry", settler.retry(self, delay, error) if settler is not None else None)
 
-    async def requeue(self, *, delay: float | None = None, error: BaseException | None = None) -> None:
+    def requeue(self, *, delay: float | None = None, error: BaseException | None = None) -> Settlement:
         """Re-enqueues a copy (attempt counter + 1) and deletes this one.
 
         Raises:
@@ -449,35 +529,31 @@ class Message[T]:
         """
         delay = optional_seconds(delay, "delay")  # before _begin: an invalid delay settles nothing
         settler = self._begin("requeued")
-        if settler is not None:
-            await settler.requeue(self, delay, error)
+        return self._start("requeue", settler.requeue(self, delay, error) if settler is not None else None)
 
-    async def dead_letter(
+    def dead_letter(
         self, reason: str = "dead-lettered by handler", *, error: BaseException | None = None
-    ) -> None:
+    ) -> Settlement:
         """Forwards the message to the dead-letter queue."""
         settler = self._begin("dead_lettered")
-        if settler is not None:
-            await settler.dead_letter(self, reason, error)
+        return self._start("dead_letter", settler.dead_letter(self, reason, error) if settler is not None else None)
 
-    async def release(self) -> None:
+    def release(self) -> Settlement:
         """Makes the message visible again immediately (no processing happened)."""
         settler = self._begin("released")
-        if settler is not None:
-            await settler.release(self)
+        return self._start("release", settler.release(self) if settler is not None else None)
 
-    async def discard(self, reason: str = "discarded by handler") -> None:
+    def discard(self, reason: str = "discarded by handler") -> Settlement:
         """Deletes the message without processing it."""
         settler = self._begin("discarded")
-        if settler is not None:
-            await settler.discard(self, reason)
+        return self._start("discard", settler.discard(self, reason) if settler is not None else None)
 
-    async def extend(self, timeout: float) -> None:
+    def extend(self, timeout: float) -> Settlement:
         """Keeps the message invisible for ``timeout`` more seconds (heartbeats do this automatically)."""
         if self._settled:
             raise RuntimeError(f"message {self.id} was already settled ({self.outcome})")
-        if self._settler is not None:
-            await self._settler.extend(self, timeout)
+        settler = self._settler
+        return self._start("extend", settler.extend(self, timeout) if settler is not None else None)
 
     def __repr__(self) -> str:
         return (

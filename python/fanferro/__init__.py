@@ -94,6 +94,7 @@ from fanferro.messages import (
     PayloadPointer,
     PreparedMessage,
     PublishResult,
+    Settlement,
 )
 from fanferro.middleware import ConsumeMiddleware, HandlerNext, PrepareNext, PublishContext, PublishMiddleware
 from fanferro.payloads import LargePayloads, PayloadFetch
@@ -191,6 +192,7 @@ __all__ = [
     "Route",
     "Router",
     "RoutingError",
+    "Settlement",
     "ShutdownError",
     "ShutdownPolicy",
     "SqsManagedEncryption",

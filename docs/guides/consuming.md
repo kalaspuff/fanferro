@@ -101,6 +101,13 @@ An explicit `await message.ack()` (or any other settlement) inside a handler res
 confirmed it, and the handler keeps its concurrency slot until then. Returning instead hands the
 slot to the next message right away; the automatic ack completes in the background.
 
+The settlement methods settle the message when they are called and return a `fanferro.Settlement`
+to await: awaiting it waits for SQS's confirmation and raises the settlement's error. A settlement
+the handler forgot to await is not lost: the consumer completes it after the handler returns (a
+FIFO group's next message waits for it as usual), reports a failure as `message.ack_failed`, and
+emits a `config.warning` naming the call. Await it anyway, to keep the handler's slot until the
+settlement is confirmed and to see its errors.
+
 ## Throughput and flow control
 
 | Option | Default | Meaning |
