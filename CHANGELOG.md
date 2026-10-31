@@ -109,7 +109,7 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 - **consumer:** A retry or a release waits for a heartbeat extension of the message that is in
   flight, which could otherwise reach SQS after it and hide the message for another visibility
   timeout (#140)
-- **consumer:** Delete_offloaded_payloads acks a copy whose payload was already deleted (#142) (#142)
+- **consumer:** `delete_offloaded_payloads` acks a copy whose payload was already deleted (#142)
 
 ### Features
 
