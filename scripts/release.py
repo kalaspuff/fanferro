@@ -7,7 +7,8 @@ While the version is 0.x, ``major`` bumps the minor version (0.4.2 → 0.5.0); p
 explicitly to leave 0.x.
 
 The changelog section for the new version is generated from conventional commits since the last
-tag with git-cliff (``cliff.toml``); notes written by hand under ``## [Unreleased]`` move into it.
+tag with git-cliff (``cliff.toml``); notes written by hand under ``## [Unreleased]`` move into it,
+and generated entries of the pull requests they mention are left out (no change is listed twice).
 If CHANGELOG.md already has a ``## [<version>] - Unreleased`` section (hand-written, e.g. for the
 first release), it is dated instead. ``scripts/release_notes.py`` turns the section into the
 GitHub release notes, so polish it in the release PR.
@@ -71,6 +72,49 @@ def generated_section(version: str) -> str:
     return result.stdout.strip()
 
 
+def _groups(text: str) -> tuple[str, list[tuple[str, list[str]]]]:
+    """The text before the first ``### `` heading, and each heading with its lines."""
+    preamble: list[str] = []
+    groups: list[tuple[str, list[str]]] = []
+    for line in text.splitlines():
+        if line.startswith("### "):
+            groups.append((line, []))
+        elif groups:
+            groups[-1][1].append(line)
+        else:
+            preamble.append(line)
+    return "\n".join(preamble).strip(), groups
+
+
+def merge_generated(manual: str, generated: str) -> str:
+    """The hand-written notes, then the generated entries they do not describe.
+
+    Generated entries of pull requests that the notes mention (``(#58)``) are left out, so that a
+    change is not listed twice, and the rest of a group whose heading the notes have too joins the
+    end of that group.
+    """
+    described = set(re.findall(r"#(\d+)\b", manual))
+    preamble, groups = _groups(manual)
+    by_heading = dict(groups)
+    for heading, lines in _groups(generated)[1]:
+        entries = [line for line in lines if line.strip() and not described & set(re.findall(r"#(\d+)\b", line))]
+        if not entries:
+            continue
+        if heading in by_heading:
+            target = by_heading[heading]
+            while target and not target[-1].strip():
+                target.pop()
+            target.extend(entries)
+        else:
+            groups.append((heading, entries))
+            by_heading[heading] = entries
+    parts = [preamble] if preamble else []
+    for heading, lines in groups:
+        body = "\n".join(lines).strip()
+        parts.append(f"{heading}\n\n{body}" if body else heading)
+    return "\n\n".join(parts)
+
+
 def update_changelog(version: str, generated: str | None = None) -> None:
     """Dates the ``[version] - Unreleased`` section or inserts one below ``[Unreleased]``.
 
@@ -91,7 +135,7 @@ def update_changelog(version: str, generated: str | None = None) -> None:
             raise SystemExit(f"CHANGELOG.md already has a section for {version}")
         generated = generated if generated is not None else generated_section(version)
         heading, _, body = (generated or f"## [{version}] - {today}").partition("\n")
-        body = "\n\n".join(part for part in (manual, body.strip()) if part) or "No user-facing changes."
+        body = merge_generated(manual, body.strip()) or "No user-facing changes."
         section = f"{heading}\n\n{body}\n\n"
         text = text[: unreleased.end()] + section + text[unreleased.end() :]
     # The [Unreleased] section is empty again.

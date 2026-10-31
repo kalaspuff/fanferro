@@ -27,6 +27,46 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   payload an earlier copy points to. Consumers read the key from the pointer, so messages published
   before the change stay readable; S3 lifecycle rules on the prefix keep working.
 
+### Bug fixes
+
+- **payloads:** Payload URL downloads no longer follow redirects, which could lead a crafted pointer
+  past `allowed_url_hosts` (#58)
+- Forked processes no longer hang in `fork()` while awaitables complete (#59)
+- **consumer:** Unsettled messages are left to time out with `auto_ack=False` or
+  `release_unfinished=False` instead of being released at once (#60)
+- **payloads:** An S3 download that breaks off is retried instead of dead-lettered (#61)
+- **codecs:** Pydantic models with field aliases decode their own messages (#62)
+- **consumer:** Stopping hides released messages only while an aborted long poll can take them (a
+  busy consumer on SQS hid them for about 20 s) (#63)
+- **consumer:** Idle consumers with a `wait_time` under a second no longer poll SQS
+  continuously (#64)
+- **provisioning:** `Provisioning.assume()` makes no API calls for subscriptions either (#65)
+- Missing AWS credentials raise `AccessDeniedError` instead of a retryable network error (#66)
+- **provisioning:** Queue policies that only allow other accounts or topics get the subscription's
+  permission (#67)
+- **payloads:** Messages over a destination's size limit are offloaded, also below the
+  threshold (#68)
+- **codecs:** The dataclass codec decodes type aliases, generic dataclasses and non-string dict
+  keys (#69)
+- **envelopes:** Raw messages whose JSON body is a CloudEvent are no longer unwrapped as one (#70)
+- A publish cancelled while its destination is looked up no longer makes the next ones fail (#71)
+- **routing:** `==` and `is_in()` match fractional `Number` attributes against float literals (#72)
+- **consumer:** `pause()` also stops a poller that waits for a free slot (#106)
+- **consumer:** Heartbeats no longer cut short an explicit `message.extend()` (#107)
+- **consumer:** Messages can be dead-lettered to a queue of the other type (FIFO or standard) (#108)
+- **provisioning:** Subscriptions can move a nested filter policy to the message body scope (#109)
+- **provisioning:** A topic declared by the ARN of another account or region is never created in the
+  client's (#110)
+- **consumer:** FIFO messages handed back unprocessed keep their retry budget (#112)
+- **outbox:** The relay gives up records that can never be published instead of stalling behind
+  them (#113)
+- **codecs:** Containers of dataclasses and msgspec structs decode into their item types (#114)
+- **payloads:** Publishing a message again with another body no longer breaks its offloaded
+  payload (#115)
+- **payloads:** A large message's attributes are validated before its payload is uploaded (#116)
+- ARNs, assumed queue URLs and presigned URL hosts follow every AWS partition (#117)
+- **routing:** `m.topic() !=` and `.is_in()` accept topic names like `==` (#118)
+
 ## [0.5.0] - 2026-10-17
 
 ### Behaviour changes

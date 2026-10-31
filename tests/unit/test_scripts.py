@@ -122,6 +122,33 @@ def test_release_inserts_the_generated_section(
         release.update_changelog("0.3.0", generated="")
 
 
+def test_release_merges_hand_written_entries_with_generated_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Hand-written entries mention their pull requests: git-cliff lists those again, and a group of
+    # both (two "Bug fixes" headings) would read badly in the release notes.
+    release = load("release")
+    changelog = tmp_path / "CHANGELOG.md"
+    monkeypatch.setattr(release, "CHANGELOG", changelog)
+    unreleased = (
+        "### Behaviour changes\n\n- Changed.\n\n### Bug fixes\n\n"
+        "- **consumer:** Fixed, as described by hand (#8)\n- Also fixed by hand (#9)\n"
+    )
+    changelog.write_text(CHANGELOG.format(unreleased=unreleased).replace("0.2.0", "0.1.1"))
+    generated = (
+        "## [0.3.0] - 2026-10-11\n\n### Features\n\n- Thing (#7) (#7)\n\n### Bug fixes\n\n"
+        "- **consumer:** Fixed (#8) (#8)\n- Also fixed (#9) (#9)\n- Another fix (#10) (#10)\n\n"
+        "### Documentation\n\n- Docs for the fix (#9) (#9)"
+    )
+    release.update_changelog("0.3.0", generated=generated)
+    notes = load("release_notes").section(changelog.read_text(), "0.3.0")
+    assert notes == (
+        "### Behaviour changes\n\n- Changed.\n\n### Bug fixes\n\n"
+        "- **consumer:** Fixed, as described by hand (#8)\n- Also fixed by hand (#9)\n- Another fix (#10) (#10)\n\n"
+        "### Features\n\n- Thing (#7) (#7)"
+    )
+
+
 def test_release_notes_of_the_current_version_exist() -> None:
     version = tomllib.loads((SCRIPTS.parent / "Cargo.toml").read_text())["workspace"]["package"]["version"]
     notes = load("release_notes").section((SCRIPTS.parent / "CHANGELOG.md").read_text(), version)
