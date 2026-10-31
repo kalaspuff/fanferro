@@ -220,7 +220,7 @@ asyncio.create_task(relay.run())  # separate worker
 ```
 
 `OutboxStore.claim_batch` must lock rows (`FOR UPDATE SKIP LOCKED`) and skip rows given up with
-`mark_abandoned` (records that keep failing for good, after `OutboxRelay(max_attempts=10)`). See
+`mark_abandoned` (records whose attempts failed for good `OutboxRelay(max_attempts=10)` times). See
 `docs/guides/patterns.md`.
 
 ## Observability
