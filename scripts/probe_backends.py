@@ -1923,7 +1923,7 @@ async def run_command(args: argparse.Namespace) -> int:
         if target.aws_protocol and not args.keep:
             deleted = await asyncio.to_thread(sweep, target, f"{PREFIX}{run}")
             if deleted:
-                print(f"cleanup deleted {len(deleted)} leftover resources")
+                print(f"cleanup deleted {len(deleted)} leftover resources: {', '.join(sorted(deleted))}")
         if process is not None:
             process.terminate()
             with contextlib.suppress(subprocess.TimeoutExpired):
