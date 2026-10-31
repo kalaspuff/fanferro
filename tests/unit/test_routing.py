@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import dataclasses
+import functools
 from typing import Any
 
 import pytest
@@ -48,6 +50,40 @@ def test_handler_inspection() -> None:
     assert inspect_handler(on_cancelled) == (Cancelled, True)
     assert inspect_handler(on_any) == (Any, True)
     assert inspect_handler(on_unannotated) == (Any, True)
+
+
+async def created_with(order: Created, db: list[Any]) -> None:
+    db.append(order)
+
+
+async def cancelled_with(db: list[Any], message: fanferro.Message[Cancelled], *, audit: bool = False) -> None:
+    db.append((message.body, audit))
+
+
+def test_partial_handlers(types: MessageTypes) -> None:
+    # The signature of a partial's __call__ is (*args, **keywords): partials were refused as
+    # handlers that do not accept the message.
+    from fanferro.routing import inspect_handler
+
+    db: list[Any] = []
+    keyword = functools.partial(created_with, db=db)
+    positional = functools.partial(cancelled_with, db)
+    nested = functools.partial(functools.partial(cancelled_with, db), audit=True)
+    assert inspect_handler(keyword) == (Created, False)
+    assert inspect_handler(positional) == (Cancelled, True)
+    assert inspect_handler(nested) == (Cancelled, True)
+    router = fanferro.Router()
+    created_route = router.add(keyword)
+    cancelled_route = router.add(nested)
+    assert created_route.name == "created_with"
+    assert cancelled_route.name == "cancelled_with"
+    assert router.resolve(build_message(Created(1)), types) is created_route
+    assert router.resolve(build_message(Cancelled(2)), types) is cancelled_route
+    asyncio.run(created_route.invoke(build_message(Created(1))))
+    asyncio.run(cancelled_route.invoke(build_message(Cancelled(2))))
+    assert db == [Created(1), (Cancelled(2), True)]
+    with pytest.raises(fanferro.RoutingError, match="created_with must accept the message"):
+        router.add(functools.partial(created_with, Created(1), db))
 
 
 def test_invalid_handlers() -> None:
@@ -105,8 +141,6 @@ def test_include_and_invoke(types: MessageTypes) -> None:
     message = build_message(Created(5))
     route = outer.resolve(message, types)
     assert route is not None
-    import asyncio
-
     asyncio.run(route.invoke(message))
     assert calls == [Created(5)]
 

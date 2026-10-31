@@ -72,6 +72,7 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   that a `jsonb` outbox column takes them (#122)
 - **events:** Awaitables returned by sync event hooks (a lambda calling an async function) are
   awaited (#123)
+- **routing:** `functools.partial` handlers are accepted (#124)
 
 ## [0.5.0] - 2026-10-17
 
