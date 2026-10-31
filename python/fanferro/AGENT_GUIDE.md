@@ -212,7 +212,10 @@ bodies above 256 KiB to S3 and sends a pointer (bucket/key and/or presigned URL)
 transparently. Add an S3 lifecycle rule on the prefix (expiring well after the queue's retention
 period). `delete_offloaded_payloads=True` (point-to-point queues only) deletes the object on ack and
 acks a copy whose object is gone as a duplicate (`message.duplicate`): it would also drop a message
-whose object expired or was deleted for another reason.
+whose object expired or was deleted for another reason. Consumers fetch presigned URLs from S3
+endpoints only (`PayloadFetch(allowed_url_hosts=[...])` for other hosts) and read any bucket a
+pointer names that their credentials allow: grant them `s3:GetObject` on the payload bucket only,
+or set `PayloadFetch(allowed_buckets=[...])`.
 
 ## Transactional outbox
 

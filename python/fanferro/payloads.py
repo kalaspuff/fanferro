@@ -132,11 +132,21 @@ class PayloadFetch:
     Attributes:
         max_bytes: Refuse payloads larger than this (protects memory).
         prefer: Try ``"s3"`` (``GetObject``) or ``"url"`` (presigned URL) first.
-        allowed_url_hosts: Hosts presigned URLs may point to (``*.example.com`` wildcards allowed).
-            Empty means AWS hosts (of the commercial and China partitions, and of the client's own
-            partition, such as ``*.amazonaws.eu``) plus the configured ``endpoint_url`` - this blocks
-            server-side request forgery through crafted messages. Redirects are not followed.
-        allow_http: Allow plain ``http://`` URLs (always allowed for the ``endpoint_url`` host).
+        allowed_url_hosts: Hosts presigned URLs may point to (``*.example.com`` wildcards allowed, any
+            port). Empty means the endpoints of S3 (path-style and virtual-hosted-style, regional,
+            dual-stack, FIPS, Transfer Acceleration, access points and S3 Express, of the commercial
+            and China partitions and of the client's own partition, such as ``amazonaws.eu``), not
+            other hosts under AWS's domains such as load balancers or EC2 instances. URLs on the
+            ``endpoint_url`` (same scheme, host and port) are allowed either way. This blocks
+            server-side request forgery through crafted messages; redirects are not followed, and a
+            pointer whose payload is fetched by URL must record its SHA-256 (fanferro always does).
+        allow_http: Allow plain ``http://`` URLs (always allowed for an ``http://`` ``endpoint_url``).
+        allowed_buckets: Buckets (their names in S3, with any ``bucket_prefix``) that pointers with
+            a bucket and key may name: consumers read payloads only from these, and
+            ``delete_offloaded_payloads`` deletes objects only in these (a pointer whose payload
+            came from its URL names a bucket and key that were not read). Empty means any bucket
+            the credentials allow: a crafted message can then have the consumer read (and, with
+            ``delete_offloaded_payloads``, delete) objects of other buckets it has access to.
         verify_checksum: Verify the recorded size and SHA-256.
     """
 
@@ -144,7 +154,13 @@ class PayloadFetch:
     prefer: Literal["s3", "url"] = "s3"
     allowed_url_hosts: Sequence[str] = field(default_factory=tuple)
     allow_http: bool = False
+    allowed_buckets: Sequence[str] = field(default_factory=tuple)
     verify_checksum: bool = True
+
+    def __post_init__(self) -> None:
+        for name in ("allowed_url_hosts", "allowed_buckets"):
+            if isinstance(getattr(self, name), str):
+                raise TypeError(f"{name} must be a list of names, not a string")
 
     def to_core(self) -> dict[str, Any]:
         """The core representation."""
@@ -153,5 +169,6 @@ class PayloadFetch:
             "prefer": self.prefer,
             "allowed_url_hosts": list(self.allowed_url_hosts),
             "allow_http": self.allow_http,
+            "allowed_buckets": list(self.allowed_buckets),
             "verify_checksum": self.verify_checksum,
         }

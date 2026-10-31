@@ -12,9 +12,11 @@
 //!   the legacy variant of the extended clients (`SQSLargePayloadSize` and a
 //!   `com.amazon.sqs.javamessaging.MessageS3Pointer` body) too.
 //!
-//! Fetching by URL is restricted to an allow-list of hosts (AWS endpoints and the
-//! configured custom endpoint by default) to prevent server-side request forgery through
-//! crafted messages, and downloads are capped at [`FetchSettings::max_bytes`].
+//! Fetching by URL is restricted to an allow-list of hosts (S3 endpoints and the configured
+//! custom endpoint by default) and to pointers that record the payload's SHA-256, to prevent
+//! server-side request forgery through crafted messages; reading by bucket and key can be
+//! restricted to [`FetchSettings::allowed_buckets`]. Downloads are capped at
+//! [`FetchSettings::max_bytes`].
 
 use std::time::Duration;
 
@@ -179,11 +181,16 @@ pub enum FetchPreference {
 pub struct FetchSettings {
     /// Maximum payload size to download.
     pub max_bytes: usize,
-    /// Hosts presigned URLs may point to (`*.example.com` wildcards allowed). Empty means
-    /// AWS hosts plus the configured custom endpoint.
+    /// Hosts presigned URLs may point to (`*.example.com` wildcards allowed, any port). Empty
+    /// means the endpoints of S3 (see [`is_s3_endpoint`]). URLs on the configured custom endpoint
+    /// (same scheme, host and port) are allowed either way.
     pub allowed_url_hosts: Vec<String>,
-    /// Allow plain `http://` URLs (always allowed for the custom endpoint host).
+    /// Allow plain `http://` URLs (always allowed for an `http://` custom endpoint).
     pub allow_http: bool,
+    /// Buckets that S3 pointers may name (exact names), to read their payloads and to delete them
+    /// ([`Transport::delete_payload`](super::Transport::delete_payload)). Empty means any bucket,
+    /// as far as the credentials allow.
+    pub allowed_buckets: Vec<String>,
     /// Preferred retrieval method.
     pub prefer: FetchPreference,
     /// Verify size and SHA-256 when the pointer records them.
@@ -196,6 +203,7 @@ impl Default for FetchSettings {
             max_bytes: 64 * 1024 * 1024,
             allowed_url_hosts: Vec::new(),
             allow_http: false,
+            allowed_buckets: Vec::new(),
             prefer: FetchPreference::S3,
             verify_checksum: true,
         }
@@ -349,13 +357,18 @@ pub async fn fetch(backend: &Backend, settings: &FetchSettings, pointer: &Payloa
         let result = match method {
             FetchPreference::S3 if has_s3 => {
                 let (Some(bucket), Some(key)) = (&pointer.bucket, &pointer.key) else { continue };
-                backend.objects.get_object(bucket, key, settings.max_bytes).await
+                match check_bucket_allowed(bucket, settings, "read") {
+                    Ok(()) => backend.objects.get_object(bucket, key, settings.max_bytes).await,
+                    Err(err) => Err(err),
+                }
             }
             FetchPreference::Url => match &pointer.url {
-                Some(url) => match check_url_allowed(url, settings, backend) {
-                    Ok(()) => backend.http.get(url, settings.max_bytes).await,
-                    Err(err) => Err(err),
-                },
+                Some(url) => {
+                    match check_url_allowed(url, settings, backend).and_then(|()| check_url_pointer(pointer)) {
+                        Ok(()) => backend.http.get(url, settings.max_bytes).await,
+                        Err(err) => Err(err),
+                    }
+                }
                 None => continue,
             },
             FetchPreference::S3 => continue,
@@ -412,7 +425,42 @@ fn host_matches(pattern: &str, host: &str) -> bool {
     }
 }
 
+/// Rejects S3 pointers to a bucket outside [`FetchSettings::allowed_buckets`], when it is set;
+/// `operation` (`read`, `delete`) is what the error says was refused.
+pub fn check_bucket_allowed(bucket: &str, settings: &FetchSettings, operation: &str) -> Result<()> {
+    if settings.allowed_buckets.is_empty() || settings.allowed_buckets.iter().any(|allowed| allowed == bucket) {
+        Ok(())
+    } else {
+        Err(Error::Payload(format!(
+            "refusing to {operation} a payload from bucket {bucket:?}: not in the allowed bucket list (configure \
+             allowed_buckets)"
+        )))
+    }
+}
+
+/// Rejects fetching by URL a pointer that does not record the payload's SHA-256.
+///
+/// fanferro writes one in every pointer with a URL (pointers of the extended clients carry no URL), so
+/// only a crafted pointer lacks it: without it, whatever the URL's host answers would become the
+/// message body.
+fn check_url_pointer(pointer: &PayloadPointer) -> Result<()> {
+    match &pointer.sha256 {
+        Some(_) => Ok(()),
+        None => Err(Error::Payload(
+            "refusing to fetch a payload by URL for a pointer without a sha256 (fanferro records one in every \
+             pointer)"
+                .into(),
+        )),
+    }
+}
+
 /// Rejects URLs that do not point to an allowed host (SSRF protection).
+///
+/// Allowed are URLs on the custom endpoint (same scheme, host and port), and those on a host of
+/// [`FetchSettings::allowed_url_hosts`] or, when that is empty, on an S3 endpoint
+/// ([`is_s3_endpoint`]) of the commercial and China partitions and of the client's own. Other
+/// hosts under AWS's domains, such as load balancers and EC2 instances, often resolve to private
+/// addresses.
 pub fn check_url_allowed(url: &str, settings: &FetchSettings, backend: &Backend) -> Result<()> {
     if url.starts_with("memory://") {
         return if backend.kind == BackendKind::Memory {
@@ -426,37 +474,105 @@ pub fn check_url_allowed(url: &str, settings: &FetchSettings, backend: &Backend)
         .host_str()
         .map(str::to_ascii_lowercase)
         .ok_or_else(|| Error::Payload("payload URL has no host".into()))?;
-    let endpoint_host = backend
+    let on_endpoint = backend
         .endpoint_url
         .as_deref()
         .and_then(|endpoint| reqwest::Url::parse(endpoint).ok())
-        .and_then(|endpoint| endpoint.host_str().map(str::to_ascii_lowercase));
-    let is_endpoint_host = endpoint_host.as_deref() == Some(host.as_str());
+        .is_some_and(|endpoint| endpoint.origin() == parsed.origin());
     match parsed.scheme() {
         "https" => {}
-        "http" if settings.allow_http || is_endpoint_host => {}
+        "http" if settings.allow_http || on_endpoint => {}
+        "http" => {
+            let port = parsed.port().map(|port| format!(":{port}")).unwrap_or_default();
+            return Err(Error::Payload(format!(
+                "refusing to fetch a payload over http:// from {host}{port}: only https is allowed, and http on \
+                 the endpoint_url's own host and port (configure allow_http)"
+            )));
+        }
         scheme => {
             return Err(Error::Payload(format!(
                 "refusing to fetch a payload over {scheme}:// (only https is allowed)"
             )));
         }
     }
-    let allowed = is_endpoint_host
-        || if settings.allowed_url_hosts.is_empty() {
-            // AWS hosts: those of the commercial and China partitions, and of the client's own.
-            let partition_suffix = arn::dns_suffix(arn::partition_for_region(&backend.region));
-            host.ends_with(".amazonaws.com")
-                || host.ends_with(".amazonaws.com.cn")
-                || host.strip_suffix(partition_suffix).is_some_and(|rest| rest.ends_with('.'))
-        } else {
-            settings.allowed_url_hosts.iter().any(|pattern| host_matches(pattern, &host))
-        };
-    if !allowed {
+    if on_endpoint {
+        return Ok(());
+    }
+    if settings.allowed_url_hosts.is_empty() {
+        let partition_suffix = arn::dns_suffix(arn::partition_for_region(&backend.region));
+        if !is_s3_endpoint(&host, partition_suffix) {
+            return Err(Error::Payload(format!(
+                "refusing to fetch a payload from host {host:?}: not an S3 endpoint{} (configure \
+                 allowed_url_hosts)",
+                if backend.endpoint_url.is_some() { " nor the endpoint_url" } else { "" }
+            )));
+        }
+    } else if !settings.allowed_url_hosts.iter().any(|pattern| host_matches(pattern, &host)) {
         return Err(Error::Payload(format!(
-            "refusing to fetch a payload from host {host:?}: not in the allowed host list (configure allowed_url_hosts)"
+            "refusing to fetch a payload from host {host:?}: not in the allowed host list (configure \
+             allowed_url_hosts)"
         )));
     }
     Ok(())
+}
+
+/// Whether `host` (lowercase) is the name of an S3 endpoint under `amazonaws.com`,
+/// `amazonaws.com.cn` or `partition_suffix` (the DNS suffix of the client's partition).
+///
+/// Path-style and virtual-hosted-style names are accepted (a bucket's or access point's labels
+/// before S3's own) in their regional (`s3.<region>`), legacy (`s3-<region>`, `s3-external-1`,
+/// `s3.amazonaws.com`), dual-stack, FIPS, Transfer Acceleration, access point, Multi-Region Access
+/// Point and S3 Express (directory bucket) forms, each with the S3 labels right before the region
+/// or the suffix: names that merely start with `s3` (a load balancer can be called so) are not. S3
+/// website, Object Lambda, Outposts and VPC endpoint (`vpce`) names are not accepted either.
+pub fn is_s3_endpoint(host: &str, partition_suffix: &str) -> bool {
+    ["amazonaws.com", "amazonaws.com.cn", partition_suffix].into_iter().any(|suffix| {
+        host.strip_suffix(suffix).and_then(|rest| rest.strip_suffix('.')).is_some_and(|rest| {
+            let labels: Vec<&str> = rest.split('.').collect();
+            !labels.contains(&"") && is_s3_labels(&labels)
+        })
+    })
+}
+
+/// The labels of an S3 endpoint name before the DNS suffix.
+fn is_s3_labels(labels: &[&str]) -> bool {
+    match labels {
+        [before @ .., region] if is_region(region) => {
+            matches!(
+                before,
+                [.., "s3" | "s3-fips" | "s3-accesspoint" | "s3-accesspoint-fips"]
+                    | [.., "s3" | "s3-fips" | "s3-accesspoint" | "s3-accesspoint-fips", "dualstack"]
+            ) || before.last().is_some_and(|label| is_s3_express_label(label))
+        }
+        [.., "s3" | "s3-accelerate" | "s3-external-1"] | [.., "s3-accelerate", "dualstack"] => true,
+        [.., "accesspoint", "s3-global"] => true,
+        [.., legacy] => {
+            legacy.strip_prefix("s3-").is_some_and(|region| is_region(region.strip_prefix("fips-").unwrap_or(region)))
+        }
+        [] => false,
+    }
+}
+
+/// `s3express-<zone id>` (`s3express-usw2-az1`), `s3express-fips-<zone id>` and
+/// `s3express-control`: S3 Express One Zone endpoints.
+fn is_s3_express_label(label: &str) -> bool {
+    label.strip_prefix("s3express-").is_some_and(|rest| {
+        !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    })
+}
+
+/// Whether `label` has the shape of an AWS region name: `us-east-1`, `us-gov-west-1`,
+/// `eusc-de-east-1`.
+fn is_region(label: &str) -> bool {
+    let parts: Vec<&str> = label.split('-').collect();
+    let [area, names @ .., number] = parts.as_slice() else { return false };
+    let letters = |part: &&str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_lowercase());
+    (2..=4).contains(&area.len())
+        && letters(area)
+        && !names.is_empty()
+        && names.iter().all(letters)
+        && !number.is_empty()
+        && number.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -582,5 +698,144 @@ mod tests {
         let mut iso = MemoryBroker::new("us-iso-east-1", "000000000000").backend();
         iso.kind = BackendKind::Aws;
         assert!(check_url_allowed("https://bucket.s3.us-iso-east-1.c2s.ic.gov/k", &defaults, &iso).is_ok());
+    }
+
+    #[test]
+    fn only_s3_endpoints_are_allowed_by_default() {
+        let mut backend = MemoryBroker::new("us-east-1", "000000000000").backend();
+        backend.kind = BackendKind::Aws;
+        let defaults = FetchSettings::default();
+        for host in [
+            "s3.amazonaws.com",
+            "bucket.s3.amazonaws.com",
+            "my.dotted.bucket.s3.amazonaws.com",
+            "s3.eu-west-1.amazonaws.com",
+            "bucket.s3.eu-west-1.amazonaws.com",
+            "bucket.s3-eu-west-1.amazonaws.com",
+            "bucket.s3-external-1.amazonaws.com",
+            "bucket.s3.dualstack.eu-west-1.amazonaws.com",
+            "bucket.s3-fips.us-east-1.amazonaws.com",
+            "bucket.s3-fips.dualstack.us-east-1.amazonaws.com",
+            "bucket.s3-fips-us-gov-west-1.amazonaws.com",
+            "bucket.s3.us-gov-west-1.amazonaws.com",
+            "bucket.s3-accelerate.amazonaws.com",
+            "bucket.s3-accelerate.dualstack.amazonaws.com",
+            "points-123456789012.s3-accesspoint.eu-west-1.amazonaws.com",
+            "points-123456789012.s3-accesspoint.dualstack.eu-west-1.amazonaws.com",
+            "points-123456789012.s3-accesspoint-fips.us-east-1.amazonaws.com",
+            "mfzwi23gnjvgw.mrap.accesspoint.s3-global.amazonaws.com",
+            "bucket--usw2-az1--x-s3.s3express-usw2-az1.us-west-2.amazonaws.com",
+            "bucket.s3.cn-north-1.amazonaws.com.cn",
+        ] {
+            let url = format!("https://{host}/key?X-Amz-Signature=1");
+            assert!(check_url_allowed(&url, &defaults, &backend).is_ok(), "{host} is an S3 endpoint");
+        }
+        for host in [
+            // Load balancers (internal ones resolve to private addresses), also when named s3-...
+            "internal-orders-1234567890.eu-west-1.elb.amazonaws.com",
+            "s3-orders-1234567890.eu-west-1.elb.amazonaws.com",
+            "dualstack.s3-orders-1234567890.eu-west-1.elb.amazonaws.com",
+            "s3-orders-0123456789abcdef.elb.eu-west-1.amazonaws.com",
+            // EC2 public DNS names resolve to private addresses inside the VPC.
+            "ec2-203-0-113-25.compute-1.amazonaws.com",
+            "ec2-203-0-113-25.eu-west-1.compute.amazonaws.com",
+            // Other services' endpoints.
+            "abcdef1234.execute-api.eu-west-1.amazonaws.com",
+            "sqs.eu-west-1.amazonaws.com",
+            "sts.amazonaws.com",
+            "mydb.abcdefghijkl.eu-west-1.rds.amazonaws.com",
+            // VPC endpoints (interface endpoints resolve to private addresses), S3's too.
+            "vpce-0123456789abcdef0-abcdefgh.execute-api.eu-west-1.vpce.amazonaws.com",
+            "bucket.vpce-0123456789abcdef0-abcdefgh.s3.eu-west-1.vpce.amazonaws.com",
+            // S3 hosts that do not serve presigned GetObject requests of a bucket.
+            "bucket.s3-website-eu-west-1.amazonaws.com",
+            "bucket.s3-website.eu-west-1.amazonaws.com",
+            "points-123456789012.s3-object-lambda.eu-west-1.amazonaws.com",
+            "points-123456789012.op-0123456789abcdef0.s3-outposts.eu-west-1.amazonaws.com",
+            // Look-alikes.
+            "s3.eu-west-1.amazonaws.com.example.com",
+            "bucket.s3.eu-west-1.evilamazonaws.com",
+            "s3.amazonaws.com.",
+            "amazonaws.com",
+            "s3..amazonaws.com",
+            "eu-west-1.amazonaws.com",
+            "bucket.s3.compute-1.amazonaws.com",
+        ] {
+            let url = format!("https://{host}/key?X-Amz-Signature=1");
+            let error = check_url_allowed(&url, &defaults, &backend).unwrap_err();
+            assert!(error.to_string().contains("not an S3 endpoint"), "{host}: {error}");
+        }
+        // Other hosts need allowed_url_hosts, which replaces the S3 endpoints.
+        let custom = FetchSettings { allowed_url_hosts: vec!["*.elb.amazonaws.com".into()], ..defaults };
+        assert!(check_url_allowed("https://lb-1.eu-west-1.elb.amazonaws.com/k", &custom, &backend).is_ok());
+        assert!(check_url_allowed("https://bucket.s3.amazonaws.com/k", &custom, &backend).is_err());
+    }
+
+    #[test]
+    fn the_endpoint_url_is_allowed_on_its_scheme_host_and_port_only() {
+        let mut backend = MemoryBroker::new("us-east-1", "000000000000").backend();
+        backend.kind = BackendKind::Aws;
+        backend.endpoint_url = Some("http://localhost:4566".into());
+        let defaults = FetchSettings::default();
+        assert!(check_url_allowed("http://localhost:4566/bucket/k", &defaults, &backend).is_ok());
+        assert!(check_url_allowed("http://LOCALHOST:4566/bucket/k", &defaults, &backend).is_ok());
+        for url in
+            ["http://localhost:6379/", "http://localhost/", "https://localhost:4566/bucket/k", "http://127.0.0.1:4566/"]
+        {
+            let error = check_url_allowed(url, &defaults, &backend).unwrap_err();
+            assert!(error.to_string().contains("refusing to fetch"), "{url}: {error}");
+        }
+        // allow_http does not open other ports of the endpoint's host.
+        let error = check_url_allowed("http://localhost:6379/", &defaults, &backend).unwrap_err();
+        assert!(error.to_string().contains("over http:// from localhost:6379"), "{error}");
+        let http = FetchSettings { allow_http: true, ..FetchSettings::default() };
+        assert!(check_url_allowed("http://localhost:6379/", &http, &backend).is_err());
+        // A default port is the same port, written or not.
+        backend.endpoint_url = Some("https://s3.example.internal".into());
+        assert!(check_url_allowed("https://s3.example.internal:443/bucket/k", &defaults, &backend).is_ok());
+        assert!(check_url_allowed("https://s3.example.internal:8443/bucket/k", &defaults, &backend).is_err());
+        assert!(check_url_allowed("http://s3.example.internal/bucket/k", &defaults, &backend).is_err());
+        // And with allowed_url_hosts, the endpoint stays allowed.
+        let custom = FetchSettings { allowed_url_hosts: vec!["cdn.example.com".into()], ..FetchSettings::default() };
+        assert!(check_url_allowed("https://s3.example.internal/bucket/k", &custom, &backend).is_ok());
+    }
+
+    #[tokio::test]
+    async fn pointers_without_a_sha256_are_not_fetched_by_url() {
+        let broker = MemoryBroker::new("us-east-1", "000000000000");
+        let backend = broker.backend();
+        backend.objects.create_bucket("b").await.unwrap();
+        let pointer = offload(&backend, &settings("b"), "m1", Bytes::from_static(b"payload")).await.unwrap();
+        let by_url = FetchSettings { prefer: FetchPreference::Url, ..FetchSettings::default() };
+        let url_only = PayloadPointer { bucket: None, key: None, ..pointer.clone() };
+        assert_eq!(&fetch(&backend, &by_url, &url_only).await.unwrap()[..], b"payload");
+
+        let unchecked = PayloadPointer { sha256: None, ..url_only };
+        for settings in [by_url.clone(), FetchSettings::default(), FetchSettings { verify_checksum: false, ..by_url }] {
+            let error = fetch(&backend, &settings, &unchecked).await.unwrap_err();
+            assert!(error.to_string().contains("without a sha256"), "{error}");
+        }
+        // Bucket and key are still read without one (the extended clients' pointers have none).
+        let s3_only = PayloadPointer { sha256: None, url: None, ..pointer.clone() };
+        assert_eq!(&fetch(&backend, &FetchSettings::default(), &s3_only).await.unwrap()[..], b"payload");
+        let both = PayloadPointer { sha256: None, ..pointer };
+        assert_eq!(&fetch(&backend, &FetchSettings::default(), &both).await.unwrap()[..], b"payload");
+    }
+
+    #[tokio::test]
+    async fn allowed_buckets_restrict_s3_pointers() {
+        let broker = MemoryBroker::new("us-east-1", "000000000000");
+        let backend = broker.backend();
+        backend.objects.create_bucket("b").await.unwrap();
+        let pointer = offload(&backend, &settings("b"), "m1", Bytes::from_static(b"payload")).await.unwrap();
+        let s3_only = PayloadPointer { url: None, ..pointer.clone() };
+
+        let allowed = FetchSettings { allowed_buckets: vec!["other".into(), "b".into()], ..FetchSettings::default() };
+        assert_eq!(&fetch(&backend, &allowed, &s3_only).await.unwrap()[..], b"payload");
+        let others = FetchSettings { allowed_buckets: vec!["other".into()], ..FetchSettings::default() };
+        let error = fetch(&backend, &others, &s3_only).await.unwrap_err();
+        assert!(error.to_string().contains("refusing to read a payload from bucket \"b\""), "{error}");
+        // The URL is checked on its own: a pointer with both falls back to it.
+        assert_eq!(&fetch(&backend, &others, &pointer).await.unwrap()[..], b"payload");
     }
 }
