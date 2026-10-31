@@ -576,3 +576,81 @@ async def test_envelope_failures_are_decode_failures(client_factory: ClientFacto
         "no configured envelope recognised the message (tried cloudevents)",
     ]
     assert all(isinstance(event.exception, fanferro.EnvelopeError) for event in events)
+
+
+async def test_a_retry_policy_classify_that_raises_falls_back_to_the_default(
+    client_factory: ClientFactory, name: Any
+) -> None:
+    # A classify hook that raised made the message's task fail: the message stayed leased (its
+    # heartbeats went on) instead of being retried and dead-lettered.
+    client = client_factory()
+    queue = queue_with_dlq(client, name("classify-raises"))
+
+    def classify(error: BaseException) -> Any:
+        return error.response.status_code  # type: ignore[attr-defined] - the handler's error has no .response
+
+    consumer = client.consumer(
+        queue, wait_time=1, retry=fanferro.RetryPolicy(max_attempts=2, backoff=FAST_RETRY, classify=classify)
+    )
+    errors: list[fanferro.Event] = []
+    dead: list[fanferro.Event] = []
+    client.on("consumer.error", errors.append)
+    client.on("message.dead_lettered", dead.append)
+    attempts: list[int] = []
+
+    @consumer.route(OrderCreated)
+    async def handle(message: fanferro.Message[OrderCreated]) -> None:
+        attempts.append(message.attempt)
+        raise ValueError("cannot process")
+
+    async with client:
+        await queue.send(OrderCreated(order_id=1))
+        await consume_until(consumer, lambda: len(dead) == 1)
+    assert attempts == [1, 2]
+    assert errors, "the failing classify hook is reported"
+    assert errors[0].error is not None
+    assert errors[0].error.category == "AttributeError"
+    assert "classify" in errors[0].message
+
+
+@pytest.mark.parametrize("fifo", [False, True], ids=["standard", "fifo"])
+async def test_a_message_whose_task_fails_unexpectedly_is_retried(
+    client_factory: ClientFactory, name: Any, monkeypatch: pytest.MonkeyPatch, fifo: bool
+) -> None:
+    # A failure outside the handler's own error handling left the message unsettled: it stayed
+    # leased (heartbeats extended it) until the delivery was garbage collected, which on an idle
+    # queue could take as long as the queue stayed idle.
+    client = client_factory()
+    queue = client.queue(
+        name("task-fails") + (".fifo" if fifo else ""), attributes=fanferro.QueueAttributes(visibility_timeout=30)
+    )
+    consumer = client.consumer(queue, wait_time=1, retry=fanferro.RetryPolicy(backoff=fanferro.Backoff.constant(1)))
+    errors: list[fanferro.Event] = []
+    client.on("consumer.error", errors.append)
+    attempts: list[int] = []
+    original = consumer._failed
+    broken = [True]
+
+    async def failed(message: fanferro.Message[Any], error: BaseException) -> None:
+        if broken:
+            broken.clear()
+            raise RuntimeError("bug in the failure path")
+        await original(message, error)
+
+    monkeypatch.setattr(consumer, "_failed", failed)
+
+    @consumer.route(OrderCreated)
+    async def handle(message: fanferro.Message[OrderCreated]) -> None:
+        attempts.append(message.attempt)
+        if message.attempt == 1:
+            raise ValueError("first attempt fails")
+
+    async with client:
+        await queue.send(OrderCreated(order_id=1), group_id="g" if fifo else None)
+        started = time.monotonic()
+        await consume_until(consumer, lambda: consumer.stats()["processed"] == 1, timeout=15)
+        elapsed = time.monotonic() - started
+        await wait_for(lambda: consumer.stats()["engine"].get("in_flight", 0) == 0)
+    assert attempts == [1, 2]
+    assert elapsed >= 0.9, "retried after the backoff, not at once"
+    assert [event.error.category for event in errors if event.error] == ["RuntimeError"]
