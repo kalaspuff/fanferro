@@ -51,9 +51,10 @@ Delivery is at least once (a crash between publish and mark republishes). The me
 stable: FIFO destinations deduplicate it; standard destinations need idempotent consumers
 (below). FIFO rows are relayed one by one in order and a failure holds back the rest of its group.
 A row that cannot be published (its topic was deleted, the destination refuses it) is given up
-after `OutboxRelay(max_attempts=10)` attempts with `mark_abandoned`, so that it does not hold back
-the rows behind it; a FIFO group then continues with its next row. Errors that may pass
-(throttling, timeouts, network errors) never give a row up. Inspect given-up rows, and reset
+after `OutboxRelay(max_attempts=10)` attempts that failed for good, with `mark_abandoned`, so that
+it does not hold back the rows behind it; a FIFO group then continues with its next row. Errors
+that may pass (throttling, timeouts, network errors) and rounds spent behind an earlier row of a
+FIFO group do not count. Inspect given-up rows, and reset
 `abandoned_at` (and `attempts`) to relay them again. Runnable version: `examples/transactional_outbox.py`.
 
 ## Idempotent consumer (inbox)
