@@ -20,6 +20,10 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   that is visible again can be hidden with its latest handle; FIFO queues refuse earlier handles
   with "The receipt handle has expired"; visibility changes past 12 hours after the receive and for
   deleted messages fail with SQS's codes and texts (#147)
+- SQS's `QueueDeletedRecently` (creating a queue within 60 seconds of deleting one of the same
+  name) and `PurgeQueueInProgress` (purging a queue twice within 60 seconds) are retryable
+  `ThrottledError`s instead of invalid requests; the in-memory broker refuses both for 60 seconds,
+  like SQS (#148)
 
 ## [0.6.0] - 2026-10-31
 

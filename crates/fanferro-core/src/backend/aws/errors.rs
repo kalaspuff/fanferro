@@ -104,7 +104,10 @@ pub(crate) fn classify(code: Option<&str>, message: Option<&str>, status: Option
         | "SlowDown"
         | "PriorRequestNotComplete"
         | "BandwidthLimitExceeded"
-        | "OverLimit" => AwsErrorKind::Throttling,
+        | "OverLimit"
+        // SQS refuses these for 60 seconds after a queue was deleted, or purged: retry later.
+        | "QueueDeletedRecently"
+        | "PurgeQueueInProgress" => AwsErrorKind::Throttling,
         "RequestTimeout" | "RequestTimeoutException" => AwsErrorKind::Timeout,
         "InternalError"
         | "InternalFailure"
@@ -132,11 +135,9 @@ pub(crate) fn classify(code: Option<&str>, message: Option<&str>, status: Option
         | "BatchEntryIdsNotDistinct"
         | "EmptyBatchRequest"
         | "UnsupportedOperation"
-        | "QueueDeletedRecently"
         | "QueueAlreadyExists"
         | "QueueNameExists"
         | "InvalidAddress"
-        | "PurgeQueueInProgress"
         | "InvalidAction"
         | "MalformedQueryString" => AwsErrorKind::InvalidRequest,
         _ => match status {
@@ -240,6 +241,15 @@ mod tests {
             AwsErrorKind::ReceiptHandleInvalid
         );
         assert_eq!(classify(Some("InvalidParameterValue"), Some("bad"), Some(400)), AwsErrorKind::InvalidRequest);
+        // Refused for 60 seconds after a delete or a purge (docs/parity Q7, Q8): retrying later helps.
+        assert_eq!(
+            classify(Some("AWS.SimpleQueueService.QueueDeletedRecently"), None, Some(400)),
+            AwsErrorKind::Throttling
+        );
+        assert_eq!(
+            classify(Some("AWS.SimpleQueueService.PurgeQueueInProgress"), None, Some(403)),
+            AwsErrorKind::Throttling
+        );
         assert_eq!(classify(Some("Weird"), None, Some(503)), AwsErrorKind::Transient);
         assert_eq!(classify(None, None, Some(429)), AwsErrorKind::Throttling);
         assert_eq!(classify(None, None, None), AwsErrorKind::Service);
