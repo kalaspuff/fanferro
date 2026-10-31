@@ -7,6 +7,8 @@ Results reach the event loop through a socket pair the loop watches: two file de
 event loop that awaits fanferro operations, released after the loop is closed.
 Create clients **after** forking (gunicorn/uvicorn workers, multiprocessing): a client created
 before `fork()` raises `ShutdownError` in the child instead of sharing connections with the parent.
+fanferro's errors pickle, so one raised in a process pool worker or a multiprocessing child reaches
+the parent as itself, with its attributes (see the [error reference](../reference/errors.md)).
 
 ## Graceful shutdown
 
