@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use super::{
-    BatchResult, ObjectStoreApi, PutOptions, ReceiveRequest, ReceivedMessage, SendOutput, SendRequest, SqsApi,
-    StringMap, VisibilityChange,
+    BatchResult, ObjectStoreApi, PublishOutput, PublishRequest, PutOptions, ReceiveRequest, ReceivedMessage,
+    SendOutput, SendRequest, SnsApi, SqsApi, StringMap, SubscriptionInfo, VisibilityChange,
 };
 use crate::error::{AwsError, AwsErrorKind, Result};
 
@@ -289,5 +289,84 @@ impl SqsApi for SlowBatches {
     }
     async fn purge_queue(&self, queue_url: &str) -> Result<()> {
         self.inner.purge_queue(queue_url).await
+    }
+}
+
+/// SNS whose first `failures` batch publishes fail with a retryable (throttling) error, and that
+/// records the trace header of every `PublishBatch` call that reached `inner`.
+#[derive(Debug)]
+pub(crate) struct ThrottledPublishBatches {
+    inner: Arc<dyn SnsApi>,
+    failures: parking_lot::Mutex<usize>,
+    /// The trace headers of the entries of each call that reached `inner`.
+    pub(crate) calls: parking_lot::Mutex<Vec<Vec<Option<String>>>>,
+}
+
+impl ThrottledPublishBatches {
+    pub(crate) fn new(inner: Arc<dyn SnsApi>, failures: usize) -> Self {
+        Self { inner, failures: parking_lot::Mutex::new(failures), calls: parking_lot::Mutex::default() }
+    }
+}
+
+#[async_trait]
+impl SnsApi for ThrottledPublishBatches {
+    async fn publish(&self, topic_arn: &str, request: PublishRequest) -> Result<PublishOutput> {
+        self.inner.publish(topic_arn, request).await
+    }
+    async fn publish_batch(&self, topic_arn: &str, entries: Vec<PublishRequest>) -> Result<BatchResult<PublishOutput>> {
+        let fail = {
+            let mut failures = self.failures.lock();
+            *failures > 0 && {
+                *failures -= 1;
+                true
+            }
+        };
+        if fail {
+            return Err(AwsError::new("sns", "PublishBatch", AwsErrorKind::Throttling, "Rate exceeded").into());
+        }
+        self.calls.lock().push(entries.iter().map(|entry| entry.trace_header.clone()).collect());
+        self.inner.publish_batch(topic_arn, entries).await
+    }
+    async fn create_topic(&self, name: &str, attributes: &StringMap, tags: &StringMap) -> Result<String> {
+        self.inner.create_topic(name, attributes, tags).await
+    }
+    async fn get_topic_attributes(&self, topic_arn: &str) -> Result<StringMap> {
+        self.inner.get_topic_attributes(topic_arn).await
+    }
+    async fn set_topic_attribute(&self, topic_arn: &str, name: &str, value: &str) -> Result<()> {
+        self.inner.set_topic_attribute(topic_arn, name, value).await
+    }
+    async fn list_topic_tags(&self, topic_arn: &str) -> Result<StringMap> {
+        self.inner.list_topic_tags(topic_arn).await
+    }
+    async fn tag_topic(&self, topic_arn: &str, tags: &StringMap) -> Result<()> {
+        self.inner.tag_topic(topic_arn, tags).await
+    }
+    async fn delete_topic(&self, topic_arn: &str) -> Result<()> {
+        self.inner.delete_topic(topic_arn).await
+    }
+    async fn subscribe(
+        &self,
+        topic_arn: &str,
+        protocol: &str,
+        endpoint: &str,
+        attributes: &StringMap,
+    ) -> Result<String> {
+        self.inner.subscribe(topic_arn, protocol, endpoint, attributes).await
+    }
+    async fn list_subscriptions_by_topic(&self, topic_arn: &str) -> Result<Vec<SubscriptionInfo>> {
+        self.inner.list_subscriptions_by_topic(topic_arn).await
+    }
+    async fn get_subscription_attributes(&self, subscription_arn: &str) -> Result<StringMap> {
+        self.inner.get_subscription_attributes(subscription_arn).await
+    }
+    async fn set_subscription_attribute(&self, subscription_arn: &str, name: &str, value: &str) -> Result<()> {
+        self.inner.set_subscription_attribute(subscription_arn, name, value).await
+    }
+    async fn unsubscribe(&self, subscription_arn: &str) -> Result<()> {
+        self.inner.unsubscribe(subscription_arn).await
+    }
+    async fn confirm_subscription(&self, topic_arn: &str, token: &str) -> Result<String> {
+        self.inner.confirm_subscription(topic_arn, token).await
     }
 }

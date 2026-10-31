@@ -442,12 +442,7 @@ impl Client {
             backoff: self.inner.config.publish_retry.backoff()?,
             max_attempts: self.inner.config.publish_retry.max_attempts.max(1),
         };
-        let by_trace_header = self.inner.config.split_batches_by_trace_header && destination.service() == "sns";
-        let chunks = if by_trace_header {
-            chunk_by_trace_header(pending, destination.is_fifo(), destination.max_message_size())
-        } else {
-            chunk_by_size(pending, destination.max_message_size())
-        };
+        let chunks = self.chunk(destination, pending);
         if destination.is_fifo() {
             // One batch call at a time, and the retries of a batch before the next batch: entries
             // sent later must not overtake earlier ones of their message group.
@@ -471,6 +466,16 @@ impl Client {
             }
         }
         Ok(results)
+    }
+
+    /// Splits entries into batch calls: by size, and by trace header for topics when the client's
+    /// `split_batches_by_trace_header` is set (the first calls and those of retries alike).
+    fn chunk(&self, destination: &Destination, entries: Vec<(usize, Prepared)>) -> Vec<Vec<(usize, Prepared)>> {
+        if self.inner.config.split_batches_by_trace_header && destination.service() == "sns" {
+            chunk_by_trace_header(entries, destination.is_fifo(), destination.max_message_size())
+        } else {
+            chunk_by_size(entries, destination.max_message_size())
+        }
     }
 
     /// Sends `chunks` (up to `concurrency` batch calls at once), then retries the entries that
@@ -514,7 +519,7 @@ impl Client {
             tokio::time::sleep(retry.backoff.delay(attempt)).await;
             attempt += 1;
             let pending = failed.into_iter().map(|(index, prepared, _)| (index, prepared)).collect();
-            chunks = chunk_by_size(pending, destination.max_message_size());
+            chunks = self.chunk(destination, pending);
         }
     }
 

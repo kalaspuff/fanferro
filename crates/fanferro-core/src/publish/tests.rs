@@ -1,9 +1,9 @@
 use bytes::Bytes;
 
 use super::*;
-use crate::backend::{ReceiveRequest, StringMap};
 use crate::backend::memory::MemoryBroker;
-use crate::backend::testing::{SlowBatches, SlowUploads, ThrottledBatches};
+use crate::backend::testing::{SlowBatches, SlowUploads, ThrottledBatches, ThrottledPublishBatches};
+use crate::backend::{ReceiveRequest, StringMap};
 use crate::client::ClientConfig;
 use crate::transport::OffloadSettings;
 use crate::transport::claim_check::{EncryptionSettings, PointerFormat, ReferenceMode};
@@ -249,6 +249,38 @@ async fn batch_publishes_to_topics_split_by_trace_header_when_configured() {
             assert!(received.iter().all(|m| m.system.aws_trace_header.as_deref() == Some(A)));
         }
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn retried_batch_entries_stay_split_by_trace_header() {
+    // Entries retried after a failed call were batched by size only: entries with different trace
+    // headers went out together, in a call that sends none.
+    const A: &str = "Root=1-5759e988-bd862e3fe1be46a994272793;Parent=53995c3f42cd8ad8;Sampled=1";
+    const B: &str = "Root=1-5759e988-bd862e3fe1be46a994272794;Parent=53995c3f42cd8ad9;Sampled=1";
+    let broker = MemoryBroker::new("us-east-1", "000000000000");
+    let mut backend = broker.backend();
+    let topic = backend.sns.create_topic("t", &StringMap::new(), &StringMap::new()).await.unwrap();
+    // The first calls of all three groups fail: their entries are retried together.
+    let throttled = std::sync::Arc::new(ThrottledPublishBatches::new(backend.sns.clone(), 3));
+    backend.sns = throttled.clone();
+    let config = ClientConfig { split_batches_by_trace_header: true, ..ClientConfig::default() };
+    let client = Client::with_backend(backend, config).unwrap();
+    let destination =
+        Destination::Topic { arn: topic, fifo: false, content_based_deduplication: false, max_message_size: None };
+    let messages = [Some(A), Some(B), None, Some(A)]
+        .iter()
+        .enumerate()
+        .map(|(i, header)| OutgoingMessage {
+            trace_header: header.map(str::to_string),
+            ..message(&format!("m{i}"), &format!("e{i}"))
+        })
+        .collect();
+    let results = client.publish_batch(&destination, messages).await.unwrap();
+    assert!(results.iter().all(Result::is_ok));
+    let mut calls = throttled.calls.lock().clone();
+    calls.sort();
+    let header = |h: &str| Some(h.to_string());
+    assert_eq!(calls, vec![vec![None], vec![header(A), header(A)], vec![header(B)]]);
 }
 
 #[test]
