@@ -661,12 +661,13 @@ impl SqsApi for MemorySqs {
                 if !queue.messages.get(sequence).is_some_and(|message| message.in_flight) {
                     return Err(receipt_error("MessageNotInflight", "The message referred to is not in flight."));
                 }
-                let timeout = whole_seconds(entry.timeout);
-                queue.messages.change_visibility(sequence, now, timeout);
-                changed |= timeout.is_zero();
+                queue.messages.change_visibility(sequence, now, whole_seconds(entry.timeout));
+                changed = true;
                 Ok(())
             })
             .collect();
+        // A message can become visible sooner than a waiting long poll planned to look again:
+        // wake them all, they compute their next wake-up again.
         if changed {
             queue.notify.notify_waiters();
         }
