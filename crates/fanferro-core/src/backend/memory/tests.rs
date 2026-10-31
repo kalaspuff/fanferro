@@ -1301,3 +1301,27 @@ async fn a_blocked_message_does_not_keep_an_aborted_poll_from_newer_ones() {
         .collect();
     assert_eq!(taken, [("m1".to_string(), 1), ("m3".to_string(), 1)], "the aborted poll took m3");
 }
+
+#[tokio::test(start_paused = true)]
+async fn numbers_of_more_than_38_digits_are_refused_like_sqs() {
+    // docs/parity M11: the broker accepted Number values SQS refuses.
+    let (_, backend) = broker();
+    let url = backend.sqs.create_queue("q", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let with_number = |digits: &str| {
+        let mut attributes = MessageAttributes::new();
+        attributes.insert("n".into(), AttributeValue::number(digits));
+        SendRequest { attributes, ..send("x") }
+    };
+    backend.sqs.send_message(&url, with_number(&"1".repeat(38))).await.unwrap();
+    let err = backend.sqs.send_message(&url, with_number(&"1".repeat(39))).await.unwrap_err();
+    assert_eq!(
+        code_and_message(&err),
+        (
+            "InvalidParameterValue".to_string(),
+            format!(
+                "Message (user) attribute 'n' number value [{}] must contain fewer than 38 precision digits.",
+                "1".repeat(39)
+            )
+        )
+    );
+}

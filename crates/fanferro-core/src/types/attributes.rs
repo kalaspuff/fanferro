@@ -166,6 +166,13 @@ impl AttributeValue {
                 if self.base_type() == BaseType::Number && !is_valid_number(text) {
                     return Err(Error::validation(format!("attribute {name:?} is not a valid number: {text:?}")));
                 }
+                if self.base_type() == BaseType::Number
+                    && let Some(digits) = significant_digits(text).filter(|digits| *digits > MAX_NUMBER_DIGITS)
+                {
+                    return Err(Error::validation(format!(
+                        "attribute {name:?} has {digits} significant digits; SQS and SNS accept numbers of at most {MAX_NUMBER_DIGITS} (send it as a String attribute)"
+                    )));
+                }
             }
             AttributeData::Binary(bytes) => {
                 if bytes.is_empty() {
@@ -196,6 +203,21 @@ pub fn parse_base_type(data_type: &str) -> Result<BaseType> {
             "invalid attribute data type {data_type:?}; must start with String, Number or Binary"
         ))),
     }
+}
+
+/// The most significant digits SQS accepts in a `Number` value (docs/parity M11).
+pub const MAX_NUMBER_DIGITS: usize = 38;
+
+/// How many significant digits a decimal number has (leading and trailing zeros do not count);
+/// `None` when `text` is no decimal number.
+pub fn significant_digits(text: &str) -> Option<usize> {
+    let unsigned = text.strip_prefix(['-', '+']).unwrap_or(text);
+    let mantissa = unsigned.split(['e', 'E']).next()?;
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(digits.trim_start_matches('0').trim_end_matches('0').len().max(1))
 }
 
 fn is_valid_number(text: &str) -> bool {
@@ -359,5 +381,22 @@ mod tests {
         hasher.update(5u32.to_be_bytes());
         hasher.update(b"value");
         assert_eq!(md5_of_attributes(&attrs), hex::encode(hasher.finalize()));
+    }
+
+    #[test]
+    fn numbers_have_at_most_38_significant_digits() {
+        // docs/parity M11: SQS refuses more, after the network.
+        for (text, digits) in
+            [("1.50", 2), ("007", 1), ("100", 1), ("0.000", 1), ("-0.0012", 2), ("1.0E2", 1), ("ten", 0)]
+        {
+            assert_eq!(significant_digits(text).unwrap_or(0), digits, "{text}");
+        }
+        let mut attributes = MessageAttributes::new();
+        attributes.insert("n".into(), AttributeValue::number("9".repeat(38)));
+        validate_attributes(&attributes).unwrap();
+        attributes.insert("n".into(), AttributeValue::number(format!("1.{}", "2".repeat(38))));
+        let error = validate_attributes(&attributes).unwrap_err().to_string();
+        assert!(error.contains("\"n\" has 39 significant digits"), "{error}");
+        assert!(error.contains("at most 38"), "{error}");
     }
 }

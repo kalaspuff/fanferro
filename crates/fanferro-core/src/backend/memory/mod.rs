@@ -42,7 +42,9 @@ use super::{
 };
 use crate::error::{AwsError, AwsErrorKind, Error, Result};
 use crate::types::attributes::BaseType;
-use crate::types::attributes::{attributes_encoded_len, md5_of_attributes, md5_of_body, validate_attributes};
+use crate::types::attributes::{
+    MAX_NUMBER_DIGITS, attributes_encoded_len, md5_of_attributes, md5_of_body, significant_digits, validate_attributes,
+};
 use crate::types::text::is_sqs_safe_text;
 use crate::types::{AttributeData, AttributeValue, MessageAttributes, arn};
 use crate::util::whole_seconds;
@@ -517,6 +519,20 @@ fn enqueue(state: &mut State, queue_url: &str, operation: &'static str, request:
                 u32::from(character)
             ),
         ));
+    }
+    // SQS refuses numbers of more than 38 significant digits, with its own text (docs/parity M11).
+    for (name, value) in &request.attributes {
+        if let (BaseType::Number, AttributeData::Text(text)) = (value.base_type(), value.data())
+            && significant_digits(text).is_some_and(|digits| digits > MAX_NUMBER_DIGITS)
+        {
+            return Err(invalid(
+                "sqs",
+                operation,
+                format!(
+                    "Message (user) attribute '{name}' number value [{text}] must contain fewer than 38 precision digits."
+                ),
+            ));
+        }
     }
     validate_attributes(&request.attributes).map_err(|err| invalid("sqs", operation, err.to_string()))?;
     let size = request.body.len() + attributes_encoded_len(&request.attributes);
