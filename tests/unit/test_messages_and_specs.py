@@ -296,6 +296,13 @@ def test_large_payload_settings() -> None:
     assert fanferro.PayloadFetch(allowed_url_hosts=["*.example.com"]).to_core()["allowed_url_hosts"] == [
         "*.example.com"
     ]
+    assert fanferro.PayloadFetch(allowed_buckets=("payloads",)).to_core()["allowed_buckets"] == ["payloads"]
+    assert fanferro.PayloadFetch().to_core()["allowed_buckets"] == [], "any bucket by default"
+    # A string is a sequence of strings to type checkers, and would allow its letters.
+    with pytest.raises(TypeError, match="allowed_url_hosts must be a list"):
+        fanferro.PayloadFetch(allowed_url_hosts="cdn.example.com")
+    with pytest.raises(TypeError, match="allowed_buckets must be a list"):
+        fanferro.PayloadFetch(allowed_buckets="payloads")
 
 
 def test_aws_config_objects() -> None:

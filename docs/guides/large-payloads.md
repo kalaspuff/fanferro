@@ -41,10 +41,31 @@ message with more fails before anything is uploaded.
 
 ## Safety
 
-`PayloadFetch` (client option `payload_fetch=`) limits what consumers download:
-`max_bytes` (64 MiB), `allowed_url_hosts` (default: AWS hosts and your `endpoint_url`; blocks
-SSRF through crafted pointers), `allow_http`, and `verify_checksum` (size + SHA-256 recorded in the
-pointer). Redirects are not followed: a URL that answers with one fails to decode, so a pointer
+Whoever can send to a consumed queue, or publish to a subscribed topic, can write a pointer of
+their own. `PayloadFetch` (client option `payload_fetch=`) limits what consumers download:
+
+* `max_bytes` (64 MiB).
+* `allowed_url_hosts`: the hosts presigned URLs may point to (`*.example.com` wildcards, any port).
+  By default the endpoints of S3 only: `s3.<region>.amazonaws.com` and `<bucket>.s3...`,
+  the legacy `s3-<region>` and `s3.amazonaws.com` names, dual-stack, FIPS, Transfer Acceleration,
+  access points, Multi-Region Access Points and S3 Express, in the commercial and China partitions
+  and the client's own (`amazonaws.eu`, ...). Other hosts under AWS's domains are refused: load
+  balancers, EC2 instances and VPC endpoints often resolve to private addresses, so a crafted
+  pointer could otherwise make consumers request internal services (server-side request forgery).
+  List hosts here to fetch from elsewhere (a VPC endpoint, a CDN); the list replaces the S3
+  endpoints. URLs on your `endpoint_url` (same scheme, host and port: an emulator) are allowed
+  either way.
+* `allow_http`: plain `http://` URLs (an `http://` `endpoint_url` needs no such permission).
+* `allowed_buckets`: the buckets (their names in S3, with any `bucket_prefix`) that pointers with a
+  bucket and key may name. By default any bucket the consumer's credentials can read: grant
+  consumers `s3:GetObject` on the payload buckets only, or list them here, so that a crafted
+  pointer cannot have a consumer read (or, with `delete_offloaded_payloads=True`, delete) other
+  objects.
+* `verify_checksum`: the size and SHA-256 recorded in the pointer are checked (on by default).
+
+A pointer whose payload is fetched by URL must record its SHA-256, which fanferro writes in every
+pointer: a crafted one without it fails to decode, so that whatever a host answers cannot become a
+message body. Redirects are not followed: a URL that answers with one fails to decode, so a pointer
 cannot lead a consumer to a host outside the list.
 
 ## Interoperability
