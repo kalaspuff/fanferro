@@ -1225,3 +1225,33 @@ async fn aborted_long_polls_take_messages_that_become_visible_while_nobody_calls
     let again = backend.sqs.receive_messages(receive(&url, 10, None)).await.unwrap();
     assert_eq!(again[0].system.approximate_receive_count, 3);
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_blocked_message_does_not_keep_an_aborted_poll_from_newer_ones() {
+    // Group a has a message in flight and one waiting behind it: the aborted poll looked only at the
+    // oldest stored message, could not take it, and missed a message of group b sent meanwhile.
+    let broker = MemoryBroker::with_options("us-east-1", "000000000000", MemoryOptions { orphaned_polls: true });
+    let backend = broker.backend();
+    let url =
+        backend.sqs.create_queue("q.fifo", &attributes(&[("FifoQueue", "true")]), &StringMap::new()).await.unwrap();
+    let in_group = |group: &str, id: &str| SendRequest {
+        group_id: Some(group.into()),
+        deduplication_id: Some(id.into()),
+        ..send(id)
+    };
+    backend.sqs.send_message(&url, in_group("a", "m1")).await.unwrap();
+    backend.sqs.send_message(&url, in_group("a", "m2")).await.unwrap();
+    assert_eq!(backend.sqs.receive_messages(receive(&url, 1, Some(60))).await.unwrap()[0].body, "m1");
+    abort_a_long_poll(&backend, &url).await;
+    tokio::time::advance(Duration::from_secs(2)).await;
+    backend.sqs.send_message(&url, in_group("b", "m3")).await.unwrap();
+    assert!(backend.sqs.receive_messages(receive(&url, 10, None)).await.unwrap().is_empty());
+    let taken: Vec<(String, u32)> = broker
+        .queue_messages(&url)
+        .unwrap()
+        .into_iter()
+        .filter(|message| message.in_flight)
+        .map(|message| (message.body, message.receive_count))
+        .collect();
+    assert_eq!(taken, [("m1".to_string(), 1), ("m3".to_string(), 1)], "the aborted poll took m3");
+}

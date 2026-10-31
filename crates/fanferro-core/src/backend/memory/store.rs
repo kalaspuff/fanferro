@@ -216,11 +216,6 @@ impl Messages {
         }
     }
 
-    /// The earliest moment a stored message is (or will be) visible.
-    pub fn earliest_available(&self) -> Option<Instant> {
-        self.by_sequence.values().map(|message| message.available_at).min()
-    }
-
     /// When the next hidden message becomes visible.
     pub fn next_change(&self) -> Option<Instant> {
         self.hidden.first().map(|(at, _)| *at)

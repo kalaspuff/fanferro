@@ -19,7 +19,7 @@
 pub mod filter_policy;
 mod store;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -646,8 +646,9 @@ fn enqueue(state: &mut State, queue_url: &str, operation: &'static str, request:
 
 /// Hands messages to the long polls of `queue_url` whose clients aborted them, oldest first: such
 /// a poll takes what it can, like any receive, and returns to nobody. The broker has no timer, so
-/// every operation that looks at the queue catches up first: a poll takes the messages visible at
-/// the first moment during its wait time that one was (as of that moment), or none.
+/// every operation that looks at the queue catches up first: a poll takes what it could receive at
+/// the first moment during its wait time that it could receive anything (as of that moment), or
+/// nothing.
 fn serve_orphans(state: &mut State, queue_url: &str, now: Instant) {
     loop {
         let Some(queue) = state.queues.get_mut(queue_url) else { return };
@@ -655,14 +656,14 @@ fn serve_orphans(state: &mut State, queue_url: &str, now: Instant) {
         // The poll's wait time ends at `until`: a message visible from then on is not for it.
         let ended = orphan.until <= now;
         let last = if ended { orphan.until.checked_sub(Duration::from_millis(1)).unwrap_or(orphan.until) } else { now };
-        let first = queue.messages.earliest_available().map(|at| at.max(orphan.since));
-        let Some(at) = first.filter(|at| *at <= last) else {
-            if ended {
-                queue.orphans.remove(0);
-                continue;
-            }
-            return;
-        };
+        // The moments messages became (or become) visible while the poll waited, earliest first: a
+        // message it cannot receive (its FIFO group is busy) must not keep it from later ones.
+        let moments: BTreeSet<Instant> = queue
+            .messages
+            .iter()
+            .map(|message| message.available_at.max(orphan.since))
+            .filter(|at| *at <= last)
+            .collect();
         let request = ReceiveRequest {
             queue_url: queue_url.to_string(),
             max_messages: orphan.max_messages,
@@ -670,8 +671,9 @@ fn serve_orphans(state: &mut State, queue_url: &str, now: Instant) {
             visibility_timeout: orphan.visibility_timeout,
             attempt_id: None,
         };
-        let took = try_receive(state, &request, at).is_ok_and(|received| !received.is_empty());
-        if !took && orphan.until > now {
+        let took =
+            moments.into_iter().any(|at| try_receive(state, &request, at).is_ok_and(|received| !received.is_empty()));
+        if !took && !ended {
             return; // still waiting
         }
         if let Some(queue) = state.queues.get_mut(queue_url) {
