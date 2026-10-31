@@ -7,7 +7,8 @@ publishing before the commit sends messages for changes that roll back. The outb
 database the source of truth:
 
 1. In the business transaction, store the encoded message: `prepared = await topic.prepare(event)`
-   then `INSERT INTO outbox (id, message) VALUES (prepared.message_id, prepared.to_json())`.
+   then `INSERT INTO outbox (id, message, fifo_group) VALUES (prepared.message_id,
+   prepared.to_json(), prepared.fifo_group)`.
    `prepare` does no network I/O for the message (only the cached topic lookup).
 2. A relay publishes pending rows and marks them: `OutboxRelay(client, store).run()`.
 
@@ -15,6 +16,7 @@ database the source of truth:
 CREATE TABLE outbox (
     id         text PRIMARY KEY,
     message    jsonb NOT NULL,
+    fifo_group text,              -- prepared.fifo_group: NULL for standard destinations
     created_at timestamptz NOT NULL DEFAULT now(),
     attempts   int NOT NULL DEFAULT 0,
     published_at timestamptz,
@@ -29,10 +31,13 @@ class PostgresOutbox:   # implements fanferro.outbox.OutboxStore (asyncpg)
         self.pool = pool
 
     async def claim_batch(self, limit: int) -> list[OutboxRecord]:
-        # Run the relay in a transaction per round, or use a lease column; SKIP LOCKED lets
-        # several relays work in parallel without publishing the same row twice.
+        # Run the relay in a transaction per round, or use a lease column. SKIP LOCKED lets several
+        # relays work in parallel without publishing the same row twice, and the advisory lock
+        # (held until the round's transaction ends) gives each FIFO group to one relay at a time,
+        # so that its rows stay in order.
         rows = await self.pool.fetch(
             "SELECT id, message, attempts FROM outbox WHERE published_at IS NULL AND abandoned_at IS NULL "
+            "AND (fifo_group IS NULL OR pg_try_advisory_xact_lock(hashtext(fifo_group))) "
             "ORDER BY created_at LIMIT $1 FOR UPDATE SKIP LOCKED", limit)
         return [OutboxRecord(r["id"], PreparedMessage.from_json(r["message"]), r["attempts"]) for r in rows]
 
@@ -46,6 +51,18 @@ class PostgresOutbox:   # implements fanferro.outbox.OutboxStore (asyncpg)
         await self.pool.execute(
             "UPDATE outbox SET attempts = attempts + 1, abandoned_at = now() WHERE id = $1", record.id)
 ```
+
+Several relays and FIFO destinations need claims that are exclusive per message group: with
+`SKIP LOCKED` alone, a second relay claims the later rows of a group while the first still sends
+the earlier ones, and the group arrives out of order. The advisory lock above does that (a hash
+collision only makes two groups wait for each other); without such a claim, run a single relay for
+FIFO destinations. `InMemoryOutbox` claims the same way.
+
+A round marks the rows it published as soon as it knows, also when it fails or its task is
+cancelled at shutdown, and releases the claims of the rows it did not attempt with the optional
+`release(records)` (the lease-column variant clears the lease there; without the method the relay
+calls `mark_failed` for them). An error of the store while recording one row's failure is logged
+and does not end the round. A row may be marked published more than once.
 
 Delivery is at least once (a crash between publish and mark republishes). The message id is
 stable: FIFO destinations deduplicate it; standard destinations need idempotent consumers
@@ -73,12 +90,20 @@ async def apply(message: fanferro.Message[PaymentCaptured]) -> None:
 ```
 
 For handlers whose effects are not in your database, `fanferro.idempotency.IdempotencyMiddleware`
-claims the message id in a store (implement `IdempotencyStore` on Redis/DynamoDB; claims expire
-so a crashed worker does not block a message forever), skips completed ids (`message.duplicate`)
-and retries messages another worker is processing. A handler that hands its message back
-(`message.retry()`, `requeue()`, `release()` or `dead_letter()`) leaves the id unclaimed, so the
-next delivery runs it again. `InMemoryIdempotencyStore` forgets expired ids; it suits tests and
-single-process workers.
+claims the message id in a store (implement `IdempotencyStore` on Redis/DynamoDB; `claim` may
+return a `Claim` or its string value) and skips completed ids (`message.duplicate`). A message
+whose id another worker holds is postponed by `retry_delay` (30 s) until that claim is completed
+or released, or expires after `lock_ttl` (15 minutes; a worker that crashed holds it that long).
+Postponements are not processing attempts, so they never use up `RetryPolicy.max_attempts`: on
+standard queues the message is sent back as a copy that keeps its attempt number (which also resets
+SQS's receive count); on FIFO queues its visibility changes, and only the consumer that postponed it
+leaves its next receive out of the attempt count (another consumer process counts it), and SQS
+counts every receive toward `max_receive_count`. A handler that hands its message back (`message.retry()`,
+`requeue()`, `release()` or `dead_letter()`) leaves the id unclaimed, so the next delivery runs it
+again. When the store fails to mark an id completed after the handler succeeded, the message is
+still acknowledged and the error reported (`consumer.error`): its claim then expires after
+`lock_ttl`. `InMemoryIdempotencyStore` forgets expired ids; it suits tests and single-process
+workers.
 
 ## Fan-out with filtering
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import datetime
 import pickle
 import traceback
@@ -32,6 +33,25 @@ class TestAttributeValue:
         assert fanferro.AttributeValue.string("a") == fanferro.AttributeValue.string("a")
         assert len({fanferro.AttributeValue.string("a"), fanferro.AttributeValue.string("a")}) == 1
         assert fanferro.AttributeValue.string("a") != fanferro.AttributeValue.number("1")
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            fanferro.AttributeValue.string("ä"),
+            fanferro.AttributeValue.number(Decimal("1.50")),
+            fanferro.AttributeValue.number("not a number"),  # refused when sent, not when created
+            fanferro.AttributeValue.binary(b"\x00\x01"),
+            fanferro.AttributeValue("Number.int", 5),
+            fanferro.AttributeValue("Binary.png", b"\x89PNG"),
+        ],
+        ids=repr,
+    )
+    def test_pickles_and_copies(self, value: fanferro.AttributeValue) -> None:
+        for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+            copied = pickle.loads(pickle.dumps(value, protocol))
+            assert (type(copied), copied.data_type, copied.value) == (type(value), value.data_type, value.value)
+        assert copy.copy(value) == value
+        assert copy.deepcopy(value) == value
 
     @pytest.mark.parametrize(("data_type", "value"), [("Weird", "x"), ("Binary", 1), ("String", b"bytes")])
     def test_invalid(self, data_type: str, value: object) -> None:
@@ -89,6 +109,17 @@ class TestPayloadAndWire:
         assert wire.attributes["flag"] == fanferro.AttributeValue.string("true")
         assert fanferro.WireMessage(b"\xff").body_text is None
         assert wire.replace(body="x").body == b"x"
+
+    def test_wire_message_pickles_and_copies(self) -> None:
+        wire = fanferro.WireMessage(
+            b"\xff\x00", {"a": "x", "n": 3, "b": b"\x01", "png": fanferro.AttributeValue("Binary.png", b"\x89")}
+        )
+        for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+            copied = pickle.loads(pickle.dumps(wire, protocol))
+            assert (type(copied), copied.body, copied.attributes) == (fanferro.WireMessage, wire.body, wire.attributes)
+        assert pickle.loads(pickle.dumps(fanferro.WireMessage("plain"))) == fanferro.WireMessage("plain")
+        assert copy.copy(wire) == wire
+        assert copy.deepcopy(wire) == wire
 
 
 def test_helpers() -> None:

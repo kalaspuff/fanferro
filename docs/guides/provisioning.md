@@ -24,6 +24,16 @@ custom ones as their `__eq__` says (by identity unless they define it). Several 
 dead-letter queue: the first declaration of it sets its attributes, and later `DeadLetterQueue`s of
 the same name may only repeat them.
 
+A subscription declared after the client provisioned (inside `async with client`, or after `await
+client.provision()`) is resolved before its topic's next `publish`, `publish_batch` or `prepare`,
+or when a consumer of its queue starts, whichever comes first: SNS delivers a message only to the
+subscriptions that exist when it is published, so one published earlier would reach no queue. A
+late subscription its policy cannot resolve (`"log"`) stays pending and is tried again, with
+backoff, by later publishes; one that raises (`ProvisioningError`, AWS errors) fails that publish
+and is tried again, with backoff, by later ones. Subscriptions declared on a client that never
+provisioned everything (`auto_provision=False`) are resolved only by `provision()`,
+`subscription.resolve()` or a consumer of their queue.
+
 ## What happens
 
 For every resource: **lookup** (`GetQueueUrl`, `GetTopicAttributes` by ARN derived from the account

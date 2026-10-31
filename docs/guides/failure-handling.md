@@ -9,11 +9,17 @@ When a handler raises:
    A delay is a non-negative number of seconds: `Retry(delay=-1)` and `message.retry(delay=-1)`
    raise `ValueError` and leave the message unsettled.
 2. `RetryPolicy.classify(error)` (if set) may return `"retry"`, `"dead_letter"` or `"discard"`.
+   A `classify` that raises is reported as a `consumer.error` event (with its own exception), and
+   the next steps decide as if it had returned `None`.
 3. `RetryPolicy.dead_letter_on` exceptions are dead-lettered immediately.
 4. Otherwise the message is retried, unless the attempt number reached `max_attempts`, in which
    case `DeadLetterPolicy.on_exhausted` applies (default: dead-letter). `on_exhausted="retry"`
    keeps retrying past `max_attempts`, with the backoff of each attempt, until the handler succeeds
    (or SQS redrive moves the message).
+
+A message whose processing fails outside these steps (a bug in fanferro or in a consume middleware's
+failure path, reported as `consumer.error`) is retried after the backoff of its attempt, so that
+`max_attempts` and the dead-letter policy still apply; it is not left leased.
 
 ```python
 consumer = client.consumer(
@@ -69,6 +75,7 @@ declaration, or the queue's `RedrivePolicy`. Without one, `on_missing_queue` app
 | No route matches | `on_unroutable` (dead-letter) | `message.unroutable` |
 | Attempt > `max_attempts` on receipt | `on_exhausted` (dead-letter; `"retry"` runs the handler) | `message.dead_lettered` |
 | Idempotency: already processed | acked | `message.duplicate` |
+| Idempotency: claimed elsewhere (in progress, or its worker crashed) | postponed by `retry_delay`, not counted as an attempt | `message.requeued` (FIFO: `message.retry_scheduled`) |
 | Offloaded payload missing, with `delete_offloaded_payloads=True` | acked as already processed | `message.duplicate` |
 
 ## Poison messages and redrive

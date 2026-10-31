@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
 
 use super::*;
 use crate::backend::memory::MemoryBroker;
-use crate::backend::testing::{SlowBatches, StuckVisibility};
+use crate::backend::testing::{SlowBatches, SlowReceives, StuckVisibility};
 use crate::backend::{SendRequest, StringMap};
 use crate::client::ClientConfig;
 use crate::events::EventKind;
@@ -1128,6 +1129,159 @@ async fn pause_and_resume() {
     let delivery = collect(&engine, 1).await.remove(0);
     delivery.lease.ack().await.unwrap();
     engine.close(true).await;
+}
+
+/// A fixture whose receives take `delay` (a round trip to SQS), with `messages` messages queued.
+async fn slow_receive_fixture(delay: Duration, messages: usize) -> (Fixture, Arc<SlowReceives>) {
+    let broker = MemoryBroker::new("us-east-1", "000000000000");
+    let mut backend = broker.backend();
+    let slow = Arc::new(SlowReceives::new(backend.sqs.clone(), delay));
+    backend.sqs = slow.clone();
+    let client = Client::with_backend(backend, ClientConfig::default()).unwrap();
+    let url = client.backend().sqs.create_queue("work", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let fx = Fixture { broker, client, url };
+    for start in (0..messages).step_by(10) {
+        let entries = (start..messages.min(start + 10))
+            .map(|i| SendRequest { body: format!("m{i}"), ..SendRequest::default() })
+            .collect();
+        fx.client.backend().sqs.send_message_batch(&fx.url, entries).await.unwrap();
+    }
+    (fx, slow)
+}
+
+/// Handles deliveries like a consumer with `concurrency` handler slots whose handlers take `work`
+/// and then ack, until `count` messages are acked. Returns how long that took, and the most
+/// messages handed out at once that had not started their ack.
+async fn handle(engine: &ConsumerEngine, count: usize, concurrency: usize, work: Duration) -> (Duration, usize) {
+    let started = tokio::time::Instant::now();
+    let slots = Arc::new(tokio::sync::Semaphore::new(concurrency));
+    let unsettled = Arc::new(AtomicU64::new(0));
+    let mut peak = 0;
+    let mut handlers = tokio::task::JoinSet::new();
+    let mut handed_out = 0;
+    while handed_out < count {
+        let deliveries = engine.next_batch(count - handed_out, Duration::from_millis(100)).await;
+        handed_out += deliveries.len();
+        let now = unsettled.fetch_add(deliveries.len() as u64, Ordering::SeqCst) + deliveries.len() as u64;
+        peak = peak.max(usize::try_from(now).unwrap());
+        for delivery in deliveries {
+            let slot = slots.clone().acquire_owned().await.unwrap();
+            let unsettled = unsettled.clone();
+            // Handlers take from half to one and a half times `work`, so they end at different times.
+            let work = work.mul_f64(0.5 + f64::from(u32::try_from(handed_out % 97).unwrap()) / 97.0);
+            handlers.spawn(async move {
+                tokio::time::sleep(work).await;
+                unsettled.fetch_sub(1, Ordering::SeqCst);
+                delivery.lease.ack().await.unwrap();
+                drop(slot);
+            });
+        }
+    }
+    while handlers.join_next().await.is_some() {}
+    (started.elapsed(), peak)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_backlog_is_received_by_several_receives_at_once() {
+    let round_trip = Duration::from_millis(15);
+    let mut elapsed = Vec::new();
+    for max_pollers in [Some(1), None] {
+        let (fx, slow) = slow_receive_fixture(round_trip, 2000).await;
+        // concurrency=100 with the default prefetch of one batch: 2,000 messages per second at most.
+        let engine = fx.engine(|c| {
+            c.max_in_flight = 110;
+            c.max_pollers = max_pollers;
+            c.extra_poller_slots = 10;
+        });
+        let (took, peak) = handle(&engine, 2000, 100, Duration::from_millis(50)).await;
+        // One batch more for each extra receive loop (at most ten of them).
+        assert!(peak <= 210, "{peak} messages leased at once");
+        let receives = slow.receives.take_peak();
+        if max_pollers.is_some() {
+            assert_eq!(receives, 1);
+        } else {
+            assert!(receives >= 4, "at most {receives} receives at once");
+        }
+        elapsed.push(took);
+        engine.close(true).await;
+        assert!(fx.stored().is_empty());
+    }
+    let (single, adaptive) = (elapsed[0], elapsed[1]);
+    assert!(single > Duration::from_millis(2500), "a single receive loop took {single:?}");
+    assert!(adaptive < Duration::from_millis(1300), "adaptive receives took {adaptive:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn receives_settle_back_to_one_long_poll_once_the_backlog_is_gone() {
+    let (fx, slow) = slow_receive_fixture(Duration::from_millis(15), 500).await;
+    let engine = fx.engine(|c| {
+        c.max_in_flight = 110;
+        c.extra_poller_slots = 10;
+    });
+    handle(&engine, 500, 100, Duration::from_millis(50)).await;
+    assert!(slow.receives.take_peak() > 1);
+    // Extra receives wait at most a second for messages before they end.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert_eq!(engine.stats().metrics["pollers"], 1);
+    assert_eq!(slow.receives.active(), 1, "one long poll");
+    assert_eq!(engine.inner.permits.available_permits(), 100, "the extra slots are taken back");
+    slow.receives.take_peak();
+    let before = receives(&engine);
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let idle = receives(&engine) - before;
+    assert!(idle <= 10, "{idle} receives in 10 s of an idle queue (wait_time 1 s)");
+    assert_eq!(slow.receives.take_peak(), 1);
+    // A new backlog starts extra receives again.
+    for i in 0..300 {
+        fx.send(&format!("again{i}")).await;
+    }
+    handle(&engine, 300, 100, Duration::from_millis(50)).await;
+    assert!(slow.receives.take_peak() > 1);
+    engine.close(true).await;
+    assert_eq!(engine.stats().metrics["pollers"], 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_handlers_need_no_extra_receives() {
+    // Once slow handlers hold the in-flight slots, full batches are rarely free for more receives.
+    let (fx, slow) = slow_receive_fixture(Duration::from_millis(15), 1000).await;
+    let engine = Arc::new(fx.engine(|c| {
+        c.max_in_flight = 110;
+        c.extra_poller_slots = 10;
+    }));
+    let handling = tokio::spawn({
+        let engine = engine.clone();
+        async move { handle(&engine, 1000, 100, Duration::from_secs(1)).await }
+    });
+    // At first every handler slot is free: receives run in parallel to fill them.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(slow.receives.take_peak() > 1);
+    let receives_before = receives(&engine);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let peak = slow.receives.take_peak();
+    assert!(peak <= 3, "{peak} receives at once");
+    // 100 messages per second, in nearly full batches.
+    assert!(receives(&engine) - receives_before <= 60, "{} receives in 5 s", receives(&engine) - receives_before);
+    let (_, unsettled) = handling.await.unwrap();
+    assert!(unsettled <= 210, "{unsettled} messages leased at once");
+    engine.close(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn stopping_waits_for_the_extra_receives() {
+    let (fx, slow) = slow_receive_fixture(Duration::from_millis(15), 1000).await;
+    let engine = fx.engine(|c| c.max_in_flight = 200);
+    // Nothing is handled: receives fill the in-flight slots.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(slow.receives.take_peak() > 1);
+    engine.stop_receiving(false).await;
+    assert_eq!(slow.receives.active(), 0);
+    assert_eq!(engine.stats().metrics["pollers"], 0);
+    let buffered = engine.drain_buffered();
+    assert!(buffered.len() <= 200);
+    drop(buffered);
+    engine.close(true).await;
+    assert_eq!(fx.stored().len(), 1000);
 }
 
 #[tokio::test(start_paused = true)]

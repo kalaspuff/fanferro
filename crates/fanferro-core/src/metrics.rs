@@ -149,6 +149,8 @@ metric_set! {
         settling: Gauge,
         /// Messages decoded and waiting to be picked up by the dispatcher.
         buffered: Gauge,
+        /// Receive loops running (`pollers`, plus extra ones while receives come back full).
+        pollers: Gauge,
     }
 }
 

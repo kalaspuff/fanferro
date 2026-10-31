@@ -8,6 +8,7 @@ first use, or up front with ``await client.provision()``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Literal
@@ -156,6 +157,19 @@ class _Destination(_Resource):
         self._transport: Transport | None = None
         self._destination_cache: tuple[Any, dict[str, Any]] | None = None
         self._native_destination_cache: tuple[Mapping[str, Any], Any] | None = None
+        self._pending_subscriptions: list[Subscription] = []
+        """Subscriptions of this topic declared after the client provisioned, resolved before publishing."""
+
+    async def _resolve_pending_subscriptions(self) -> None:
+        """Resolves subscriptions declared after the client provisioned, so the next message reaches them.
+
+        A subscription that is unavailable (its provisioning policy logs the failure) stays pending
+        and is tried again, after the usual back-off, by a later publish.
+        """
+        for subscription in list(self._pending_subscriptions):
+            with contextlib.suppress(ResourceUnavailableError):
+                await subscription.resolve()
+        self._pending_subscriptions = [s for s in self._pending_subscriptions if not s.resolved]
 
     @property
     def envelope(self) -> Envelope:
@@ -282,6 +296,8 @@ class _Destination(_Resource):
         """
         message = body if isinstance(body, OutgoingMessage) else self._message(body, options)
         info = await self._resolve()
+        if self._pending_subscriptions:
+            await self._resolve_pending_subscriptions()
         return await self._prepare_message(message, info)
 
     async def publish(self, body: Any, /, **options: Any) -> PublishResult:
@@ -301,6 +317,8 @@ class _Destination(_Resource):
         message = body if isinstance(body, OutgoingMessage) else self._message(body, options)
         client = self._client
         info = self._info if self._info is not None else await self._resolve()
+        if self._pending_subscriptions:
+            await self._resolve_pending_subscriptions()
         started = monotonic()
         core = client._core_client if client._core_client is not None else await client._core()
         transport = None if self._large_payloads is _UNSET else await self._transport_for()
@@ -376,6 +394,8 @@ class _Destination(_Resource):
             return BatchPublishResult(())
         client = self._client
         info = await self._resolve()
+        if self._pending_subscriptions:
+            await self._resolve_pending_subscriptions()
         core = await client._core()
         transport = await self._transport_for()
         started = monotonic()

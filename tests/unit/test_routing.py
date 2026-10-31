@@ -10,6 +10,7 @@ import pytest
 import fanferro
 from fanferro import matchers as m
 from fanferro.message_types import MessageTypes
+from fanferro.routing import Handler
 from fanferro.testing import build_message
 
 
@@ -108,6 +109,30 @@ def test_type_routing(types: MessageTypes) -> None:
     assert router.resolve(legacy, types).handler is on_created  # type: ignore[union-attr]
     assert router.resolve(build_message(Cancelled(1)), types).handler is on_cancelled  # type: ignore[union-attr]
     assert router.resolve(build_message({"x": 1}, type="unknown"), types) is None
+
+
+async def on_any_message(message: fanferro.Message[Any]) -> None: ...
+
+
+async def on_any_body(body: Any) -> None: ...
+
+
+async def on_object_body(body: object) -> None: ...
+
+
+@pytest.mark.parametrize("handler", [on_any, on_any_message, on_unannotated, on_any_body, on_object_body])
+def test_routes_without_a_message_type_for_untyped_handlers_match_every_message(
+    handler: Handler, types: MessageTypes
+) -> None:
+    # Regression test for #176: these routes took typing.Any as their message type and matched nothing.
+    decorated, routed, added = fanferro.Router(), fanferro.Router(), fanferro.Router()
+    decorated.route(handler)
+    routed.route()(handler)
+    added.add(handler)
+    for router in (decorated, routed, added):
+        assert router.routes[0].message_type is None
+        for message in (build_message(Created(1)), build_message({"x": 1}, type="unknown"), build_message(b"raw")):
+            assert router.resolve(message, types) is router.routes[0]
 
 
 def test_matchers_priorities_and_default(types: MessageTypes) -> None:

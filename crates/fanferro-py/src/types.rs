@@ -4,13 +4,16 @@
 use fanferro_core::types::{AttributeData, AttributeValue, BaseType, Payload, WireMessage};
 use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict};
+use pyo3::types::{PyBytes, PyDict, PyType};
 
 use crate::convert::{
     attribute_value_to_py, attributes_from_py, attributes_to_py, bytes_from_py, headers_from_py, headers_to_py,
     time_from_py, time_to_py,
 };
 use crate::errors::{ValidationError, to_py_err};
+
+/// What `__reduce__` returns: the class and the arguments that rebuild the object.
+type Reduced<'py, Args> = (Bound<'py, PyType>, Args);
 
 /// A message attribute value with its SQS/SNS data type.
 #[pyclass(name = "AttributeValue", module = "fanferro._core", frozen, eq, hash, skip_from_py_object)]
@@ -72,6 +75,12 @@ impl PyAttributeValue {
     #[getter]
     fn value<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         attribute_value_to_py(py, &self.inner)
+    }
+
+    /// Pickles (and copies) the attribute as `AttributeValue(data_type, value)`.
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py, (String, Bound<'py, PyAny>)>> {
+        let inner = &slf.get().inner;
+        Ok((slf.get_type(), (inner.data_type().to_owned(), attribute_value_to_py(slf.py(), inner)?)))
     }
 
     fn __repr__(&self) -> String {
@@ -286,6 +295,13 @@ impl PyWireMessage {
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
         other.cast::<Self>().is_ok_and(|other| other.get().inner == self.inner)
+    }
+
+    /// Pickles (and copies) the message as `WireMessage(body, attributes)`.
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py, (Bound<'py, PyBytes>, Bound<'py, PyDict>)>> {
+        let py = slf.py();
+        let inner = &slf.get().inner;
+        Ok((slf.get_type(), (PyBytes::new(py, &inner.body), attributes_to_py(py, &inner.attributes)?)))
     }
 
     fn __repr__(&self) -> String {

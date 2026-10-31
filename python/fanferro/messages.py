@@ -710,6 +710,19 @@ class PreparedMessage:
         """Parses :meth:`to_json` output."""
         return cls.from_dict(json.loads(text))
 
+    @property
+    def fifo_group(self) -> str | None:
+        """The FIFO message group that orders this message, or ``None`` for a standard destination.
+
+        A string ``"<kind>:<destination name>:<group id>"``, e.g. ``"queue:orders.fifo:customer-7"``.
+        Outbox stores that several relays share claim the records of one such group exclusively
+        (see :meth:`fanferro.outbox.OutboxStore.claim_batch`): store it in a column next to the
+        message.
+        """
+        if not self.destination.get("fifo"):
+            return None
+        return f"{self.destination.get('kind', 'queue')}:{self.destination_name}:{self.group_id or ''}"
+
     def core_entry(self) -> dict[str, Any]:
         """The batch entry passed to the core."""
         return {
