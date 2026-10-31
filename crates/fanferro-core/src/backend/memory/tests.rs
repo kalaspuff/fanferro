@@ -47,9 +47,12 @@ async fn send_receive_delete_and_visibility() {
     assert_eq!(again.len(), 1);
     assert_eq!(again[0].system.approximate_receive_count, 2);
 
-    // The first receipt handle is stale now.
+    // A standard queue deletes the message with the first receipt handle too (docs/parity M2).
     let results = backend.sqs.delete_message_batch(&url, vec![messages[0].receipt_handle.clone()]).await.unwrap();
-    assert!(results[0].is_err());
+    assert!(results[0].is_ok());
+    assert!(backend.sqs.receive_messages(receive(&url, 10, Some(5))).await.unwrap().is_empty());
+    tokio::time::advance(Duration::from_secs(6)).await;
+    assert!(backend.sqs.receive_messages(receive(&url, 10, Some(5))).await.unwrap().is_empty());
     let results = backend.sqs.delete_message_batch(&url, vec![again[0].receipt_handle.clone()]).await.unwrap();
     assert!(results[0].is_ok());
     // Deleting twice is idempotent.
@@ -86,17 +89,128 @@ async fn change_visibility_extends_and_releases() {
         .await
         .unwrap();
     assert!(results[0].is_ok());
-    assert_eq!(backend.sqs.receive_messages(receive(&url, 1, Some(5))).await.unwrap().len(), 1);
-    // Old handle is no longer in flight.
+    let again = backend.sqs.receive_messages(receive(&url, 1, Some(5))).await.unwrap();
+    assert_eq!(again.len(), 1);
+    // A standard queue applies the handle of the earlier receive too (docs/parity M2).
     let results = backend
         .sqs
         .change_visibility_batch(
             &url,
-            vec![VisibilityChange { receipt_handle: message.receipt_handle, timeout: Duration::from_secs(1) }],
+            vec![VisibilityChange { receipt_handle: message.receipt_handle, timeout: Duration::ZERO }],
         )
         .await
         .unwrap();
-    assert!(results[0].is_err());
+    assert!(results[0].is_ok());
+    assert_eq!(backend.sqs.receive_messages(receive(&url, 1, Some(5))).await.unwrap().len(), 1);
+}
+
+/// One visibility change, as the batch call's only entry.
+async fn change_visibility(
+    backend: &Backend,
+    url: &str,
+    handle: &str,
+    seconds: u64,
+) -> std::result::Result<(), BatchEntryError> {
+    let change = VisibilityChange { receipt_handle: handle.into(), timeout: Duration::from_secs(seconds) };
+    backend.sqs.change_visibility_batch(url, vec![change]).await.unwrap().remove(0)
+}
+
+async fn delete(backend: &Backend, url: &str, handle: &str) -> std::result::Result<(), BatchEntryError> {
+    backend.sqs.delete_message_batch(url, vec![handle.into()]).await.unwrap().remove(0)
+}
+
+fn entry(result: std::result::Result<(), BatchEntryError>) -> (String, String) {
+    let error = result.expect_err("the entry should fail");
+    (error.code, error.message.unwrap_or_default())
+}
+
+#[tokio::test(start_paused = true)]
+async fn fifo_queues_refuse_receipt_handles_of_earlier_receives() {
+    // docs/parity M3: the broker refused them with other codes and texts.
+    let (broker, backend) = broker();
+    let fifo = StringMap::from([("FifoQueue".to_string(), "true".to_string())]);
+    let url = backend.sqs.create_queue("q.fifo", &fifo, &StringMap::new()).await.unwrap();
+    let request = SendRequest { group_id: Some("g".into()), deduplication_id: Some("d".into()), ..send("a") };
+    backend.sqs.send_message(&url, request).await.unwrap();
+    let first = backend.sqs.receive_messages(receive(&url, 1, Some(2))).await.unwrap().remove(0);
+    tokio::time::advance(Duration::from_secs(3)).await;
+    let second = backend.sqs.receive_messages(receive(&url, 1, Some(30))).await.unwrap().remove(0);
+    let expired = ("ReceiptHandleIsInvalid".to_string(), "The receipt handle has expired".to_string());
+    assert_eq!(entry(delete(&backend, &url, &first.receipt_handle).await), expired);
+    assert_eq!(entry(change_visibility(&backend, &url, &first.receipt_handle, 0).await), expired);
+    assert!(broker.queue_messages(&url).unwrap()[0].in_flight, "the message stays received");
+    delete(&backend, &url, &second.receipt_handle).await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn receipt_handles_fail_like_sqs() {
+    // docs/parity M4, M5, M7: deleted messages, handles that are none, and the visibility limits.
+    let (_, backend) = broker();
+    let url = backend.sqs.create_queue("q", &StringMap::new(), &StringMap::new()).await.unwrap();
+    backend.sqs.send_message(&url, send("a")).await.unwrap();
+    let message = backend.sqs.receive_messages(receive(&url, 1, Some(30))).await.unwrap().remove(0);
+    let handle = message.receipt_handle.clone();
+    assert_eq!(
+        entry(change_visibility(&backend, &url, &handle, 43_201).await),
+        (
+            "InvalidParameterValue".to_string(),
+            "Value 43201 for parameter VisibilityTimeout is invalid. Reason: VisibilityTimeout must be an integer between 0 and 43200.".to_string()
+        )
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    // The visibility ends at most 12 hours after the receive.
+    assert_eq!(
+        entry(change_visibility(&backend, &url, &handle, 43_200).await),
+        (
+            "InvalidParameterValue".to_string(),
+            "Value 43200 for parameter VisibilityTimeout is invalid. Reason: Total VisibilityTimeout for the message is beyond the limit [43200 seconds].".to_string()
+        )
+    );
+    change_visibility(&backend, &url, &handle, 43_199).await.unwrap();
+    assert_eq!(
+        entry(delete(&backend, &url, "garbage").await),
+        (
+            "ReceiptHandleIsInvalid".to_string(),
+            "The input receipt handle \"garbage\" is not a valid receipt handle.".to_string()
+        )
+    );
+    assert_eq!(
+        entry(change_visibility(&backend, &url, "garbage", 10).await),
+        (
+            "ReceiptHandleIsInvalid".to_string(),
+            "The input receipt handle \"garbage\" is not a valid receipt handle.".to_string()
+        )
+    );
+    delete(&backend, &url, &handle).await.unwrap();
+    delete(&backend, &url, &handle).await.unwrap();
+    assert_eq!(
+        entry(change_visibility(&backend, &url, &handle, 10).await),
+        (
+            "InvalidParameterValue".to_string(),
+            format!(
+                "Value {handle} for parameter ReceiptHandle is invalid. Reason: Message does not exist or is not available for visibility timeout change."
+            )
+        )
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_released_message_is_hidden_again_by_its_receipt_handle() {
+    // docs/parity M6: a standard queue changes the visibility of a message that is visible again
+    // (the broker answered MessageNotInflight).
+    let (broker, backend) = broker();
+    let url = backend.sqs.create_queue("q", &StringMap::new(), &StringMap::new()).await.unwrap();
+    backend.sqs.send_message(&url, send("a")).await.unwrap();
+    let message = backend.sqs.receive_messages(receive(&url, 1, Some(30))).await.unwrap().remove(0);
+    change_visibility(&backend, &url, &message.receipt_handle, 0).await.unwrap();
+    assert!(!broker.queue_messages(&url).unwrap()[0].in_flight);
+    change_visibility(&backend, &url, &message.receipt_handle, 20).await.unwrap();
+    assert!(broker.queue_messages(&url).unwrap()[0].in_flight);
+    assert!(backend.sqs.receive_messages(receive(&url, 1, Some(30))).await.unwrap().is_empty());
+    let attributes = backend.sqs.get_queue_attributes(&url).await.unwrap();
+    assert_eq!(attributes["ApproximateNumberOfMessagesNotVisible"], "1");
+    tokio::time::advance(Duration::from_secs(21)).await;
+    assert_eq!(backend.sqs.receive_messages(receive(&url, 1, Some(30))).await.unwrap().len(), 1);
 }
 
 #[tokio::test(start_paused = true)]

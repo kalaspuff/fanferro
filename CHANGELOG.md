@@ -15,6 +15,11 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   queues, `FifoQueue` on an existing queue, a per-message-group throughput limit without the
   message group deduplication scope; queues encrypted with a KMS key report
   `SqsManagedSseEnabled=false` (#146)
+- **memory:** Receipt handles of the in-memory broker behave like SQS's: on standard queues the
+  handle of an earlier receive still deletes the message or changes its visibility, and a message
+  that is visible again can be hidden with its latest handle; FIFO queues refuse earlier handles
+  with "The receipt handle has expired"; visibility changes past 12 hours after the receive and for
+  deleted messages fail with SQS's codes and texts (#147)
 
 ## [0.6.0] - 2026-10-31
 
