@@ -492,6 +492,21 @@ fn enqueue(state: &mut State, queue_url: &str, operation: &'static str, request:
             ),
         ));
     }
+    for (parameter, id) in
+        [("MessageGroupId", &request.group_id), ("MessageDeduplicationId", &request.deduplication_id)]
+    {
+        if let Some(id) = id
+            && !crate::publish::is_fifo_id(id)
+        {
+            return Err(invalid(
+                "sqs",
+                operation,
+                format!(
+                    "Value {id} for parameter {parameter} is invalid. Reason: {parameter} can only include alphanumeric and punctuation characters. 1 to 128 in length."
+                ),
+            ));
+        }
+    }
     let now = Instant::now();
     let mut deduplication_id = request.deduplication_id;
     // SQS moves messages to a dead-letter queue without deduplicating them.

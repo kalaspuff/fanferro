@@ -985,3 +985,27 @@ async fn errors_carry_the_services_statuses_and_texts() {
         "payload error: payload URL is not accessible (HTTP 404 Not Found); it may have expired"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn fifo_ids_are_validated_like_sqs() {
+    // docs/parity M8: the broker accepted group and deduplication ids SQS refuses.
+    let (_, backend) = broker();
+    let url =
+        backend.sqs.create_queue("q.fifo", &attributes(&[("FifoQueue", "true")]), &StringMap::new()).await.unwrap();
+    for (group, deduplication, parameter, value) in
+        [("a b", "d", "MessageGroupId", "a b"), ("g", &*"d".repeat(129), "MessageDeduplicationId", &*"d".repeat(129))]
+    {
+        let request =
+            SendRequest { group_id: Some(group.into()), deduplication_id: Some(deduplication.into()), ..send("x") };
+        let err = backend.sqs.send_message(&url, request).await.unwrap_err();
+        assert_eq!(
+            code_and_message(&err),
+            (
+                "InvalidParameterValue".to_string(),
+                format!(
+                    "Value {value} for parameter {parameter} is invalid. Reason: {parameter} can only include alphanumeric and punctuation characters. 1 to 128 in length."
+                )
+            )
+        );
+    }
+}
