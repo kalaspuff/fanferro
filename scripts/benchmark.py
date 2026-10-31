@@ -2,19 +2,27 @@
 
     uv run python scripts/benchmark.py                        # in-memory broker
     uv run python scripts/benchmark.py --endpoint http://127.0.0.1:4566 -n 2000   # MiniStack
+    uv run python scripts/benchmark.py --endpoint http://127.0.0.1:4566 --latency 0.015 --scenarios consume-io
 
 CPU time is the whole process (the event loop and the Rust runtime's threads), so it shows what
 fanferro costs per message even when the broker is the bottleneck of the wall time. Each scenario
-uses a queue of its own; consumers handle messages with an empty handler. Results vary between
-runs: compare the best of a few (``--repeat``), on the same machine.
+uses a queue of its own; consumers handle messages with an empty handler, except in ``consume-io``,
+whose handlers wait 50 ms (I/O-bound, ``concurrency=100``: at most 2,000 messages per second).
+``--latency`` puts a proxy in front of the endpoint that delays every call, like the round trip
+to SQS from inside its region (about 15 ms), which local endpoints do not have. Results vary
+between runs: compare the best of a few (``--repeat``), on the same machine.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import http.client
+import http.server
 import json
+import threading
 import time
+import urllib.parse
 import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -87,7 +95,80 @@ async def fill(queue: fanferro.Queue, messages: int) -> None:
         await asyncio.gather(*calls[start : start + 8])
 
 
-async def consume(client: fanferro.Client, queue: fanferro.Queue, messages: int, *, typed: bool) -> Result:
+class _DelayingProxy(http.server.BaseHTTPRequestHandler):
+    """Forwards every request to ``target`` after ``delay`` seconds (keep-alive, no Nagle delays)."""
+
+    protocol_version = "HTTP/1.1"
+    disable_nagle_algorithm = True
+    wbufsize = -1
+    target: tuple[str, int] = ("127.0.0.1", 4566)
+    delay = 0.0
+
+    def setup(self) -> None:
+        super().setup()
+        self.upstream = http.client.HTTPConnection(*self.target)
+
+    def finish(self) -> None:
+        self.upstream.close()
+        super().finish()
+
+    def do_POST(self) -> None:
+        self._forward()
+
+    def do_GET(self) -> None:
+        self._forward()
+
+    def do_PUT(self) -> None:
+        self._forward()
+
+    def do_DELETE(self) -> None:
+        self._forward()
+
+    def do_HEAD(self) -> None:
+        self._forward()
+
+    def _forward(self) -> None:
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else None
+        time.sleep(self.delay)
+        headers = {key: value for key, value in self.headers.items() if key.lower() != "connection"}
+        self.upstream.request(self.command, self.path, body=body, headers=headers)
+        response = self.upstream.getresponse()
+        data = response.read()
+        self.send_response(response.status)
+        for key, value in response.getheaders():
+            if key.lower() not in ("connection", "transfer-encoding", "content-length"):
+                self.send_header(key, value)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(data)
+
+    def log_message(self, format: str, *args: Any) -> None:
+        pass
+
+
+def start_proxy(endpoint: str, delay: float) -> str:
+    """Starts a proxy in front of ``endpoint`` that delays every call by ``delay``; returns its URL."""
+    parsed = urllib.parse.urlsplit(endpoint)
+    handler = type(
+        "Proxy", (_DelayingProxy,), {"target": (parsed.hostname or "127.0.0.1", parsed.port or 80), "delay": delay}
+    )
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return f"http://127.0.0.1:{server.server_address[1]}"
+
+
+async def consume(
+    client: fanferro.Client,
+    queue: fanferro.Queue,
+    messages: int,
+    *,
+    typed: bool,
+    io: bool = False,
+    options: dict[str, Any] | None = None,
+) -> Result:
     await fill(queue, messages)
     done = asyncio.Event()
     handled = 0
@@ -99,14 +180,16 @@ async def consume(client: fanferro.Client, queue: fanferro.Queue, messages: int,
             done.set()
 
     async def handle_message(message: fanferro.Message[Any]) -> None:
+        if io:
+            await asyncio.sleep(0.05)
         count()
 
     async def handle_order(order: Order) -> None:
         count()
 
     handler = handle_order if typed else handle_message
-    consumer = client.consumer(queue, handler, concurrency=100, wait_time=1)
-    scenario = "consume-typed" if typed else "consume"
+    consumer = client.consumer(queue, handler, **({"concurrency": 100, "wait_time": 1} | (options or {})))
+    scenario = "consume-typed" if typed else "consume-io" if io else "consume"
 
     async def work() -> None:
         await consumer.start()
@@ -118,10 +201,18 @@ async def consume(client: fanferro.Client, queue: fanferro.Queue, messages: int,
         await consumer.stop()
 
 
-SCENARIOS = ("publish", "publish-concurrent", "publish-batch-10", "publish-batch-100", "consume", "consume-typed")
+SCENARIOS = (
+    "publish",
+    "publish-concurrent",
+    "publish-batch-10",
+    "publish-batch-100",
+    "consume",
+    "consume-typed",
+    "consume-io",
+)
 
 
-async def run(scenario: str, messages: int, endpoint: str | None) -> Result:
+async def run(scenario: str, messages: int, endpoint: str | None, options: dict[str, Any] | None = None) -> Result:
     quiet = fanferro.LoggingConfig(enabled=False)  # e.g. warnings about the missing dead-letter queue
     if endpoint is None:
         client = testing.memory_client(logging=quiet)
@@ -145,7 +236,14 @@ async def run(scenario: str, messages: int, endpoint: str | None) -> Result:
             if scenario.startswith("publish-batch-"):
                 size = int(scenario.removeprefix("publish-batch-"))
                 return await measure(scenario, messages, lambda: publish_batches(queue, messages, size))
-            return await consume(client, queue, messages, typed=scenario == "consume-typed")
+            return await consume(
+                client,
+                queue,
+                messages,
+                typed=scenario == "consume-typed",
+                io=scenario == "consume-io",
+                options=options,
+            )
         finally:
             if endpoint is not None:
                 await queue.delete()
@@ -159,8 +257,26 @@ async def main() -> None:
     parser.add_argument(
         "--scenarios", default=",".join(SCENARIOS), help=f"comma-separated, from {', '.join(SCENARIOS)}"
     )
+    parser.add_argument(
+        "--latency", type=float, default=0.0, help="seconds added to every call to --endpoint (e.g. 0.015)"
+    )
+    parser.add_argument(
+        "-o",
+        "--consumer-option",
+        action="append",
+        default=[],
+        metavar="NAME=JSON",
+        help="a consumer option for the consume scenarios, e.g. -o pollers=4 (repeatable)",
+    )
     parser.add_argument("--json", action="store_true", help="print one JSON object per scenario")
     args = parser.parse_args()
+    try:
+        options = {key: json.loads(value) for key, _, value in (o.partition("=") for o in args.consumer_option)}
+    except json.JSONDecodeError as error:
+        parser.error(f"--consumer-option values are JSON: {error}")
+    if args.latency and not args.endpoint:
+        parser.error("--latency needs --endpoint")
+    endpoint = start_proxy(args.endpoint, args.latency) if args.latency else args.endpoint
     scenarios = [scenario.strip() for scenario in args.scenarios.split(",") if scenario.strip()]
     unknown = sorted(set(scenarios) - set(SCENARIOS))
     if unknown:
@@ -168,7 +284,7 @@ async def main() -> None:
     if not args.json:
         print(f"{'scenario':20} {'messages/s':>11} {'wall µs/msg':>12} {'CPU µs/msg':>11}")
     for scenario in scenarios:
-        runs = [await run(scenario, args.messages, args.endpoint) for _ in range(max(1, args.repeat))]
+        runs = [await run(scenario, args.messages, endpoint, options) for _ in range(max(1, args.repeat))]
         row = min(runs, key=lambda result: result.wall).row()
         if args.json:
             print(json.dumps(row), flush=True)

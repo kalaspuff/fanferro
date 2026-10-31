@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import functools
 import signal
 import time
@@ -51,6 +52,8 @@ type ConsumerState = Literal["created", "starting", "running", "stopping", "stop
 
 _MAX_VISIBILITY_DELAY = 12 * 3600 - 60
 _MAX_REQUEUE_DELAY = 900.0
+_MAX_ATTRIBUTES = 10
+"""Message attributes SQS allows (a requeued copy needs one for ``fanferro.attempt``)."""
 _MAX_HANDED_BACK = 10_000
 """Messages whose hand-backs a consumer remembers (the oldest are forgotten first)."""
 _DELIVERY_WAIT = 0.5
@@ -63,6 +66,28 @@ class Duplicate(Discard):
 
     def __init__(self, reason: str = "duplicate message") -> None:
         super().__init__(reason)
+
+
+class _Postpone(HandlerAction):
+    """Hands a message back unprocessed for ``delay`` seconds, without spending a processing attempt.
+
+    Raised by the idempotency middleware for messages whose claim is held elsewhere.
+
+    Standard queues get a copy that keeps the attempt number (which also resets SQS's receive count
+    for a ``RedrivePolicy``); FIFO queues, and messages without room for ``fanferro.attempt``, change
+    the visibility, and only the consumer that postponed the message knows it was no attempt.
+    """
+
+    def __init__(self, reason: str, *, delay: float) -> None:
+        super().__init__(reason)
+        self.delay = delay
+
+
+def _report_error(message: Message[Any], text: str, error: BaseException) -> None:
+    """Reports an error of middleware that does not fail the message (``consumer.error``)."""
+    settler = message._settler
+    if isinstance(settler, _Settler):
+        settler._consumer._emit(EventKind.CONSUMER_ERROR, text, message=message, exception=error)
 
 
 class _Stats:
@@ -346,6 +371,7 @@ class Consumer:
         receive_batch_wait: float = 0.1,
         wait_time: float = 20.0,
         pollers: int = 1,
+        max_pollers: int | None = None,
         rate_limit: RateLimit | float | None = None,
         visibility_timeout: float | None = None,
         heartbeat: Heartbeat | bool = True,
@@ -377,6 +403,8 @@ class Consumer:
             raise ValueError("wait_time must be between 0 and 20 seconds")
         if not 1 <= pollers <= 64:
             raise ValueError("pollers must be between 1 and 64")
+        if max_pollers is not None and not pollers <= max_pollers <= 64:
+            raise ValueError(f"max_pollers must be between pollers ({pollers}) and 64")
         if not 0 <= settle_linger <= 1:
             raise ValueError("settle_linger must be between 0 and 1 second")
         self._client = client
@@ -385,13 +413,15 @@ class Consumer:
         self.name = name or queue.name
         self.concurrency = concurrency
         # One receive batch per poller ahead of the handlers (the next receive overlaps with them),
-        # but not more than the handlers can take at once.
+        # but not more than the handlers can take at once; extra receive loops bring one each too.
         self.prefetch = min(batch_size, concurrency) * pollers if prefetch is None else prefetch
+        self._extra_poller_slots = min(batch_size, concurrency) if prefetch is None else 0
         self.batch_size = batch_size
         self.min_receive_batch = min_receive_batch
         self.receive_batch_wait = receive_batch_wait
         self.wait_time = wait_time
         self.pollers = pollers
+        self.max_pollers = max_pollers
         self.rate_limit = RateLimit(rate_limit) if isinstance(rate_limit, int | float) else rate_limit
         self.visibility_timeout = visibility_timeout
         self.heartbeat = heartbeat
@@ -551,6 +581,8 @@ class Consumer:
             "receive_batch_wait": float(self.receive_batch_wait),
             "wait_time": float(self.wait_time),
             "pollers": self.pollers,
+            "max_pollers": self.max_pollers,
+            "extra_poller_slots": self._extra_poller_slots,
             "rate_limit": (
                 {"per_second": self.rate_limit.per_second, "burst": self.rate_limit.burst} if self.rate_limit else None
             ),
@@ -880,8 +912,14 @@ class Consumer:
                 continue
             self._last_activity = time.monotonic()
             self._client._telemetry.record_consumed(self.queue.name, len(deliveries))
-            for delivery in deliveries:
-                self._schedule(delivery)
+            self._schedule_all(deliveries)
+            # Not kept across the next wait for deliveries: a delivery nothing else holds must be
+            # dropped (released) when its task ends.
+            del deliveries
+
+    def _schedule_all(self, deliveries: list[Delivery]) -> None:
+        for delivery in deliveries:
+            self._schedule(delivery)
 
     def _schedule(self, delivery: Delivery) -> None:
         if self._sequenced and (group := delivery.group_id) is not None:
@@ -979,14 +1017,30 @@ class Consumer:
                 return await self._process(delivery, slot)
             finally:
                 slot.release()
-        except Exception as error:
-            if not task:
-                raise
+        except Exception as error:  # noqa: BLE001 - deliberate catch-all; the error is reported, never swallowed silently
             self._task_failed(error)
+            await self._settle_failed_task(delivery)
             return None
         finally:
             if task:
                 self._task_ended()
+
+    async def _settle_failed_task(self, delivery: Delivery) -> None:
+        """Settles a message whose task failed unexpectedly, instead of leaving it leased.
+
+        A processed message is retried after the retry policy's backoff (its next receive counts
+        as an attempt, so ``max_attempts`` and the dead-letter policy still apply); one that never
+        started is released.
+        """
+        status = delivery.lease_status
+        if status == "buffered":
+            await self._release_quietly(delivery)
+        elif status == "active":
+            try:
+                delay = self.retry_policy.backoff.delay(max(delivery.receive_count, 1))
+                await delivery.nack(min(delay, _MAX_VISIBILITY_DELAY))
+            except Exception:  # noqa: BLE001 - last resort: make it visible again
+                await self._release_quietly(delivery)
 
     # -- processing ------------------------------------------------------------------------
 
@@ -1075,6 +1129,9 @@ class Consumer:
                 await self._failed(message, exc)
             finally:
                 telemetry.record_process(self.queue.name, monotonic() - started, error)
+                # The traceback refers to this frame: no cycle that holds the delivery until the
+                # garbage collector runs.
+                error = None
             if message._settlements is not None:
                 await self._confirm_settlements(message)
         # None when a settlement failed: the message comes back, so a FIFO group must wait for it.
@@ -1228,6 +1285,9 @@ class Consumer:
                 EventKind.MESSAGE_FAILED, "handler failed after settling the message", message=message, exception=error
             )
             return
+        if isinstance(error, _Postpone):
+            await self._postpone(message, error.delay)
+            return
         if isinstance(error, Duplicate):
             self._stats.duplicates += 1
             self._emit(EventKind.MESSAGE_DUPLICATE, "duplicate message skipped", message=message)
@@ -1245,7 +1305,7 @@ class Consumer:
         elif isinstance(error, Retry):
             action = "retry"
         else:
-            action = self.retry_policy.decide(error)
+            action = self._decide(message, error)
         exhausted = action in ("retry", "requeue") and self.retry_policy.exhausted(message.attempt)
         if exhausted:
             action = self.dead_letter_policy.on_exhausted
@@ -1273,6 +1333,57 @@ class Consumer:
             await self._settle_safely(message, "discard", error, reason=str(error) or "discarded")
         else:
             await self._settle_safely(message, "retry", error, delay=delay)
+
+    def _decide(self, message: Message[Any], error: BaseException) -> Literal["retry", "dead_letter", "discard"]:
+        """The retry policy's decision; one that raises (e.g. its ``classify``) is reported and skipped."""
+        policy = self.retry_policy
+        try:
+            return policy.decide(error)
+        except Exception as hook_error:  # noqa: BLE001 - deliberate catch-all; the error is reported, never swallowed silently
+            self._emit(
+                EventKind.CONSUMER_ERROR,
+                f"retry policy of consumer {self.name} failed to classify {type(error).__qualname__}; "
+                "the default classification applies",
+                message=message,
+                exception=hook_error,
+            )
+        try:
+            return dataclasses.replace(policy, classify=None).decide(error)
+        except Exception:  # noqa: BLE001 - a subclass whose decide() raises anyway: retry
+            return "retry"
+
+    async def _postpone(self, message: Message[Any], delay: float) -> None:
+        """Hands ``message`` back for ``delay`` seconds without spending a processing attempt."""
+        if message.settled or message.delivery is None:
+            return
+        delivery = message.delivery
+        attributes = message.raw_attributes
+        copy = not self._fifo and (len(attributes) < _MAX_ATTRIBUTES or "fanferro.attempt" in attributes)
+        message._begin("requeued" if copy else "retried")
+        try:
+            if copy:
+                # The copy's receive is attempt (attempt - 1) + 1: the same attempt as this one.
+                attempt = message.attempt - 1
+                await self._settler._call(
+                    message, lambda delivery: delivery.requeue(attempt, min(delay, _MAX_REQUEUE_DELAY))
+                )
+            else:
+                self._note_handed_back(delivery)  # its next receive here is not an attempt
+                await self._settler._call(message, lambda delivery: delivery.nack(min(delay, _MAX_VISIBILITY_DELAY)))
+        except (LeaseError, ShutdownError) as settle_error:
+            self._emit(
+                EventKind.MESSAGE_ACK_FAILED,
+                "could not postpone message; it will be redelivered",
+                message=message,
+                exception=settle_error,
+            )
+        except FanferroError as settle_error:
+            self._emit(
+                EventKind.CONSUMER_ERROR,
+                "failed to postpone message; it will be redelivered after its visibility timeout",
+                message=message,
+                exception=settle_error,
+            )
 
     async def _apply_action(
         self, message: Message[Any], action: FailureAction, reason: str, error: BaseException | None

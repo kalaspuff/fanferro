@@ -10,7 +10,9 @@ type, the SNS topic, or fields of a JSON body. Build them from fields and combin
     router.route(when=m.attribute("tenant").is_in("acme", "globex") & ~m.body("test").exists())
     router.route(when=(m.topic() == "orders") | m.message_type().startswith("orders."))
 
-Parenthesize comparisons when combining them: ``&`` and ``|`` bind tighter than ``==``.
+Parenthesize comparisons when combining them: ``&`` and ``|`` bind tighter than ``==``. Python's
+``and``, ``or`` and ``not`` cannot combine matchers: they raise :class:`TypeError`, as does testing a
+matcher or a field for truth (``if matcher:``).
 Any callable ``(Message) -> bool`` is accepted wherever a matcher is expected.
 """
 
@@ -59,6 +61,11 @@ class _Missing:
 MISSING: Any = _Missing()
 """Returned by field getters when the field is absent."""
 
+_NOT_A_BOOL = (
+    "combine matchers with &, | and ~ (parenthesize comparisons), not with and, or and not: "
+    "a matcher has no truth value; call it with a message to evaluate it"
+)
+
 type MessagePredicate = Callable[[Message[Any]], bool]
 
 
@@ -85,6 +92,10 @@ class Matcher:
 
     def __invert__(self) -> Matcher:
         return Matcher(lambda message: not self(message), f"~{self}")
+
+    def __bool__(self) -> bool:
+        # ``a and b`` would silently be ``b`` and ``a or b`` would be ``a``.
+        raise TypeError(_NOT_A_BOOL)
 
     def __repr__(self) -> str:
         return self._description
@@ -227,6 +238,9 @@ class Field:
     def test(self, function: Callable[[Any], bool], description: str = "satisfies predicate") -> Matcher:
         """A custom test on the value."""
         return self._matcher(lambda value: value is not MISSING and bool(function(value)), description)
+
+    def __bool__(self) -> bool:
+        raise TypeError(_NOT_A_BOOL)
 
     def __repr__(self) -> str:
         return self._description

@@ -22,10 +22,20 @@ once, so its columns are fanferro's own cost; over HTTP the CPU adds signing and
 while the elapsed time is MiniStack's (an emulator written in Python). Against SQS, round trips of
 a few milliseconds dominate, and batches, prefetch and concurrency overlap them.
 
+Round trips to SQS cap a consumer that receives one batch at a time. With a proxy that adds 15 ms
+to every call in front of MiniStack (`--latency 0.015`), `consume-io` (handlers that wait 50 ms,
+`concurrency=100`: at most 2,000 messages per second, 3,000 messages queued) reached:
+
+| Receive loops | Messages per second |
+| --- | ---: |
+| one at a time (`max_pollers=1`, the earlier behaviour) | 451 |
+| default (extra loops while receives come back full) | 1,856 |
+| `pollers=4` (four always running) | 1,880 |
+
 ## What keeps the cost down
 
 * **Full batches, overlapping.** Pollers receive full batches of ten and prefetch the next one
-  while handlers run. Acks and visibility changes go out ten per call, also while earlier calls are
+  while handlers run; while receives come back full, more receives run at once. Acks and visibility changes go out ten per call, also while earlier calls are
   in flight, and heartbeats extend ten leases per call. `send_batch()` and `publish_batch()` keep
   up to eight calls in flight (standard queues and topics).
 * **Acks do not hold handler slots.** A handler's slot goes to the next message as soon as it
@@ -43,6 +53,9 @@ a few milliseconds dominate, and batches, prefetch and concurrency overlap them.
 ```bash
 uv run python scripts/benchmark.py --repeat 5                                        # in-memory broker
 uv run python scripts/benchmark.py --endpoint http://localhost:4566 -n 2000 --repeat 3  # MiniStack
+uv run python scripts/benchmark.py --endpoint http://localhost:4566 --latency 0.015 -n 3000 --scenarios consume-io
 ```
+
+`-o NAME=JSON` passes a consumer option to the consume scenarios (`-o max_pollers=1`).
 
 Start MiniStack with `uv run ministack` first.

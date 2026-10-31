@@ -65,8 +65,10 @@ async def other(message: fanferro.Message[bytes]) -> None: ...
 
 Rules: routes are evaluated by `priority` (higher first), then registration order; the first match
 wins; `default` routes run last. A typed route without `when` matches messages whose type is the
-class's type name (or an alias from `@message_type("name", "alias")`). Messages without a type
-(foreign producers) only match `when=` routes and the default route. `client.consumer(queue, handler)`
+class's type name (or an alias from `@message_type("name", "alias")`). A route without a type or
+`when` for a handler that takes the whole message (`Message`, `Message[Any]`, no annotation) or an
+untyped body (`Any`, `object`, `dict`...) matches every message. Messages without a type (foreign
+producers) only match such routes, `when=` routes and the default route. `client.consumer(queue, handler)`
 with a single handler uses it as the default route, so it receives everything.
 
 Matchers (all in `fanferro.matchers`): `attribute(name)`, `header(name)` (falls back to attributes),
@@ -75,7 +77,8 @@ Matchers (all in `fanferro.matchers`): `attribute(name)`, `header(name)` (falls 
 when the client has a `topic_prefix`), `group_id()`; comparisons `==`, `!=`, `<`, `<=`, `>`,
 `>=`, `.is_in()`, `.exists()`, `.missing()`, `.startswith()`, `.endswith()`, `.contains()`,
 `.matches(regex)`, `.test(fn)`; combine with `&`, `|`, `~` (parenthesize comparisons:
-`(m.topic() == "orders") | ...`). Any `(Message) -> bool` callable works too.
+`(m.topic() == "orders") | ...`). Python's `and`, `or` and `not` raise `TypeError` on matchers
+(they would silently drop a condition). Any `(Message) -> bool` callable works too.
 
 No route → the dead-letter policy's `on_unroutable` action (default: dead-letter).
 
@@ -113,15 +116,26 @@ settlement is confirmed and to see its errors.
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `concurrency` | 10 | handlers running at the same time |
-| `prefetch` | `min(batch_size, concurrency) × pollers` | extra messages leased ahead (kept invisible by heartbeats) |
+| `prefetch` | `min(batch_size, concurrency) × pollers` | extra messages leased ahead (kept invisible by heartbeats); by default each extra receive loop adds a batch while it runs |
 | `batch_size` | 10 | messages per `ReceiveMessage` (1-10) |
 | `min_receive_batch` | `batch_size` (FIFO: 1) | free slots a poller waits for before receiving |
 | `receive_batch_wait` | 0.1 | seconds to wait for `min_receive_batch` free slots before receiving fewer |
 | `wait_time` | 20 | long polling wait (0-20 s; fractions round up to whole seconds, as SQS counts them; `0` short-polls and pauses a second while the queue is empty) |
-| `pollers` | 1 | concurrent receive loops (raise for high-throughput queues) |
+| `pollers` | 1 | receive loops that always run, each with one long poll in flight |
+| `max_pollers` | `None` | most receive loops at once while a backlog drains (`None`: one per full batch of `concurrency + prefetch`; `pollers` turns extra loops off) |
 | `rate_limit` | `None` | `RateLimit(per_second, burst)` or a number: max messages received per second |
 | `handler_timeout` | `None` | cancel handlers after N seconds (`HandlerTimeoutError`, retried) |
 | `settle_linger` | 0.005 | seconds a batch of acks or retries waits for more before it is sent |
+
+A receive returns at most ten messages, so one receive at a time caps a consumer at ten messages
+per round trip. While receives come back full and a full batch of handler slots is free, the
+consumer starts more receive loops (up to `max_pollers`), each ending at its first receive that
+is not full; an idle queue costs `pollers` long polls per `wait_time`, as before. With 15 ms per
+call to SQS, `concurrency=100` and handlers that wait 50 ms, this reaches about 1,860 of a
+possible 2,000 messages per second, where a single receive loop reached 450. With the default
+`prefetch`, each extra loop leases one more batch ahead while it runs; an explicit `prefetch` is a
+strict bound, and the extra loops only use its free slots
+([ADR 0012](../adr/0012-receives-follow-the-backlog.md)).
 
 Acks and retries are sent in batch calls (`DeleteMessageBatch`, `ChangeMessageVisibilityBatch`)
 of up to ten messages: a batch goes out as soon as it is full, also while earlier calls are still in

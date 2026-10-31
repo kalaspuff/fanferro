@@ -264,6 +264,8 @@ class Client:
         self._pump_users = 0
         self._pump_task: asyncio.Task[None] | None = None
         self._entered = False
+        self._provisioned = False
+        """Whether everything declared was provisioned once (later subscriptions resolve before publishing)."""
 
     # -- connection ------------------------------------------------------------------------
 
@@ -589,7 +591,10 @@ class Client:
         """Declares (or returns the already declared) subscription of ``queue`` to ``topic``.
 
         Declaring it again returns the same subscription; settings that differ from the first
-        declaration raise :class:`~fanferro.ConfigurationError`.
+        declaration raise :class:`~fanferro.ConfigurationError`. A subscription declared after the
+        client provisioned everything (``async with client`` or ``await client.provision()``) is
+        resolved before the topic's next ``publish``, ``publish_batch`` or ``prepare``, so messages
+        published after the declaration reach the queue.
 
         Args:
             topic: Topic handle, or a topic name (the client's ``topic_prefix`` is prepended).
@@ -634,6 +639,10 @@ class Client:
             provisioning=provisioning,
         )
         self._subscriptions.append(subscription)
+        if self._provisioned:
+            # Provisioning already ran: without this, messages published to the topic before a
+            # consumer of the queue starts would reach no queue and be lost.
+            topic_handle._pending_subscriptions.append(subscription)
         return subscription
 
     def _declared_queue(self, name: str, *, prefixed: bool = True) -> Queue | None:
@@ -665,6 +674,8 @@ class Client:
         to each resource's failure modes; resources configured to only log failures are reported as
         exceptions in the returned list.
         """
+        if not resources:
+            self._provisioned = True
         targets: list[Topic | Queue | Subscription] = list(resources) or [
             *self._topics.values(),
             *self._queues.values(),
@@ -775,8 +786,8 @@ class Client:
                 to add routes later with ``@consumer.route(...)``.
             **options: :class:`~fanferro.Consumer` options: ``concurrency``, ``prefetch``,
                 ``batch_size``, ``min_receive_batch``, ``receive_batch_wait``, ``wait_time``,
-                ``pollers``, ``rate_limit``, ``visibility_timeout``, ``heartbeat``, ``retry``,
-                ``dead_letter``, ``shutdown``, ``handler_timeout``, ``ordering``,
+                ``pollers``, ``max_pollers``, ``rate_limit``, ``visibility_timeout``, ``heartbeat``,
+                ``retry``, ``dead_letter``, ``shutdown``, ``handler_timeout``, ``ordering``,
                 ``strict_ordering``, ``envelopes``, ``middleware``, ``auto_ack``, ``settle_linger``,
                 ``sns_unwrap``, ``auto_confirm_subscriptions``, ``delete_offloaded_payloads``,
                 ``name``.
@@ -913,7 +924,11 @@ class Client:
     async def publish_prepared_batch(
         self, messages: Sequence[PreparedMessage], *, raise_on_failure: bool = False
     ) -> BatchPublishResult:
-        """Sends prepared messages, batching those with the same destination."""
+        """Sends prepared messages, batching those with the same destination.
+
+        Like ``publish_batch``, each destination's batch emits ``publish.succeeded`` (with the
+        count) and ``publish.failed`` per failed entry, and records the publish metrics.
+        """
         core = await self._core()
         results: list[PublishResult | BatchFailure | None] = [None] * len(messages)
         groups: dict[str, list[int]] = {}
@@ -922,18 +937,47 @@ class Client:
             groups.setdefault(key, []).append(index)
         for indexes in groups.values():
             first = messages[indexes[0]]
-            transport = await self._transport_for_destination(first)
-            try:
-                receipts = await core.publish_batch(
-                    first.destination, [messages[i].core_entry() for i in indexes], transport=transport
-                )
-            except Exception as error:  # noqa: BLE001 - deliberate catch-all; the error is reported, never swallowed silently
-                receipts = [error] * len(indexes)
+            name = first.destination_name
+            kind = first.destination.get("kind", "queue")
+            started = monotonic()
+            with self._telemetry.publish_span(name, kind, None, batch_size=len(indexes)) as span:
+                try:
+                    transport = await self._transport_for_destination(first)
+                    receipts = await core.publish_batch(
+                        first.destination, [messages[i].core_entry() for i in indexes], transport=transport
+                    )
+                except Exception as error:  # noqa: BLE001 - deliberate catch-all; the error is reported, never swallowed silently
+                    self._telemetry.mark_error(span, error)
+                    receipts = [error] * len(indexes)
+            duration = monotonic() - started
+            succeeded = 0
             for index, receipt in zip(indexes, receipts, strict=True):
                 if isinstance(receipt, BaseException):
                     results[index] = BatchFailure(index, messages[index], receipt)
+                    self._telemetry.record_publish(name, kind, duration, 1, receipt)
+                    self.events.emit(
+                        EventKind.PUBLISH_FAILED,
+                        f"failed to publish prepared batch entry {index} to {kind} {name}",
+                        exception=receipt,
+                        destination=name,
+                        kind=kind,
+                        index=index,
+                        message_id=messages[index].message_id,
+                    )
                 else:
-                    results[index] = PublishResult.from_core(receipt, messages[index].destination_name)
+                    results[index] = PublishResult.from_core(receipt, name)
+                    succeeded += 1
+            if succeeded:
+                self._telemetry.record_publish(name, kind, duration, succeeded, None)
+                if self.events.is_enabled(EventKind.PUBLISH_SUCCEEDED):
+                    self.events.emit(
+                        EventKind.PUBLISH_SUCCEEDED,
+                        f"published {succeeded} prepared messages to {kind} {name}",
+                        destination=name,
+                        kind=kind,
+                        count=succeeded,
+                        duration=round(duration, 6),
+                    )
         batch = BatchPublishResult(tuple(r for r in results if r is not None))
         self._drain_core_events()
         if raise_on_failure:

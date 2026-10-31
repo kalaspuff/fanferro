@@ -4,7 +4,8 @@ Every exception derives from :class:`FanferroError` and carries a ``retryable`` 
 tells whether retrying the same operation unchanged may succeed. Errors raised by the Rust core
 (AWS failures, validation, payload problems, leases) are defined in the native module and
 re-exported here, the module they name as theirs (``fanferro.errors.AccessDeniedError``); the rest
-are raised by the Python layer.
+are raised by the Python layer. Errors pickle with their attributes, leaving out values that do not
+pickle (``None``), and copy with all of them.
 
 Hierarchy::
 
@@ -35,7 +36,11 @@ Hierarchy::
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import copy
+import copyreg
+import dataclasses
+import pickle
+from typing import TYPE_CHECKING, Any, cast
 
 from fanferro._core import (
     AccessDeniedError,
@@ -166,3 +171,71 @@ def error_details(error: BaseException) -> dict[str, Any]:
         if isinstance(value, str):
             details[name] = value
     return details
+
+
+def _round_trips(value: object) -> bool:
+    try:
+        pickle.loads(pickle.dumps(value))  # noqa: S301 - our own value, unpickled to check it
+    except Exception:  # noqa: BLE001 - whatever does not pickle or unpickle
+        return False
+    return True
+
+
+def _picklable(value: object) -> object:
+    # Leaves out only what does not pickle: the fields of a dataclass (a failed message's body, a
+    # batch failure's error) and the items of a tuple, list or dict, else the value itself.
+    if _round_trips(value):
+        return value
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        fields = {
+            field.name: _picklable(getattr(value, field.name)) for field in dataclasses.fields(value) if field.init
+        }
+        try:
+            rebuilt = dataclasses.replace(value, **fields)
+        except Exception:  # noqa: BLE001 - a field the dataclass does not accept as None
+            return None
+        return rebuilt if _round_trips(rebuilt) else None  # the class itself may not pickle
+    if isinstance(value, tuple) and type(value) is tuple:
+        return tuple(_picklable(item) for item in value)
+    if isinstance(value, list) and type(value) is list:
+        return [_picklable(item) for item in value]
+    if isinstance(value, dict) and type(value) is dict:
+        return {key: _picklable(item) for key, item in value.items()}
+    return None
+
+
+def _reduce_error(error: BaseException) -> tuple[Any, ...]:
+    # Unpickling creates the error without calling its constructor (ProvisioningError and
+    # BatchPublishError take a second argument) and restores its attributes. A value that does not
+    # pickle, or does not unpickle, is left out (None), so the error still reaches the caller of a
+    # worker process or task queue as itself.
+    state = vars(error)
+    if not _round_trips(state):
+        state = {name: _picklable(value) for name, value in state.items()}
+    return (copyreg.__newobj__, (type(error), *error.args), state)  # pyrefly: ignore[missing-attribute]
+
+
+def _blank[E: BaseException](error: E, args: tuple[Any, ...]) -> E:
+    # A new instance of the error's class, created without calling its constructor, like unpickling.
+    cls = type(error)
+    return cast("E", cls.__new__(cls, *args))
+
+
+def _copy_error[E: BaseException](error: E) -> E:
+    copied = _blank(error, error.args)
+    copied.__dict__.update(error.__dict__)
+    return copied
+
+
+def _deepcopy_error[E: BaseException](error: E, memo: dict[int, Any]) -> E:
+    copied = _blank(error, copy.deepcopy(error.args, memo))
+    memo[id(error)] = copied
+    copied.__dict__.update(copy.deepcopy(error.__dict__, memo))
+    return copied
+
+
+# Every fanferro error, native or defined above, derives from the native base class. Copies keep
+# every attribute: only pickles leave out what does not pickle.
+setattr(FanferroError, "__reduce__", _reduce_error)  # noqa: B010
+setattr(FanferroError, "__copy__", _copy_error)  # noqa: B010
+setattr(FanferroError, "__deepcopy__", _deepcopy_error)  # noqa: B010
