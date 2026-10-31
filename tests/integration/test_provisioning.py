@@ -345,3 +345,112 @@ async def test_subscribing_a_queue_encrypted_with_the_aws_managed_key_warns(
         assert (await plain.approximate_count())["visible"] == 1
     assert [event.fields["queue"] for event in warnings] == [managed.arn]
     assert "SNS cannot deliver" in warnings[0].message
+
+
+class _SlowEnsure:
+    """Wraps ``client._ensure`` so that every resolution takes a while, recording which overlapped."""
+
+    def __init__(self, client: fanferro.Client, delay: float = 0.05) -> None:
+        self._ensure = client._ensure
+        self._delay = delay
+        self.running: set[str] = set()
+        self.max_running = 0
+        self.calls: list[tuple[str, str]] = []
+        self.finished: list[str] = []
+        self.overlapping: list[tuple[str, frozenset[str]]] = []
+        client._ensure = self  # type: ignore[method-assign]
+
+    async def __call__(self, kind: Any, spec: Any) -> fanferro.ProvisioningReport:
+        name = spec.get("name") or f"{spec['topic_arn'].rsplit(':', 1)[1]} -> {spec['queue_arn'].rsplit(':', 1)[1]}"
+        self.calls.append((kind, name))
+        self.overlapping.append((name, frozenset(self.running)))
+        self.running.add(name)
+        self.max_running = max(self.max_running, len(self.running))
+        try:
+            await asyncio.sleep(self._delay)
+            return await self._ensure(kind, spec)
+        finally:
+            self.running.discard(name)
+            self.finished.append(name)
+
+
+async def test_provisioning_resolves_resources_concurrently(memory_client: fanferro.Client, name: Any) -> None:
+    topics = [memory_client.topic(name("topic")) for _ in range(2)]
+    queues = [memory_client.queue(name("queue"), dead_letter=fanferro.DeadLetterQueue(name("dlq"))) for _ in range(4)]
+    for topic in topics:
+        for queue in queues:
+            memory_client.subscription(topic, queue)
+    slow = _SlowEnsure(memory_client)
+    started = asyncio.get_running_loop().time()
+    outcomes = await memory_client.provision()
+    elapsed = asyncio.get_running_loop().time() - started
+
+    # 6 lookups at once, then 8 subscriptions, 2 of each queue in turn: 3 rounds, not 14.
+    assert elapsed < 0.5
+    assert slow.max_running > 1
+    # Each dead-letter queue is provisioned once, by its queue, and reported in its place.
+    assert [call for call in slow.calls if call[0] == "queue"] == [("queue", queue.name) for queue in queues]
+    targets = [*memory_client.topics.values(), *memory_client.queues.values(), *memory_client.subscriptions]
+    reports = [o for o in outcomes if isinstance(o, fanferro.ProvisioningReport)]
+    assert [o.kind for o in reports] == [target.kind for target in targets]
+    assert [o.name for o in reports[:-8]] == [target.name for target in targets[:-8]]
+    assert all(o.status == "created" for o in outcomes if isinstance(o, fanferro.ProvisioningReport))
+    for queue in queues:
+        assert queue.dead_letter_queue is not None
+        assert queue.dead_letter_queue.resolved
+        assert queue.dead_letter_queue.last_report is outcomes[targets.index(queue.dead_letter_queue)]
+    for subscription in memory_client.subscriptions:
+        index = slow.calls.index(("subscription", subscription.name))
+        # Its topic and queue first, and never at once with a subscription of the same queue.
+        assert {subscription.topic.name, subscription.queue.name} <= set(slow.finished[:index])
+        running = dict(slow.overlapping)[subscription.name]
+        assert not any(other.endswith(f"-> {subscription.queue.name}") for other in running)
+
+    # Later starts only verify, still at once, and the queues still let both topics send.
+    again = await memory_client.provision()
+    assert all(o.status == "found" for o in again if isinstance(o, fanferro.ProvisioningReport))
+    await topics[1].publish({"n": 1})
+    assert [(await queue.approximate_count())["visible"] for queue in queues] == [1, 1, 1, 1]
+
+
+async def test_provisioning_bounds_how_many_resolutions_overlap(memory_client: fanferro.Client, name: Any) -> None:
+    for _ in range(20):
+        memory_client.queue(name("many"))
+    slow = _SlowEnsure(memory_client, delay=0.02)
+    await memory_client.provision()
+    assert slow.max_running == fanferro.client._PROVISION_CONCURRENCY
+
+
+async def test_a_failing_resource_raises_after_the_others_finish(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory(provisioning=EXISTING)
+    owner = client_factory()
+    present = [owner.queue(name("present")) for _ in range(3)]
+    await owner.provision()
+    missing = client.queue(name("missing"))
+    found = [client.queue(queue.name) for queue in present]
+    logged = client.queue(name("logged"), provisioning=fanferro.Provisioning(on_missing="log"))
+    with pytest.raises(fanferro.ProvisioningError) as raised:
+        await client.provision()
+    assert raised.value.report.name == missing.name
+    assert all(queue.resolved for queue in found)
+    assert logged.last_report is not None
+    assert logged.last_report.status == "missing"
+
+
+async def test_a_dead_letter_queue_is_resolved_alone_when_its_queue_fails_first(
+    memory_client: fanferro.Client, name: Any
+) -> None:
+    dlq_name = name("dlq")
+    queue = memory_client.queue(name("work"), dead_letter=fanferro.DeadLetterQueue(dlq_name))
+    ensure = memory_client._ensure
+
+    async def failing(kind: Any, spec: Any) -> fanferro.ProvisioningReport:
+        if spec.get("name") == queue.name:
+            raise fanferro.ValidationError("refused")
+        return await ensure(kind, spec)
+
+    memory_client._ensure = failing  # type: ignore[method-assign]
+    with pytest.raises(fanferro.ValidationError):
+        await memory_client.provision()
+    assert queue.dead_letter_queue is not None
+    assert queue.dead_letter_queue.resolved

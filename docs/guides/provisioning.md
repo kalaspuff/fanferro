@@ -35,6 +35,14 @@ also make sure the queue policy lets the topic send (`manage_queue_policy`, a st
 `QueueAttributes` is compared and updated together with those statements, so provisioning the
 queue never revokes a subscription's permission.
 
+`client.provision()` (and so `async with client`) resolves the buckets, topics and queues
+concurrently, up to 8 at a time, and then the subscriptions, so a service's startup waits for a few
+round trips rather than for every call in turn. A dead-letter queue comes with the report of the
+queue that provisioned it, without being looked up again. Subscriptions of the same queue (or
+dead-letter queue) run one after another, since each one rewrites that queue's policy. When a
+resource raises, the others still finish first; the error of the first such resource in
+declaration order is raised. Events of different resources may arrive in any order.
+
 ## Policies
 
 | Preset | lookup | verify | create | update |
