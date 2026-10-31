@@ -52,6 +52,8 @@ _VALID_PREFIX = re.compile(r"[A-Za-z0-9_-]*")
 _VALID_BUCKET_PREFIX = re.compile(r"(?:[a-z0-9][a-z0-9.-]*)?")
 _EVENTS_WAIT = 1.0
 """Seconds the event pump waits for events per call (stopping wakes it at once)."""
+_PROVISION_CONCURRENCY = 8
+"""Resources client.provision() resolves at once: enough to overlap the calls, few enough not to be throttled."""
 
 
 def _register_fork_hook() -> None:
@@ -673,6 +675,10 @@ class Client:
         provisions those and the buckets of the given topics and queues. Errors are raised according
         to each resource's failure modes; resources configured to only log failures are reported as
         exceptions in the returned list.
+
+        Buckets, topics and queues are resolved concurrently (up to 8 at a time), then the
+        subscriptions, those of the same queue one after another. When a resource raises, the
+        others finish first, and the error of the first in declaration order is raised.
         """
         if not resources:
             self._provisioned = True
@@ -687,25 +693,71 @@ class Client:
         buckets = dict.fromkeys(
             s.bucket_name(self.bucket_prefix) for s in settings if s is not None and s.create_bucket
         )
-        for bucket in buckets:
-            core = await self._core()
-            report = ProvisioningReport.from_core(await core.ensure_bucket(bucket, True))
-            await self._settle_report(report, Provisioning.create_missing())
-        outcomes: list[ProvisioningReport | BaseException] = []
-        for resource in targets:
-            try:
-                info = await resource._resolve(force=True)
-            except ResourceUnavailableError as error:
-                outcomes.append(error)
-                continue
+        limit = asyncio.Semaphore(_PROVISION_CONCURRENCY)
+
+        async def bucket(name: str) -> BaseException | None:
+            async with limit:
+                try:
+                    core = await self._core()
+                    report = ProvisioningReport.from_core(await core.ensure_bucket(name, True))
+                    await self._settle_report(report, Provisioning.create_missing())
+                except Exception as error:  # noqa: BLE001 - raised below, once the others have finished
+                    return error
+            return None
+
+        async def resolve(resource: Topic | Queue | Subscription) -> ProvisioningReport | BaseException:
+            async with limit:
+                try:
+                    info = await resource._resolve(force=True)
+                except Exception as error:  # noqa: BLE001 - raised below, once the others have finished
+                    return error
             report = resource.last_report
-            outcomes.append(
+            return (
                 report
                 if report is not None
                 else ProvisioningReport(kind=resource.kind, name=resource.name, status="found", resource=info)
             )
+
+        async def in_turn(group: list[Subscription]) -> list[ProvisioningReport | BaseException]:
+            return [await resolve(subscription) for subscription in group]
+
+        queues = [target for target in targets if isinstance(target, Queue)]
+        # The dead-letter queue of a queue provisioned here comes with that queue's report (its
+        # ensure_queue provisions it first): looking it up on its own again would repeat the calls.
+        adopted = {
+            id(queue._dead_letter_queue)
+            for queue in queues
+            if queue.dead_letter is not None and queue._dead_letter_queue is not None
+        }
+        first = [target for target in targets if not isinstance(target, Subscription) and id(target) not in adopted]
+        outcomes: dict[int, ProvisioningReport | BaseException] = {}
+        for queue in queues:
+            queue._adopted = None
+        try:
+            # Buckets, topics and queues at once (at most _PROVISION_CONCURRENCY of them).
+            failed, resolved = await asyncio.gather(
+                asyncio.gather(*(bucket(name) for name in buckets)), asyncio.gather(*map(resolve, first))
+            )
+            outcomes.update(zip(map(id, first), resolved, strict=True))
+            for queue in queues:
+                if id(queue) in adopted:
+                    # None when its queue failed before provisioning it: then it is resolved alone.
+                    outcome = queue._adopted
+                    outcomes[id(queue)] = outcome if outcome is not None else await resolve(queue)
+        finally:
+            for queue in queues:
+                queue._adopted = None
+        _raise_first([*failed, *(outcomes[id(target)] for target in targets if id(target) in outcomes)])
+        # Subscriptions after the topics and queues they need. Each one rewrites the Policy of its
+        # queue (and of its own dead-letter queue) read-modify-write, so those sharing a queue run
+        # one after another, or one could drop the statement another has just added.
+        groups = _sharing_queues([target for target in targets if isinstance(target, Subscription)])
+        for group, results in zip(groups, await asyncio.gather(*map(in_turn, groups)), strict=True):
+            outcomes.update(zip(map(id, group), results, strict=True))
         self._drain_core_events()
-        return outcomes
+        ordered = [outcomes[id(target)] for target in targets]
+        _raise_first(ordered)
+        return ordered
 
     async def _provision_subscriptions_for(self, queue: Queue) -> None:
         for subscription in self._subscriptions:
@@ -1011,3 +1063,28 @@ class Client:
     def __repr__(self) -> str:
         backend = "memory" if self.broker is not None else (self.endpoint_url or "aws")
         return f"Client(backend={backend!r}, region={self.region!r})"
+
+
+def _raise_first(outcomes: Iterable[ProvisioningReport | BaseException | None]) -> None:
+    """Raises the first error that the failure modes do not let pass (in declaration order)."""
+    for outcome in outcomes:
+        if isinstance(outcome, BaseException) and not isinstance(outcome, ResourceUnavailableError):
+            raise outcome
+
+
+def _sharing_queues(subscriptions: list[Subscription]) -> list[list[Subscription]]:
+    """Groups subscriptions (in declaration order) that touch the policy of a common queue."""
+    groups: dict[int, list[Subscription]] = {}  # by the id of the group's first subscription
+    group_of: dict[int, int] = {}  # queue id -> group key
+    for subscription in subscriptions:
+        queues = [id(q) for q in (subscription.queue, subscription.dead_letter_queue) if q is not None]
+        keys = sorted({group_of[queue] for queue in queues if queue in group_of}, key=list(groups).index)
+        key = keys[0] if keys else id(subscription)
+        group = groups.setdefault(key, [])
+        for other in keys[1:]:
+            group.extend(groups.pop(other))
+            group_of.update({queue: key for queue, owner in group_of.items() if owner == other})
+        group.append(subscription)
+        group_of.update(dict.fromkeys(queues, key))
+    order = {id(subscription): index for index, subscription in enumerate(subscriptions)}
+    return [sorted(group, key=lambda s: order[id(s)]) for group in groups.values()]

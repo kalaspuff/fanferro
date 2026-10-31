@@ -83,6 +83,9 @@ class _Resource:
         self._last_error: BaseException | None = None
         self.last_report: ProvisioningReport | None = None
         """The most recent provisioning report (after resolution)."""
+        # What the resolution of another resource (a queue provisioning its dead-letter queue)
+        # settled for this one, while client.provision() waits for it instead of resolving again.
+        self._adopted: ProvisioningReport | BaseException | None = None
 
     @property
     def provisioning(self) -> Provisioning:
@@ -667,12 +670,31 @@ class Queue(_Destination):
         report = await self._client._ensure("queue", self._spec())
         self.last_report = report
         if report.dead_letter is not None and self._dead_letter_queue is not None:
-            dlq = self._dead_letter_queue
-            dlq.last_report = report.dead_letter
-            dlq_info = await self._client._settle_report(report.dead_letter, dlq.provisioning)
-            if dlq_info is not None:
-                dlq._info = dlq_info
+            await self._dead_letter_queue._adopt(report.dead_letter)
         return await self._client._settle_report(report, self.provisioning)  # type: ignore[return-value]
+
+    async def _adopt(self, report: ProvisioningReport) -> None:
+        """Settles the report of this queue that the queue it is the dead-letter queue of got.
+
+        The outcome is what a forced resolution of this queue would have given: the report, a
+        :class:`ResourceUnavailableError` when the failure mode let it pass, or the error raised.
+        """
+        self.last_report = report
+        if report.dead_letter is not None and self._dead_letter_queue is not None:
+            await self._dead_letter_queue._adopt(report.dead_letter)
+        # A failure leaves this queue's own retry back-off alone: the next use of it looks it up again.
+        try:
+            info = await self._client._settle_report(report, self.provisioning)
+        except Exception as error:
+            self._adopted = error
+            raise
+        if info is None:
+            self._adopted = ResourceUnavailableError(f"{self.kind} {self.name!r} is not available")
+            return
+        self._info = info
+        self._failures = 0
+        self._retry_at = 0.0
+        self._adopted = report
 
     async def resolve(self, *, force: bool = False) -> QueueInfo:
         """Resolves the queue per its provisioning policy (cached)."""
