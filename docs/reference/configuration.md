@@ -14,6 +14,7 @@ each parameter and field listed here exists in the code and that every one in th
 | `account_id` | STS lookup | Account id used to derive topic ARNs and assumed queue URLs |
 | `queue_prefix` | `""` | Prepended to every queue name, dead-letter queues included (e.g. `"staging-"`); see [Deployment → Several environments in one AWS account](../guides/deployment.md#several-environments-in-one-aws-account) |
 | `topic_prefix` | `""` | Prepended to every topic name |
+| `bucket_prefix` | `""` | Prepended to the bucket of every `LargePayloads`, the client's and those of topics and queues (lowercase letters, digits, `-`, `.`) |
 | `source` | `"fanferro"` | CloudEvents `source` of published messages (e.g. `urn:service:orders`) |
 | `envelope` | `Raw()` | Envelope for publishing (`CloudEvents()` for CloudEvents) |
 | `accept_envelopes` | CloudEvents, CloudEventsProtobuf, Raw | Envelopes consumers try, in order |
@@ -138,7 +139,8 @@ at most 12 hours).
 
 `LargePayloads`: `bucket`, `prefix` (`"fanferro/"`), `threshold` (262144), `always` (`False`),
 `reference` (`"s3"`), `presign_ttl` (24 hours), `format` (`"fanferro"`), `encryption` (`None`),
-`bucket_key` (`True`), `storage_class` (`None`), `create_bucket` (`False`).
+`bucket_key` (`True`), `storage_class` (`None`), `create_bucket` (`False`), `prefixed` (`True`:
+the client's `bucket_prefix` applies; `False` for a bucket shared by environments).
 
 `PayloadFetch`: `max_bytes` (64 MiB), `prefer` (`"s3"`), `allowed_url_hosts` (AWS + endpoint),
 `allow_http` (`False`), `verify_checksum` (`True`).

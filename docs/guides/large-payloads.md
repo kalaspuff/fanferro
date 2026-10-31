@@ -19,7 +19,10 @@ that is lower: 256 KiB for SNS topics by default, a queue's `max_message_size`) 
 resolve pointers before your handler runs; handlers never notice. Per destination:
 `client.topic("x", large_payloads=LargePayloads(...))` or `large_payloads=None` to disable.
 `create_bucket=True` creates the bucket when the client provisions (`async with client` or
-`client.provision()`), the client's and those of topics and queues, each once. The
+`client.provision()`), the client's and those of topics and queues, each once.
+`Client(bucket_prefix="staging-")` prepends an environment prefix to every bucket name (opt one
+out with `prefixed=False`); see
+[Deployment → Several environments in one AWS account](deployment.md#several-environments-in-one-aws-account). The
 pointer takes one of the 10 message attributes, so an offloaded message can carry at most 9: a
 message with more fails before anything is uploaded.
 
