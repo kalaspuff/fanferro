@@ -55,4 +55,4 @@ available as `fanferro events`.
 | `sns.subscription_confirmed` | info | An SNS subscription confirmation was confirmed automatically. |
 | `hook.failed` | error | An event hook or middleware raised an exception. |
 | `config.warning` | warning | A configuration combination is likely a mistake. |
-| `events.dropped` | warning | Events were dropped because the event buffer was full. |
+| `events.dropped` | warning | Events were dropped because the event buffer was full, or async hooks were skipped because too many were running. |

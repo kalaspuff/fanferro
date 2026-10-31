@@ -26,6 +26,7 @@ import asyncio
 import contextlib
 import fnmatch
 import logging
+import sys
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -335,12 +336,27 @@ def _format_fields(fields: Mapping[str, Any]) -> str:
 
 
 class EventDispatcher:
-    """Routes events to logging and hooks. Owned by :class:`fanferro.Client`."""
+    """Routes events to logging and hooks. Owned by :class:`fanferro.Client`.
+
+    Attributes:
+        max_pending_hooks: Async hook calls that may run at once. Past it, hooks are skipped for
+            further events (counted in :attr:`hooks_skipped`, reported by an ``events.dropped``
+            event once calls finish), so that a slow hook cannot make memory grow without bound.
+        flush_timeout: Seconds :meth:`flush` (and so ``client.close()``) waits for running async
+            hooks before it cancels them.
+    """
+
+    max_pending_hooks: int = 1000
+    flush_timeout: float = 5.0
 
     def __init__(self, config: LoggingConfig | None = None) -> None:
         self._config = config or LoggingConfig()
         self._hooks: list[tuple[list[str], EventHook]] = []
         self._tasks: set[asyncio.Task[None]] = set()
+        self.hooks_skipped = 0
+        """Async hook calls skipped because :attr:`max_pending_hooks` were running (in total)."""
+        self._unreported_skips = 0
+        self._logging_failed = False
         self._listeners: list[Callable[[], None]] = []
         # Per-kind lookups behind `is_enabled`, which runs for every message: the logger and level
         # a kind is logged at (the logger's own level is checked live) and whether a hook wants it.
@@ -435,12 +451,36 @@ class EventDispatcher:
         except Exception:  # a broken formatter must never break message processing  # noqa: BLE001 - deliberate catch-all; the error is reported, never swallowed silently
             text = event.message
         exc_info = event.exception if self._config.include_tracebacks and event.exception is not None else None
-        logger.log(
-            level,
-            text,
-            exc_info=exc_info,
-            extra={"fanferro": {"kind": event.kind.value, "fields": dict(event.fields), "error": event.error}},
+        try:
+            logger.log(
+                level,
+                text,
+                exc_info=exc_info,
+                extra={"fanferro": {"kind": event.kind.value, "fields": dict(event.fields), "error": event.error}},
+            )
+        except Exception as error:  # noqa: BLE001 - a filter, handler or formatter must never break an operation
+            self._logging_broken(logger, event, error)
+
+    def _logging_broken(self, logger: logging.Logger, event: Event, error: Exception) -> None:
+        """Reports, once, that the application's logging setup raised for an event."""
+        if self._logging_failed:
+            return
+        self._logging_failed = True
+        # Not through `logger` (or its parents' handlers): they may raise again.
+        record = logging.LogRecord(
+            _LOGGER.name,
+            logging.WARNING,
+            __file__,
+            0,
+            "logging %s for event %s raised %s: %s (fanferro goes on; further failures are not reported)",
+            (logger.name, event.kind.value, type(error).__name__, error),
+            None,
         )
+        with contextlib.suppress(Exception):
+            if logging.lastResort is not None:
+                logging.lastResort.handle(record)
+            else:
+                sys.stderr.write(record.getMessage() + "\n")
 
     def _call(self, hook: EventHook, event: Event) -> None:
         if is_async_callable(hook):
@@ -466,9 +506,33 @@ class EventDispatcher:
             if callable(close):  # a coroutine: closing it spares the "never awaited" warning
                 close()
             return
+        if len(self._tasks) >= self.max_pending_hooks:
+            if not self._unreported_skips:
+                _LOGGER.warning(
+                    "%d async event hook calls are running: hooks are skipped for further events until they finish",
+                    len(self._tasks),
+                )
+            self.hooks_skipped += 1
+            self._unreported_skips += 1
+            close = getattr(awaitable, "close", None)
+            if callable(close):
+                close()
+            return
         task = loop.create_task(self._run_async(hook, event, awaitable))
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(self._task_done)
+
+    def _task_done(self, task: asyncio.Task[None]) -> None:
+        self._tasks.discard(task)
+        skipped = self._unreported_skips
+        if skipped and len(self._tasks) < self.max_pending_hooks // 2:
+            self._unreported_skips = 0
+            self.emit(
+                EventKind.EVENTS_DROPPED,
+                f"async event hooks were skipped for {skipped} events ({self.max_pending_hooks} were running)",
+                dropped=skipped,
+                reason="hooks",
+            )
 
     async def _run_async(self, hook: EventHook, event: Event, awaitable: Awaitable[object] | None) -> None:
         try:
@@ -493,7 +557,26 @@ class EventDispatcher:
             )
         )
 
-    async def flush(self) -> None:
-        """Waits for running async hooks."""
+    async def flush(self, timeout: float | None = None) -> None:
+        """Waits for running async hooks, at most ``timeout`` seconds (default :attr:`flush_timeout`).
+
+        Hooks still running then are cancelled, and a warning says how many.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + (self.flush_timeout if timeout is None else timeout)
         while self._tasks:
-            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            await asyncio.wait(list(self._tasks), timeout=remaining)
+        left = [task for task in self._tasks if not task.done()]
+        if left:
+            _LOGGER.warning(
+                "cancelled %d async event hooks still running after %.1f s",
+                len(left),
+                self.flush_timeout if timeout is None else timeout,
+            )
+            for task in left:
+                task.cancel()
+            # A hook that ignores its cancellation is left behind rather than waited for.
+            await asyncio.wait(left, timeout=1.0)

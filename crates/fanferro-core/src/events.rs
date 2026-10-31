@@ -126,7 +126,7 @@ event_kinds! {
     SubscriptionConfirmed => ("sns.subscription_confirmed", Info, "An SNS subscription confirmation was confirmed automatically."),
     HookFailed => ("hook.failed", Error, "An event hook or middleware raised an exception."),
     ConfigWarning => ("config.warning", Warning, "A configuration combination is likely a mistake."),
-    EventsDropped => ("events.dropped", Warning, "Events were dropped because the event buffer was full."),
+    EventsDropped => ("events.dropped", Warning, "Events were dropped because the event buffer was full, or async hooks were skipped because too many were running."),
 }
 
 /// A structured event field value.

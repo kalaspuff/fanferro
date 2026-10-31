@@ -46,6 +46,17 @@ Hooks may be sync or async; async hooks run as tasks on the event loop, and so d
 that a sync hook returns (`lambda event: notify(event)` with an async `notify`). A failing hook emits
 `hook.failed` and never affects message processing. Core events reach hooks within milliseconds.
 
+Async hooks are bounded. At most `client.events.max_pending_hooks` (1,000) calls run at once: past
+that, hooks are skipped for further events, a warning is logged, and an `events.dropped` event with
+`reason="hooks"` and the count follows once the calls catch up (`client.events.hooks_skipped` keeps
+the total). `client.close()` waits `client.events.flush_timeout` (5 s) for running hooks, then
+cancels them and logs how many, so a hook that hangs (an HTTP call without a timeout) cannot keep a
+shutting-down process alive. Give such calls their own timeout anyway.
+
+An exception from the application's logging setup (a `logging.Filter`, a handler or its formatter)
+never reaches fanferro's operations: the first one is reported once on stderr (through
+`logging.lastResort`) and the event's log record is skipped.
+
 ## OpenTelemetry
 
 Install `fanferro[otel]` and configure the OpenTelemetry SDK as usual. Then fanferro:

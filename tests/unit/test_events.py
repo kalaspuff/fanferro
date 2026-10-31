@@ -5,6 +5,7 @@ import gc
 import logging
 import warnings
 from collections.abc import Awaitable
+from typing import Any
 
 import pytest
 
@@ -184,3 +185,103 @@ def test_event_from_core_and_create() -> None:
     assert created.error.message == "bad"
     assert "skip" not in created.fields
     assert EventKind.MESSAGE_FAILED.category == "message"
+
+
+async def test_a_hanging_async_hook_does_not_make_flush_wait_forever(caplog: pytest.LogCaptureFixture) -> None:
+    dispatcher = EventDispatcher(LoggingConfig(enabled=False))
+    dispatcher.flush_timeout = 0.2
+    cancelled: list[bool] = []
+
+    async def hang(event: Event) -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+
+    dispatcher.subscribe("message.*", hang)
+    dispatcher.emit(EventKind.MESSAGE_ACKED, "acked")
+    with caplog.at_level(logging.WARNING, logger="fanferro.events"):
+        await asyncio.wait_for(dispatcher.flush(), 3)
+    assert cancelled == [True]
+    assert "cancelled 1 async event hooks" in caplog.text
+
+
+async def test_a_hanging_async_hook_does_not_block_client_close(memory_client: fanferro.Client) -> None:
+    # One hook that never returned (an HTTP alert without a timeout) made `async with client` hang
+    # on exit until the orchestrator killed the process.
+    memory_client.events.flush_timeout = 0.2
+
+    async def hang(event: Event) -> None:
+        await asyncio.Event().wait()
+
+    memory_client.on("publish.*", hang)
+    queue = memory_client.queue("hanging-hook")
+    async with memory_client:
+        await queue.send({"n": 1})
+    await asyncio.wait_for(memory_client.close(), 5)
+
+
+async def test_pending_async_hooks_are_capped() -> None:
+    dispatcher = EventDispatcher(LoggingConfig(enabled=False))
+    dispatcher.max_pending_hooks = 10
+    release = asyncio.Event()
+    dropped: list[Event] = []
+
+    async def slow(event: Event) -> None:
+        await release.wait()
+
+    dispatcher.subscribe("publish.*", slow)
+    dispatcher.subscribe(EventKind.EVENTS_DROPPED, dropped.append)
+    for _ in range(50):
+        dispatcher.emit(EventKind.PUBLISH_SUCCEEDED, "published")
+    assert len(dispatcher._tasks) == 10
+    assert dispatcher.hooks_skipped == 40
+    release.set()
+    await dispatcher.flush()
+    assert [(event.fields["dropped"], event.fields["reason"]) for event in dropped] == [(40, "hooks")]
+
+
+async def test_a_raising_logging_filter_never_breaks_an_operation(
+    memory_client: fanferro.Client, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A filter that raised for some records made publish() raise after the message was sent, and
+    # left a consumer stuck in "starting" (client.close() then waited for it forever).
+    class Picky(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            raise KeyError("request_id")
+
+    logger = logging.getLogger("fanferro")
+    picky = Picky()
+    level = logger.level
+    logger.addFilter(picky)
+    logger.setLevel(logging.DEBUG)
+    for name in ("fanferro.publish", "fanferro.consumer", "fanferro.resource", "fanferro.message"):
+        logging.getLogger(name).addFilter(picky)
+    try:
+        queue = memory_client.queue("picky-logging")
+        seen: list[Any] = []
+        consumer = memory_client.consumer(queue, wait_time=1)
+
+        @consumer.route
+        async def handle(message: fanferro.Message[Any]) -> None:
+            seen.append(message.json())
+
+        async with memory_client:
+            await queue.resolve()
+            await queue.send({"n": 1})
+            await consumer.start()
+            assert consumer.state == "running"
+            for _ in range(100):
+                if seen:
+                    break
+                await asyncio.sleep(0.05)
+            await consumer.stop()
+        await asyncio.wait_for(memory_client.close(), 5)
+    finally:
+        logger.removeFilter(picky)
+        logger.setLevel(level)
+        for name in ("fanferro.publish", "fanferro.consumer", "fanferro.resource", "fanferro.message"):
+            logging.getLogger(name).removeFilter(picky)
+    assert seen == [{"n": 1}]
+    assert capsys.readouterr().err.count("raised KeyError") == 1
