@@ -144,8 +144,10 @@ impl FilterPolicy {
         if policy.len() > MAX_POLICY_BYTES {
             return Err(format!("Filter policy is larger than {} KB", MAX_POLICY_BYTES / 1024));
         }
-        let Ok(Value::Object(object)) = serde_json::from_str::<Value>(policy) else {
-            return Err("Filter policy must be a JSON object".into());
+        let object = match serde_json::from_str::<Value>(policy) {
+            Ok(Value::Object(object)) => object,
+            Ok(_) => return Err("Filter policy must be a JSON object".into()),
+            Err(error) => return Err(format!("failed to parse JSON. {error}")),
         };
         let root = node(&object, scope)?;
         check_limits(&root)?;
@@ -188,11 +190,7 @@ fn node(object: &Map<String, Value>, scope: FilterScope) -> Result<Node, String>
         let field = match value {
             Value::Array(conditions) => Field::Conditions(conditions_of(key, conditions)?),
             Value::Object(nested) if scope == FilterScope::MessageBody => Field::Nested(self::node(nested, scope)?),
-            Value::Object(_) => {
-                return Err(format!(
-                    "\"{key}\": nested filter policies need the FilterPolicyScope MessageBody (attributes are not nested)"
-                ));
-            }
+            Value::Object(_) => return Err(NESTED_IN_ATTRIBUTE_SCOPE.into()),
             _ => return Err(format!("\"{key}\": match values must be in an array, e.g. [\"value\"]")),
         };
         node.fields.push((key.clone(), field));
@@ -213,13 +211,25 @@ fn or_alternatives(value: &Value) -> Option<Vec<&Map<String, Value>>> {
 
 fn conditions_of(key: &str, conditions: &[Value]) -> Result<Vec<Condition>, String> {
     if conditions.is_empty() {
-        return Err(format!("\"{key}\": empty arrays are not allowed"));
+        return Err("Empty arrays are not allowed".into());
     }
     conditions
         .iter()
-        .map(|condition| self::condition(condition).map_err(|error| format!("\"{key}\": {error}")))
+        .map(|condition| {
+            self::condition(condition).map_err(|error| {
+                // SNS's own texts as they are (it points to a position instead); ours name the key.
+                if SNS_TEXTS.iter().any(|text| error.starts_with(text)) { error } else { format!("\"{key}\": {error}") }
+            })
+        })
         .collect()
 }
+
+/// SNS's text for a policy that nests keys in the attribute scope (it is no `FilterPolicy:` reason).
+pub(super) const NESTED_IN_ATTRIBUTE_SCOPE: &str =
+    "Filter policy scope MessageAttributes does not support nested filter policy";
+
+/// The beginnings of SNS's texts for the refusals the probes recorded (docs/parity S5).
+const SNS_TEXTS: [&str; 3] = ["Unrecognized match type ", "Value of ", "exists match pattern "];
 
 fn condition(value: &Value) -> Result<Condition, String> {
     let Value::Object(operator) = value else { return literal(value).map(Condition::Equals) };
@@ -236,10 +246,10 @@ fn condition(value: &Value) -> Result<Condition, String> {
         "numeric" => Condition::Numeric(Range::parse(argument)?),
         "exists" => match argument {
             Value::Bool(expected) => Condition::Exists(*expected),
-            _ => return Err("exists takes true or false".into()),
+            _ => return Err("exists match pattern must be either true or false.".into()),
         },
         "anything-but" => Condition::AnythingBut(Exclusion::parse(argument)?),
-        other => return Err(format!("unrecognized match type {other}")),
+        other => return Err(format!("Unrecognized match type {other}")),
     })
 }
 
@@ -276,7 +286,11 @@ impl Range {
         let Value::Array(parts) = argument else { return Err(FORM.into()) };
         let pair = |index: usize| -> Result<(&str, i64), String> {
             let operator = parts[index].as_str().ok_or(FORM)?;
-            Ok((operator, policy_number(&parts[index + 1])?))
+            let value = parts.get(index + 1).ok_or(FORM)?;
+            if !value.is_number() {
+                return Err(format!("Value of {operator} must be numeric"));
+            }
+            Ok((operator, policy_number(value)?))
         };
         match parts.len() {
             2 => match pair(0)? {
@@ -448,7 +462,8 @@ fn check_limits(root: &Node) -> Result<(), String> {
         combinations = combinations.saturating_add(product);
     }
     if combinations > MAX_COMBINATIONS {
-        return Err(format!("Filter policy is too complex: {combinations} combinations (at most {MAX_COMBINATIONS})"));
+        // SNS does not say by how much (at most MAX_COMBINATIONS).
+        return Err("Filter policy is too complex".into());
     }
     let complexity = wildcard_complexity(root);
     if complexity > MAX_WILDCARD_COMPLEXITY {
@@ -486,7 +501,7 @@ fn expand(
         current = extended;
         // Every alternative adds at least one combination: past the limit, stop expanding.
         if current.len() > MAX_COMBINATIONS {
-            return Err(format!("Filter policy is too complex: more than {MAX_COMBINATIONS} combinations"));
+            return Err("Filter policy is too complex".into());
         }
     }
     branches.extend(current);

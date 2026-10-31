@@ -216,7 +216,7 @@ async def test_invalid_filter_policies_are_refused(memory_client: fanferro.Clien
     topic = memory_client.topic(name("events"))
     queue = memory_client.queue(name("events"))
     memory_client.subscription(topic, queue, filter_policy={"region": [{"glob": "eu-*"}]})
-    with pytest.raises(fanferro.ProvisioningError, match="unrecognized match type glob"):
+    with pytest.raises(fanferro.ProvisioningError, match="Unrecognized match type glob"):
         async with memory_client:
             pass
 

@@ -1172,6 +1172,61 @@ impl SqsApi for MemorySqs {
     }
 }
 
+/// SNS refuses requests with the code `InvalidParameter` (SQS with `InvalidParameterValue`).
+fn sns_invalid(operation: &'static str, message: impl Into<String>) -> Error {
+    aws_error("sns", operation, AwsErrorKind::InvalidRequest, "InvalidParameter", message)
+}
+
+/// SNS's default access policy of a topic: the owner's account may use it.
+fn default_topic_policy(topic_arn: &str, account: &str) -> String {
+    serde_json::json!({
+        "Version": "2008-10-17",
+        "Id": "__default_policy_ID",
+        "Statement": [{
+            "Sid": "__default_statement_ID",
+            "Effect": "Allow",
+            "Principal": {"AWS": "*"},
+            "Action": [
+                "SNS:GetTopicAttributes", "SNS:SetTopicAttributes", "SNS:AddPermission", "SNS:RemovePermission",
+                "SNS:DeleteTopic", "SNS:Subscribe", "SNS:ListSubscriptionsByTopic", "SNS:Publish"
+            ],
+            "Resource": topic_arn,
+            "Condition": {"StringEquals": {"AWS:SourceOwner": account}}
+        }]
+    })
+    .to_string()
+}
+
+/// SNS's default delivery policy of a topic, as `EffectiveDeliveryPolicy` reports it.
+const DEFAULT_DELIVERY_POLICY: &str = r#"{"http":{"defaultHealthyRetryPolicy":{"minDelayTarget":20,"maxDelayTarget":20,"numRetries":3,"numMaxDelayRetries":0,"numNoDelayRetries":0,"numMinDelayRetries":0,"backoffFunction":"linear"},"disableSubscriptionOverrides":false,"defaultRequestPolicy":{"headerContentType":"text/plain; charset=UTF-8"}}}"#;
+
+/// Topic attributes only FIFO topics have.
+const FIFO_TOPIC_ATTRIBUTES: [&str; 3] = ["ContentBasedDeduplication", "FifoThroughputScope", "ArchivePolicy"];
+
+/// Validates a topic attribute like SNS; `reason` makes the text of `CreateTopic`
+/// ("Attributes Reason: ...") or of `SetTopicAttributes`.
+fn validate_topic_attribute(operation: &'static str, fifo: bool, name: &str, value: &str) -> Result<()> {
+    let create = operation == "CreateTopic";
+    let prefix = if create { "Invalid parameter: Attributes Reason: " } else { "Invalid parameter: " };
+    if !fifo && FIFO_TOPIC_ATTRIBUTES.contains(&name) {
+        return Err(sns_invalid(
+            operation,
+            if create {
+                format!("{prefix}Unknown attribute {name}")
+            } else {
+                "Invalid parameter: AttributeName".into()
+            },
+        ));
+    }
+    if name == "SignatureVersion" && value != "1" && value != "2" {
+        return Err(sns_invalid(
+            operation,
+            format!("{prefix}SignatureVersion: Invalid value '[{value}]'. Must be 1 or 2."),
+        ));
+    }
+    Ok(())
+}
+
 fn topic_not_found(operation: &'static str) -> Error {
     aws_error("sns", operation, AwsErrorKind::NotFound, "NotFound", "Topic does not exist")
 }
@@ -1248,7 +1303,7 @@ fn publish_locked(inner: &Inner, state: &mut State, topic_arn: &str, request: Pu
             "Invalid parameter: Message contains invalid characters",
         ));
     }
-    validate_attributes(&request.attributes).map_err(|err| invalid("sns", "Publish", err.to_string()))?;
+    validate_attributes(&request.attributes).map_err(|err| sns_invalid("Publish", err.to_string()))?;
     let limit = topic
         .attributes
         .get("MaximumMessageSize")
@@ -1261,7 +1316,8 @@ fn publish_locked(inner: &Inner, state: &mut State, topic_arn: &str, request: Pu
             "Publish",
             AwsErrorKind::InvalidRequest,
             "InvalidParameter",
-            format!("Invalid parameter: Message too long ({size} > {limit})"),
+            // SNS does not say the size (at most `limit`).
+            "Invalid parameter: Message too long",
         ));
     }
     let now = Instant::now();
@@ -1373,45 +1429,55 @@ fn filter_of(
     let Some(policy) = policy.filter(|policy| !policy.is_empty()) else { return Ok(None) };
     match FilterPolicy::parse(policy, FilterScope::from_attribute(scope.map(String::as_str))) {
         Ok(filter) => Ok(Some(Arc::new(filter))),
-        Err(reason) => Err(aws_error(
-            "sns",
-            operation,
-            AwsErrorKind::InvalidRequest,
-            "InvalidParameter",
-            format!("Invalid parameter: FilterPolicy: {reason}"),
-        )),
+        Err(reason) => {
+            // Subscribe says "Attributes Reason:" before the reason; the scope is no FilterPolicy one.
+            let prefix =
+                if operation == "Subscribe" { "Invalid parameter: Attributes Reason: " } else { "Invalid parameter: " };
+            let attribute = if reason == filter_policy::NESTED_IN_ATTRIBUTE_SCOPE { "" } else { "FilterPolicy: " };
+            Err(sns_invalid(operation, format!("{prefix}{attribute}{reason}")))
+        }
     }
 }
 
 fn validate_subscription_attribute(name: &str, value: &str) -> Result<()> {
     match name {
         "RawMessageDelivery" if value != "true" && value != "false" => {
-            Err(invalid("sns", "SetSubscriptionAttributes", "RawMessageDelivery must be true or false"))
+            Err(sns_invalid("SetSubscriptionAttributes", "RawMessageDelivery must be true or false"))
         }
         "RedrivePolicy" | "DeliveryPolicy"
             if !value.is_empty() && serde_json::from_str::<serde_json::Value>(value).is_err() =>
         {
-            Err(invalid("sns", "SetSubscriptionAttributes", format!("Invalid parameter: {name} is not valid JSON")))
+            Err(sns_invalid("SetSubscriptionAttributes", format!("Invalid parameter: {name} is not valid JSON")))
         }
-        "FilterPolicyScope" if value != "MessageAttributes" && value != "MessageBody" => Err(invalid(
-            "sns",
-            "SetSubscriptionAttributes",
-            "FilterPolicyScope must be MessageAttributes or MessageBody",
-        )),
+        "FilterPolicyScope" if value != "MessageAttributes" && value != "MessageBody" => {
+            Err(sns_invalid("SetSubscriptionAttributes", "FilterPolicyScope must be MessageAttributes or MessageBody"))
+        }
         _ => Ok(()),
+    }
+}
+
+impl MemorySns {
+    /// SNS refuses a topic ARN of another region than the client's (docs/parity S3).
+    fn check_region(&self, operation: &'static str, topic_arn: &str) -> Result<()> {
+        match arn::Arn::parse(topic_arn) {
+            Ok(parsed) if parsed.region != self.0.region => Err(sns_invalid(operation, "Invalid parameter: TopicArn")),
+            _ => Ok(()),
+        }
     }
 }
 
 #[async_trait]
 impl SnsApi for MemorySns {
     async fn publish(&self, topic_arn: &str, request: PublishRequest) -> Result<PublishOutput> {
+        self.check_region("Publish", topic_arn)?;
         let mut state = self.0.state.lock();
         publish_locked(&self.0, &mut state, topic_arn, request)
     }
 
     async fn publish_batch(&self, topic_arn: &str, entries: Vec<PublishRequest>) -> Result<BatchResult<PublishOutput>> {
+        self.check_region("PublishBatch", topic_arn)?;
         if entries.is_empty() || entries.len() > 10 {
-            return Err(invalid("sns", "PublishBatch", "a batch must contain 1-10 entries"));
+            return Err(sns_invalid("PublishBatch", "a batch must contain 1-10 entries"));
         }
         let mut state = self.0.state.lock();
         if !state.topics.contains_key(topic_arn) {
@@ -1429,26 +1495,25 @@ impl SnsApi for MemorySns {
     }
 
     async fn create_topic(&self, name: &str, attributes: &StringMap, tags: &StringMap) -> Result<String> {
-        let valid_name = !name.is_empty()
-            && name.len() <= 256
-            && name.trim_end_matches(".fifo").chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-        if !valid_name {
-            return Err(invalid("sns", "CreateTopic", format!("Invalid parameter: Topic Name {name:?}")));
-        }
         let fifo = attributes.get("FifoTopic").map(String::as_str) == Some("true");
-        if fifo != name.ends_with(".fifo") {
-            return Err(invalid(
-                "sns",
-                "CreateTopic",
-                "Invalid parameter: FIFO topic names must end with .fifo and set FifoTopic=true",
-            ));
+        // Only a topic created with FifoTopic=true may (and must) end with .fifo.
+        let base = if fifo { name.strip_suffix(".fifo") } else { Some(name) };
+        let valid_name = base.is_some_and(|base| {
+            !base.is_empty()
+                && name.len() <= 256
+                && base.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        });
+        if !valid_name {
+            return Err(sns_invalid("CreateTopic", "Invalid parameter: Topic Name"));
+        }
+        for (key, value) in attributes {
+            validate_topic_attribute("CreateTopic", fifo, key, value)?;
         }
         let topic_arn = arn::topic_arn(&self.0.region, &self.0.account, name);
         let mut state = self.0.state.lock();
         if let Some(existing) = state.topics.get(&topic_arn) {
             if attributes.iter().any(|(key, value)| existing.attributes.get(key) != Some(value)) {
-                return Err(invalid(
-                    "sns",
+                return Err(sns_invalid(
                     "CreateTopic",
                     "Invalid parameter: Attributes Reason: Topic already exists with different attributes",
                 ));
@@ -1459,6 +1524,8 @@ impl SnsApi for MemorySns {
             ("TopicArn".to_string(), topic_arn.clone()),
             ("Owner".to_string(), self.0.account.clone()),
             ("DisplayName".to_string(), String::new()),
+            ("Policy".to_string(), default_topic_policy(&topic_arn, &self.0.account)),
+            ("EffectiveDeliveryPolicy".to_string(), DEFAULT_DELIVERY_POLICY.to_string()),
         ]);
         if fifo {
             all.insert("ContentBasedDeduplication".into(), "false".into());
@@ -1492,10 +1559,11 @@ impl SnsApi for MemorySns {
 
     async fn set_topic_attribute(&self, topic_arn: &str, name: &str, value: &str) -> Result<()> {
         if name == "FifoTopic" {
-            return Err(invalid("sns", "SetTopicAttributes", "Invalid parameter: FifoTopic cannot be changed"));
+            return Err(sns_invalid("SetTopicAttributes", "Invalid parameter: AttributeName"));
         }
         let mut state = self.0.state.lock();
         let topic = state.topics.get_mut(topic_arn).ok_or_else(|| topic_not_found("SetTopicAttributes"))?;
+        validate_topic_attribute("SetTopicAttributes", topic.fifo, name, value)?;
         topic.attributes.insert(name.to_string(), value.to_string());
         Ok(())
     }
@@ -1533,12 +1601,10 @@ impl SnsApi for MemorySns {
         let topic = state.topics.get(topic_arn).ok_or_else(|| topic_not_found("Subscribe"))?;
         // SNS delivers to FIFO queues from FIFO topics only (a FIFO topic may deliver to standard queues).
         if protocol == "sqs" && endpoint.ends_with(".fifo") && !topic.fifo {
-            return Err(aws_error(
-                "sns",
+            // SNS's text, with "Invalid parameter:" twice.
+            return Err(sns_invalid(
                 "Subscribe",
-                AwsErrorKind::InvalidRequest,
-                "InvalidParameter",
-                "Invalid parameter: Endpoint Reason: FIFO SQS Queues can not be subscribed to standard SNS topics",
+                "Invalid parameter: Invalid parameter: Endpoint Reason: FIFO SQS Queues can not be subscribed to standard SNS topics",
             ));
         }
         if let Some(existing) = state
@@ -1547,8 +1613,7 @@ impl SnsApi for MemorySns {
             .find(|s| s.topic_arn == topic_arn && s.protocol == protocol && s.endpoint == endpoint)
         {
             if attributes.iter().any(|(key, value)| existing.attributes.get(key) != Some(value)) {
-                return Err(invalid(
-                    "sns",
+                return Err(sns_invalid(
                     "Subscribe",
                     "Invalid parameter: Attributes Reason: Subscription already exists with different attributes",
                 ));
@@ -1604,6 +1669,12 @@ impl SnsApi for MemorySns {
         attributes.insert("Owner".into(), self.0.account.clone());
         attributes.insert("PendingConfirmation".into(), "false".into());
         attributes.insert("ConfirmationWasAuthenticated".into(), "true".into());
+        // Who subscribed (the broker has no callers: the account).
+        attributes.insert("SubscriptionPrincipal".into(), format!("arn:aws:iam::{}:root", self.0.account));
+        // A filter policy applies to the attributes unless its scope says otherwise.
+        if attributes.get("FilterPolicy").is_some_and(|policy| !policy.is_empty()) {
+            attributes.entry("FilterPolicyScope".into()).or_insert_with(|| "MessageAttributes".into());
+        }
         Ok(attributes)
     }
 

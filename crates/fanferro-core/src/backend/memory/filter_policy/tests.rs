@@ -225,7 +225,7 @@ fn and_or_logic() {
     // A $or of operators, or of fewer than two objects, is an ordinary key.
     let p = body_policy(r#"{"$or": [{"numeric": [">", 1]}, {"prefix": "abc"}]}"#);
     assert!(body(&p, r#"{"$or": "abcdef"}"#) && body(&p, r#"{"$or": 2}"#) && !body(&p, r#"{"$or": 1}"#));
-    assert!(error(r#"{"$or": [{"metricName": ["CPUUtilization"]}]}"#).contains("unrecognized match type metricName"));
+    assert!(error(r#"{"$or": [{"metricName": ["CPUUtilization"]}]}"#).contains("Unrecognized match type metricName"));
 }
 
 #[test]
@@ -253,20 +253,20 @@ fn nested_keys_and_arrays_of_objects() {
 fn invalid_policies_are_refused() {
     let cases = [
         ("[]", "must be a JSON object"),
-        ("not json", "must be a JSON object"),
+        ("not json", "failed to parse JSON. "),
         (r#"{"a": "x"}"#, "match values must be in an array"),
-        (r#"{"a": []}"#, "empty arrays are not allowed"),
+        (r#"{"a": []}"#, "Empty arrays are not allowed"),
         (r#"{"a": [["x"]]}"#, "match values must be strings"),
-        (r#"{"a": [{"foo": "x"}]}"#, "unrecognized match type foo"),
+        (r#"{"a": [{"foo": "x"}]}"#, "Unrecognized match type foo"),
         (r#"{"a": [{"prefix": "x", "suffix": "y"}]}"#, "exactly one operator"),
         (r#"{"a": [{"prefix": 1}]}"#, "prefix takes a string"),
-        (r#"{"a": [{"exists": "yes"}]}"#, "exists takes true or false"),
+        (r#"{"a": [{"exists": "yes"}]}"#, "exists match pattern must be either true or false."),
         (r#"{"a": [{"numeric": ["<", 5, ">", 1]}]}"#, "a numeric range starts with > or >="),
         (r#"{"a": [{"numeric": [">", 5, "<", 1]}]}"#, "lower bound"),
         (r#"{"a": [{"numeric": ["~", 1]}]}"#, "unrecognized numeric operator"),
         (r#"{"a": [{"numeric": 5}]}"#, "numeric takes"),
         (r#"{"a": [{"numeric": ["=", 1e10]}]}"#, "numbers must be between"),
-        (r#"{"a": [{"numeric": ["=", "5"]}]}"#, "expected a number, got \"5\""),
+        (r#"{"a": [{"numeric": ["=", "5"]}]}"#, "Value of = must be numeric"),
         (r#"{"a": [-2e9]}"#, "numbers must be between"),
         (r#"{"a": [{"anything-but": ["x", 1]}]}"#, "only strings or only numbers"),
         (r#"{"a": [{"anything-but": []}]}"#, "only strings or only numbers"),
@@ -283,7 +283,10 @@ fn invalid_policies_are_refused() {
         assert!(error.contains(expected), "{text}: {error:?} should contain {expected:?}");
     }
     let nested = FilterPolicy::parse(r#"{"a": {"b": ["x"]}}"#, FilterScope::MessageAttributes).unwrap_err();
-    assert!(nested.contains("FilterPolicyScope MessageBody"), "{nested}");
+    assert_eq!(nested, NESTED_IN_ATTRIBUTE_SCOPE);
+    // SNS's own texts (docs/parity S5) stand alone; ours name the key.
+    assert_eq!(error(r#"{"a": [{"glob": "x"}]}"#), "Unrecognized match type glob");
+    assert_eq!(error(r#"{"a": [{"prefix": 1}]}"#), "\"a\": prefix takes a string");
     let large = format!(r#"{{"a": ["{}"]}}"#, "x".repeat(MAX_POLICY_BYTES));
     assert!(error(&large).contains("larger than 256 KB"));
 }
@@ -300,9 +303,11 @@ fn complexity_limits() {
     let values = |count: usize| (0..count).map(|value| format!("\"{value}\"")).collect::<Vec<_>>().join(", ");
     body_policy(&format!(r#"{{"a": [{}], "b": [{}]}}"#, values(15), values(10)));
     let error = error(&format!(r#"{{"a": [{}], "b": [{}]}}"#, values(16), values(10)));
-    assert!(error.contains("too complex: 160 combinations"), "{error}");
+    assert_eq!(error, "Filter policy is too complex", "160 combinations");
+    // The nesting level counts: 75 values two levels deep are 150 combinations, 76 are 152.
+    body_policy(&format!(r#"{{"a": {{"b": [{}]}}}}"#, values(75)));
     let error = self::error(&format!(r#"{{"a": {{"b": [{}]}}}}"#, values(76)));
-    assert!(error.contains("152 combinations"), "the nesting level counts: {error}");
+    assert_eq!(error, "Filter policy is too complex", "152 combinations");
     // Wildcards: 4 points for two single-wildcard patterns; 3 points per wildcard beyond one.
     body_policy(r#"{"filename": [{"wildcard": "*.txt"}, {"wildcard": "log*"}]}"#);
     body_policy(r#"{"greeting": [{"anything-but": {"prefix": "Hello"}}, {"wildcard": "H*"}]}"#);
