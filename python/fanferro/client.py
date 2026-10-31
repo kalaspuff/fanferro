@@ -264,6 +264,8 @@ class Client:
         self._pump_users = 0
         self._pump_task: asyncio.Task[None] | None = None
         self._entered = False
+        self._provisioned = False
+        """Whether everything declared was provisioned once (later subscriptions resolve before publishing)."""
 
     # -- connection ------------------------------------------------------------------------
 
@@ -589,7 +591,10 @@ class Client:
         """Declares (or returns the already declared) subscription of ``queue`` to ``topic``.
 
         Declaring it again returns the same subscription; settings that differ from the first
-        declaration raise :class:`~fanferro.ConfigurationError`.
+        declaration raise :class:`~fanferro.ConfigurationError`. A subscription declared after the
+        client provisioned everything (``async with client`` or ``await client.provision()``) is
+        resolved before the topic's next ``publish``, ``publish_batch`` or ``prepare``, so messages
+        published after the declaration reach the queue.
 
         Args:
             topic: Topic handle, or a topic name (the client's ``topic_prefix`` is prepended).
@@ -634,6 +639,10 @@ class Client:
             provisioning=provisioning,
         )
         self._subscriptions.append(subscription)
+        if self._provisioned:
+            # Provisioning already ran: without this, messages published to the topic before a
+            # consumer of the queue starts would reach no queue and be lost.
+            topic_handle._pending_subscriptions.append(subscription)
         return subscription
 
     def _declared_queue(self, name: str, *, prefixed: bool = True) -> Queue | None:
@@ -665,6 +674,8 @@ class Client:
         to each resource's failure modes; resources configured to only log failures are reported as
         exceptions in the returned list.
         """
+        if not resources:
+            self._provisioned = True
         targets: list[Topic | Queue | Subscription] = list(resources) or [
             *self._topics.values(),
             *self._queues.values(),

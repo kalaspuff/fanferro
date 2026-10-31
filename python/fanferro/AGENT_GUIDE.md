@@ -268,6 +268,8 @@ async def test_flow() -> None:
 
 * Publishing before subscriptions exist: declare subscriptions on the client and enter it (`async with
   client:`) before publishing, or messages published to a topic with no subscribers are lost.
+  Subscriptions declared inside `async with client:` are resolved before their topic's next publish;
+  with `auto_provision=False`, `await subscription.resolve()` before publishing.
 * Sync handlers: handlers must be `async def`.
 * Creating a client per request: create it once and share it.
 * `max_receive_count` (SQS redrive) lower than `RetryPolicy.max_attempts`: SQS moves messages before
