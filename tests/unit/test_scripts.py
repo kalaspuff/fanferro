@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 
@@ -29,6 +30,30 @@ def load(name: str) -> ModuleType:
 def test_code_and_docs_are_consistent(capsys: pytest.CaptureFixture[str]) -> None:
     check_consistency = load("check_consistency")
     assert check_consistency.main() == 0, capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("edit", "problem"),
+    [
+        (
+            lambda init: init.replace("from fanferro import errors as errors\n", ""),
+            "must import `from fanferro import errors as errors`",
+        ),
+        (
+            lambda init: init + "\n\ndef __getattr__(name: str) -> object:\n    raise AttributeError(name)\n",
+            "must define __getattr__ under `if not TYPE_CHECKING:`",
+        ),
+    ],
+)
+def test_submodules_the_type_checkers_cannot_see_fail_the_checks(
+    monkeypatch: pytest.MonkeyPatch, edit: Callable[[str], str], problem: str
+) -> None:
+    check_consistency = load("check_consistency")
+    read = check_consistency.read
+    init = edit(read("python/fanferro/__init__.py"))
+    assert init != read("python/fanferro/__init__.py")
+    monkeypatch.setattr(check_consistency, "read", lambda path: init if path.endswith("__init__.py") else read(path))
+    assert [problem in found for found in check_consistency.submodules_typed()] == [True]
 
 
 @pytest.mark.parametrize(

@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import dataclasses
 import inspect
+import pkgutil
 import re
 import sys
 import tomllib
@@ -162,6 +163,26 @@ def error_reference() -> Iterator[str]:
             continue
         if f"`{name}`" not in text:
             yield f"docs/reference/errors.md does not document `{name}`"
+
+
+@check
+def submodules_typed() -> Iterator[str]:
+    # At runtime every imported submodule is an attribute of the package; type checkers (pyright and
+    # Pylance) only see the ones `__init__.py` imports as `from fanferro import m as m` or lists in
+    # `__all__`, and a module-level `__getattr__` would make them type every unknown name as `Any`.
+    tree = ast.parse(read("python/fanferro/__init__.py"))
+    bound = {
+        alias.name
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.module == "fanferro"
+        for alias in node.names
+        if alias.asname == alias.name or alias.name in fanferro.__all__
+    }
+    for module in sorted(pkgutil.iter_modules([str(ROOT / "python" / "fanferro")])):
+        if not module.name.startswith("_") and module.name not in bound:
+            yield f"python/fanferro/__init__.py must import `from fanferro import {module.name} as {module.name}`"
+    if any(isinstance(node, ast.FunctionDef) and node.name == "__getattr__" for node in tree.body):
+        yield "python/fanferro/__init__.py must define __getattr__ under `if not TYPE_CHECKING:`"
 
 
 @check
