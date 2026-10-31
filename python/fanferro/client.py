@@ -171,6 +171,11 @@ class Client:
         publish_retry_attempts: Attempts for failed batch entries and checksum mismatches.
         verify_md5: Verify SQS MD5 digests of sent and received messages (opt-in; TLS already
             protects messages in transit).
+        split_batches_by_trace_header: Send the entries of a batch publish to a topic in separate
+            ``PublishBatch`` calls per X-Ray trace header, so that each message keeps its
+            ``X-Amzn-Trace-Id``: SNS takes one per call. Off by default: a call whose entries have
+            different trace headers (prepared messages of an outbox relay) sends none, and trace
+            context still travels in the ``traceparent`` attribute.
         publish_middleware: Middleware wrapping message preparation.
         consume_middleware: Middleware wrapping every handler of every consumer.
         broker: Use an in-memory broker instead of AWS (see :mod:`fanferro.testing`).
@@ -205,6 +210,7 @@ class Client:
         timeouts: Timeouts | None = None,
         publish_retry_attempts: int = 4,
         verify_md5: bool = False,
+        split_batches_by_trace_header: bool = False,
         publish_middleware: Sequence[PublishMiddleware] = (),
         consume_middleware: Sequence[ConsumeMiddleware] = (),
         broker: MemoryBroker | None = None,
@@ -238,6 +244,7 @@ class Client:
         self.timeouts = timeouts or Timeouts()
         self.publish_retry_attempts = publish_retry_attempts
         self.verify_md5 = verify_md5
+        self.split_batches_by_trace_header = split_batches_by_trace_header
         self.publish_middleware: list[PublishMiddleware] = list(publish_middleware)
         self.consume_middleware: list[ConsumeMiddleware] = list(consume_middleware)
         self.broker = broker
@@ -266,6 +273,7 @@ class Client:
             "fetch": self.payload_fetch.to_core(),
             "publish_retry": {"max_attempts": self.publish_retry_attempts, "initial_backoff": 0.1, "max_backoff": 5.0},
             "verify_md5": self.verify_md5,
+            "split_batches_by_trace_header": self.split_batches_by_trace_header,
             "event_capacity": self.event_buffer,
         }
 

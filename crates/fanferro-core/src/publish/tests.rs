@@ -1,9 +1,9 @@
 use bytes::Bytes;
 
 use super::*;
-use crate::backend::StringMap;
 use crate::backend::memory::MemoryBroker;
-use crate::backend::testing::{SlowBatches, SlowUploads, ThrottledBatches};
+use crate::backend::testing::{SlowBatches, SlowUploads, ThrottledBatches, ThrottledPublishBatches};
+use crate::backend::{ReceiveRequest, StringMap};
 use crate::client::ClientConfig;
 use crate::transport::OffloadSettings;
 use crate::transport::claim_check::{EncryptionSettings, PointerFormat, ReferenceMode};
@@ -181,6 +181,106 @@ async fn publishes_to_topics_and_fans_out() {
     assert!(results.iter().all(Result::is_ok));
     let bodies: Vec<String> = broker.queue_messages(&url).unwrap().into_iter().map(|m| m.body).collect();
     assert_eq!(bodies, vec!["event", "e2", "e3"]);
+}
+
+#[tokio::test]
+async fn batch_publishes_to_topics_split_by_trace_header_when_configured() {
+    // SNS takes one trace header per PublishBatch call: the in-memory broker kept each entry's.
+    const A: &str = "Root=1-5759e988-bd862e3fe1be46a994272793;Parent=53995c3f42cd8ad8;Sampled=1";
+    const B: &str = "Root=1-5759e988-bd862e3fe1be46a994272794;Parent=53995c3f42cd8ad9;Sampled=1";
+    let headers = [Some(A), Some(B), None, Some(A)];
+    for (split, fifo) in [(false, false), (true, false), (true, true)] {
+        let (_, client) = setup(ClientConfig { split_batches_by_trace_header: split, ..ClientConfig::default() }).await;
+        let backend = client.backend().clone();
+        let suffix = if fifo { ".fifo" } else { "" };
+        let mut topic_attributes = StringMap::new();
+        let mut queue_attributes = StringMap::new();
+        if fifo {
+            topic_attributes.insert("FifoTopic".into(), "true".into());
+            queue_attributes.insert("FifoQueue".into(), "true".into());
+        }
+        let topic =
+            backend.sns.create_topic(&format!("t{suffix}"), &topic_attributes, &StringMap::new()).await.unwrap();
+        let url =
+            backend.sqs.create_queue(&format!("sub{suffix}"), &queue_attributes, &StringMap::new()).await.unwrap();
+        let raw = StringMap::from([("RawMessageDelivery".to_string(), "true".to_string())]);
+        let queue_arn = format!("arn:aws:sqs:us-east-1:000000000000:sub{suffix}");
+        backend.sns.subscribe(&topic, "sqs", &queue_arn, &raw).await.unwrap();
+        let destination =
+            Destination::Topic { arn: topic, fifo, content_based_deduplication: false, max_message_size: None };
+        let batch = |headers: &[Option<&str>]| -> Vec<OutgoingMessage> {
+            headers
+                .iter()
+                .enumerate()
+                .map(|(i, header)| OutgoingMessage {
+                    trace_header: header.map(str::to_string),
+                    group_id: fifo.then(|| "g".to_string()),
+                    ..message(&format!("m{i}"), &format!("e{i}"))
+                })
+                .collect()
+        };
+        let results = client.publish_batch(&destination, batch(&headers)).await.unwrap();
+        assert!(results.iter().all(Result::is_ok));
+        let request = ReceiveRequest {
+            queue_url: url.clone(),
+            max_messages: 10,
+            wait_time: Duration::ZERO,
+            visibility_timeout: Some(Duration::from_secs(30)),
+            attempt_id: None,
+        };
+        let received = backend.sqs.receive_messages(request.clone()).await.unwrap();
+        let mut seen: Vec<(String, Option<String>)> =
+            received.into_iter().map(|m| (m.body, m.system.aws_trace_header)).collect();
+        if fifo {
+            let bodies: Vec<&str> = seen.iter().map(|(body, _)| body.as_str()).collect();
+            assert_eq!(bodies, vec!["e0", "e1", "e2", "e3"], "in order");
+        }
+        seen.sort();
+        let expected: Vec<(String, Option<String>)> = headers
+            .iter()
+            .enumerate()
+            .map(|(i, header)| (format!("e{i}"), if split { header.map(str::to_string) } else { None }))
+            .collect();
+        assert_eq!(seen, expected, "split: {split}, fifo: {fifo}");
+        // Entries that share their trace header keep it either way.
+        if !split {
+            client.publish_batch(&destination, batch(&[Some(A), Some(A)])).await.unwrap();
+            let received = backend.sqs.receive_messages(request).await.unwrap();
+            assert!(received.iter().all(|m| m.system.aws_trace_header.as_deref() == Some(A)));
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn retried_batch_entries_stay_split_by_trace_header() {
+    // Entries retried after a failed call were batched by size only: entries with different trace
+    // headers went out together, in a call that sends none.
+    const A: &str = "Root=1-5759e988-bd862e3fe1be46a994272793;Parent=53995c3f42cd8ad8;Sampled=1";
+    const B: &str = "Root=1-5759e988-bd862e3fe1be46a994272794;Parent=53995c3f42cd8ad9;Sampled=1";
+    let broker = MemoryBroker::new("us-east-1", "000000000000");
+    let mut backend = broker.backend();
+    let topic = backend.sns.create_topic("t", &StringMap::new(), &StringMap::new()).await.unwrap();
+    // The first calls of all three groups fail: their entries are retried together.
+    let throttled = std::sync::Arc::new(ThrottledPublishBatches::new(backend.sns.clone(), 3));
+    backend.sns = throttled.clone();
+    let config = ClientConfig { split_batches_by_trace_header: true, ..ClientConfig::default() };
+    let client = Client::with_backend(backend, config).unwrap();
+    let destination =
+        Destination::Topic { arn: topic, fifo: false, content_based_deduplication: false, max_message_size: None };
+    let messages = [Some(A), Some(B), None, Some(A)]
+        .iter()
+        .enumerate()
+        .map(|(i, header)| OutgoingMessage {
+            trace_header: header.map(str::to_string),
+            ..message(&format!("m{i}"), &format!("e{i}"))
+        })
+        .collect();
+    let results = client.publish_batch(&destination, messages).await.unwrap();
+    assert!(results.iter().all(Result::is_ok));
+    let mut calls = throttled.calls.lock().clone();
+    calls.sort();
+    let header = |h: &str| Some(h.to_string());
+    assert_eq!(calls, vec![vec![None], vec![header(A), header(A)], vec![header(B)]]);
 }
 
 #[test]

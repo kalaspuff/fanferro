@@ -624,3 +624,26 @@ async def test_custom_and_builtin_envelopes(client_factory: ClientFactory, name:
         ("cloudevents", 4, {"c": "3", "content-type": "application/cloudevents+json"}),
         ("raw", 5, {}),
     ]
+
+
+@pytest.mark.parametrize("split", [False, True])
+async def test_batch_publishes_to_topics_split_by_trace_header(split: bool, name: Any) -> None:
+    # SNS takes one X-Ray trace header per PublishBatch call: entries with different ones keep
+    # theirs only when the client splits such batches.
+    from fanferro.testing import memory_client
+
+    client = memory_client(split_batches_by_trace_header=split)
+    topic = client.topic(name("traced"))
+    queue = client.queue(name("traced-worker"))
+    client.subscription(topic, queue)
+    headers = [
+        "Root=1-5759e988-bd862e3fe1be46a994272793;Parent=53995c3f42cd8ad8;Sampled=1",
+        "Root=1-5759e988-bd862e3fe1be46a994272794;Parent=53995c3f42cd8ad9;Sampled=1",
+    ]
+    async with client:
+        await topic.publish_batch(
+            [fanferro.OutgoingMessage({"n": i}, trace_header=header) for i, header in enumerate(headers)]
+        )
+        messages = await drain_queue(client, queue)
+    received = {message.json()["n"]: message.trace_header for message in messages}
+    assert received == ({0: headers[0], 1: headers[1]} if split else {0: None, 1: None})

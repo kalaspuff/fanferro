@@ -29,6 +29,7 @@ each parameter and field listed here exists in the code and that every one in th
 | `timeouts` | `Timeouts()` | AWS call timeouts |
 | `publish_retry_attempts` | `4` | Attempts for failed batch entries and checksum mismatches |
 | `verify_md5` | `False` | Verify SQS MD5 digests of sent and received messages (standard queues) |
+| `split_batches_by_trace_header` | `False` | Batch publishes to topics: one `PublishBatch` call per X-Ray trace header among the entries, so that each keeps its `X-Amzn-Trace-Id` (SNS takes one per call); off, a call with different headers sends none |
 | `publish_middleware` | `()` | Publish middleware |
 | `consume_middleware` | `()` | Consume middleware applied to every consumer |
 | `broker` | `None` | `MemoryBroker` to use instead of AWS |
