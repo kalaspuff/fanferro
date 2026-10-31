@@ -27,18 +27,30 @@ async fn fixture(config: ClientConfig) -> Fixture {
     Fixture { broker, client, url }
 }
 
+/// A fixture whose queue is a FIFO queue (messages are sent to the group `g`).
+async fn fifo_fixture(config: ClientConfig) -> Fixture {
+    let broker = MemoryBroker::new("us-east-1", "000000000000");
+    let client = Client::with_backend(broker.backend(), config).unwrap();
+    let fifo = StringMap::from([("FifoQueue".to_string(), "true".to_string())]);
+    let url = client.backend().sqs.create_queue("work.fifo", &fifo, &StringMap::new()).await.unwrap();
+    Fixture { broker, client, url }
+}
+
 impl Fixture {
     async fn send(&self, body: &str) {
-        self.client
-            .backend()
-            .sqs
-            .send_message(&self.url, SendRequest { body: body.into(), ..SendRequest::default() })
-            .await
-            .unwrap();
+        let fifo = self.url.ends_with(".fifo");
+        let request = SendRequest {
+            body: body.into(),
+            group_id: fifo.then(|| "g".to_string()),
+            deduplication_id: fifo.then(|| body.to_string()),
+            ..SendRequest::default()
+        };
+        self.client.backend().sqs.send_message(&self.url, request).await.unwrap();
     }
 
     fn engine(&self, configure: impl FnOnce(&mut ConsumerConfig)) -> ConsumerEngine {
         let mut config = ConsumerConfig::new(self.url.clone());
+        config.fifo = self.url.ends_with(".fifo");
         config.wait_time = 1.0;
         configure(&mut config);
         let engine = ConsumerEngine::new(&self.client, config).unwrap();
@@ -627,8 +639,9 @@ async fn without_heartbeats_messages_reappear() {
     let first = collect(&engine, 1).await.remove(0);
     let second = collect(&engine, 1).await.remove(0);
     assert_eq!(second.message().system.approximate_receive_count, 2);
-    // The first receipt handle is stale now.
-    assert!(first.lease.ack().await.is_err());
+    // A standard queue deletes the message with the first receipt handle too (docs/parity M2).
+    first.lease.ack().await.unwrap();
+    assert!(fx.stored().is_empty());
     second.lease.ack().await.unwrap();
     engine.close(true).await;
 }
@@ -1006,7 +1019,9 @@ async fn close_can_abandon_unsettled_messages() {
 
 #[tokio::test(start_paused = true)]
 async fn lost_leases_are_detected() {
-    let fx = fixture(ClientConfig::default()).await;
+    // A FIFO queue refuses the receipt handle of an earlier receive; a standard queue accepts it,
+    // so there a heartbeat cannot notice another consumer received the message (docs/parity M2).
+    let fx = fifo_fixture(ClientConfig::default()).await;
     fx.send("contended").await;
     let engine = fx.engine(|c| {
         c.visibility_timeout = 3.0;

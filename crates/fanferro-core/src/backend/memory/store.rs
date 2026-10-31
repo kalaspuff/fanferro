@@ -29,6 +29,8 @@ pub(super) struct StoredMessage {
     pub receive_count: u32,
     pub first_receive: Option<OffsetDateTime>,
     pub receipt_handle: Option<String>,
+    /// When the message was received last (the 12 hour visibility limit counts from there).
+    pub received_at: Option<Instant>,
     /// Received and not released since (until `available_at`).
     pub in_flight: bool,
     pub group_id: Option<String>,
@@ -143,15 +145,16 @@ impl Messages {
         self.groups_in_flight.contains_key(group)
     }
 
-    /// Receives a visible message: counts the receive and hides it, in flight until `until`, with
-    /// a new receipt handle. Returns the message and the handle it replaced.
-    pub fn receive(&mut self, sequence: u64, until: Instant) -> Option<(&StoredMessage, Option<String>)> {
+    /// Receives a visible message at `now`: counts the receive and hides it, in flight until
+    /// `until`, with a new receipt handle. Returns the message and the handle it replaced.
+    pub fn receive(&mut self, sequence: u64, now: Instant, until: Instant) -> Option<(&StoredMessage, Option<String>)> {
         let message = self.by_sequence.get_mut(&sequence)?;
         self.visible.remove(&sequence);
         self.redelivered.remove(&sequence);
         message.receive_count += 1;
         message.first_receive.get_or_insert_with(OffsetDateTime::now_utc);
         let handle = format!("{}#{}", message.message_id, uuid::Uuid::new_v4());
+        message.received_at = Some(now);
         let previous = message.receipt_handle.replace(handle.clone());
         if let Some(previous) = &previous {
             self.receipts.remove(previous);
@@ -179,16 +182,18 @@ impl Messages {
         self.by_sequence.get(&sequence)
     }
 
-    /// Whether a message with this message id is stored.
-    pub fn contains_id(&self, message_id: &str) -> bool {
-        self.ids.contains_key(message_id)
+    /// The message with this message id.
+    pub fn by_id(&self, message_id: &str) -> Option<u64> {
+        self.ids.get(message_id).copied()
     }
 
-    /// Changes the visibility of an in-flight message: visible again at `now + timeout` (released
-    /// right away when `timeout` is zero).
+    /// Changes the visibility of a received message: visible again at `now + timeout` (released
+    /// right away when `timeout` is zero). A visible message is hidden (in flight) again.
     pub fn change_visibility(&mut self, sequence: u64, now: Instant, timeout: Duration) {
         let Some(message) = self.by_sequence.get_mut(&sequence) else { return };
         self.hidden.remove(&(message.available_at, sequence));
+        self.visible.remove(&sequence);
+        self.redelivered.remove(&sequence);
         message.available_at = now + timeout;
         if timeout.is_zero() {
             if message.in_flight {
@@ -200,6 +205,13 @@ impl Messages {
                 self.redelivered.insert(sequence);
             }
         } else {
+            if !message.in_flight {
+                message.in_flight = true;
+                self.in_flight += 1;
+                if let Some(group) = &message.group_id {
+                    *self.groups_in_flight.entry(group.clone()).or_default() += 1;
+                }
+            }
             self.hidden.insert((message.available_at, sequence));
         }
     }
@@ -284,6 +296,7 @@ mod tests {
             receive_count: 0,
             first_receive: None,
             receipt_handle: None,
+            received_at: None,
             in_flight: false,
             group_id: group.map(str::to_string),
             deduplication_id: None,
@@ -308,7 +321,7 @@ mod tests {
         assert_eq!(messages.counts(), (2, 0, 1));
 
         let a = messages.visible().next().unwrap().0;
-        let (received, previous) = messages.receive(a, now + Duration::from_secs(10)).unwrap();
+        let (received, previous) = messages.receive(a, now, now + Duration::from_secs(10)).unwrap();
         assert_eq!((received.receive_count, previous), (1, None));
         let first = received.receipt_handle.clone().unwrap();
         assert!(first.starts_with("a#"));
@@ -327,7 +340,7 @@ mod tests {
 
         // A new receive replaces the handle; releasing makes the message visible at once.
         let later = now + Duration::from_secs(10);
-        let (received, previous) = messages.receive(a, later + Duration::from_secs(30)).unwrap();
+        let (received, previous) = messages.receive(a, later, later + Duration::from_secs(30)).unwrap();
         assert_eq!((received.receive_count, previous.as_deref()), (2, Some(first.as_str())));
         let second = received.receipt_handle.clone().unwrap();
         assert_eq!(messages.by_receipt(&first), None);
@@ -337,7 +350,7 @@ mod tests {
 
         let removed = messages.remove(a).unwrap();
         assert_eq!(removed.message_id, "a");
-        assert!(!messages.contains_id("a"));
+        assert_eq!(messages.by_id("a"), None);
         assert_eq!(messages.by_receipt(&second), None);
         assert_eq!(messages.iter().map(|m| m.message_id.as_str()).collect::<Vec<_>>(), ["b", "c"]);
         messages.clear();
