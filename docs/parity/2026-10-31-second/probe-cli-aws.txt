@@ -1,0 +1,1296 @@
+# probe_aws_cli.sh: aws, AWS CLI v2
+
+### sts.caller_identity
+result: ok (http 200)
+  {
+      "account": "<account>"
+  }
+
+### credentials.invalid.sts
+result: error (http 403)
+error: An error occurred (InvalidClientTokenId) when calling the GetCallerIdentity operation: The security token included in the request is invalid.
+
+### credentials.invalid.sqs
+result: error (http 403)
+error: An error occurred (InvalidClientTokenId) when calling the GetQueueUrl operation: The security token included in the request is invalid.
+
+### credentials.invalid.sns
+result: error (http 403)
+error: An error occurred (InvalidClientTokenId) when calling the GetTopicAttributes operation: The security token included in the request is invalid.
+
+### credentials.invalid.s3_head_bucket
+result: error (http 403)
+error: An error occurred (403) when calling the HeadBucket operation: Forbidden
+
+### credentials.invalid.s3_put_object
+result: error (http 403)
+error: An error occurred (InvalidAccessKeyId) when calling the PutObject operation: The AWS Access Key Id you provided does not exist in our records.
+
+### sqs.create_queue
+result: ok (http 200)
+  "<endpoint>/<account>/<run>-q"
+
+### sqs.default_attributes
+result: ok (http 200)
+  {
+      "VisibilityTimeout": "2",
+      "MessageRetentionPeriod": "345600",
+      "DelaySeconds": "0",
+      "MaximumMessageSize": "1048576",
+      "ReceiveMessageWaitTimeSeconds": "0",
+      "SqsManagedSseEnabled": "true"
+  }
+
+### sqs.attribute_names
+result: ok (http 200)
+  [
+      "ApproximateNumberOfMessages",
+      "ApproximateNumberOfMessagesDelayed",
+      "ApproximateNumberOfMessagesNotVisible",
+      "CreatedTimestamp",
+      "DelaySeconds",
+      "LastModifiedTimestamp",
+      "MaximumMessageSize",
+      "MessageRetentionPeriod",
+      "QueueArn",
+      "ReceiveMessageWaitTimeSeconds",
+      "SqsManagedSseEnabled",
+      "VisibilityTimeout"
+  ]
+
+### sqs.create_queue.same_attributes
+result: ok (http 200)
+  "<endpoint>/<account>/<run>-q"
+
+### sqs.create_queue.different_attributes
+result: error (http 400)
+error: An error occurred (QueueAlreadyExists) when calling the CreateQueue operation: A queue already exists with the same name and a different value for attribute VisibilityTimeout
+
+### sqs.create_queue.invalid_name
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the CreateQueue operation: Can only include alphanumeric characters, hyphens, or underscores. 1 to 80 in length
+
+### sqs.create_queue.name_too_long
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the CreateQueue operation: Can only include alphanumeric characters, hyphens, or underscores. 1 to 80 in length
+
+### sqs.create_queue.fifo_suffix_without_attribute
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the CreateQueue operation: Can only include alphanumeric characters, hyphens, or underscores. 1 to 80 in length
+
+### sqs.create_queue.fifo_attribute_without_suffix
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the CreateQueue operation: The name of a FIFO queue can only include alphanumeric characters, hyphens, or underscores, must end with .fifo suffix and be 1 to 80 in length.
+
+### sqs.create_queue.visibility_over_12h
+result: error (http 400)
+error: An error occurred (InvalidAttributeValue) when calling the CreateQueue operation: Invalid value for the parameter VisibilityTimeout.
+
+### sqs.create_queue.max_size_over_1mib
+result: error (http 400)
+error: An error occurred (InvalidAttributeValue) when calling the CreateQueue operation: Invalid value for the parameter MaximumMessageSize.
+
+### sqs.create_queue.retention_under_minute
+result: error (http 400)
+error: An error occurred (InvalidAttributeValue) when calling the CreateQueue operation: Invalid value for the parameter MessageRetentionPeriod.
+
+### sqs.create_queue.content_dedup_on_standard
+result: error (http 400)
+error: An error occurred (InvalidAttributeName) when calling the CreateQueue operation: Unknown Attribute ContentBasedDeduplication.
+
+### sqs.create_queue.unknown_attribute
+result: error (http 400)
+error: An error occurred (InvalidAttributeName) when calling the CreateQueue operation: Unknown Attribute NoSuchAttribute.
+
+### sqs.get_queue_url.missing
+result: error (http 400)
+error: An error occurred (AWS.SimpleQueueService.NonExistentQueue) when calling the GetQueueUrl operation: The specified queue does not exist.
+
+### sqs.get_queue_url.foreign_owner
+result: error (http 404)
+error: An error occurred (InvalidAddress) when calling the GetQueueUrl operation: The address <endpoint>/ is not valid for this endpoint.
+
+### sqs.get_queue_attributes.missing
+result: error (http 400)
+error: An error occurred (AWS.SimpleQueueService.NonExistentQueue) when calling the GetQueueAttributes operation: The specified queue does not exist.
+
+### sqs.send_message.foreign_queue
+result: error (http 404)
+error: An error occurred (InvalidAddress) when calling the SendMessage operation: The address <endpoint>/ is not valid for this endpoint.
+
+### sqs.set_queue_attributes.fifo
+result: error (http 400)
+error: An error occurred (InvalidAttributeName) when calling the SetQueueAttributes operation: Unknown Attribute FifoQueue.
+
+### sqs.attributes_after_mutations
+result: ok (http 200)
+  {
+      "VisibilityTimeout": "2",
+      "FifoQueue": null
+  }
+
+### sqs.tag_queue
+result: ok (http 200)
+
+### sqs.list_queue_tags
+result: ok (http 200)
+  {
+      "purpose": "parity",
+      "team": "probe"
+  }
+
+### sqs.send_message
+result: ok (http 200)
+  {
+      "md5_body": "e92ca974916d878402a9092ede9a58af",
+      "md5_attributes": "c136daa1da4bb335686aecdcc343ad7f",
+      "md5_system": "5ae4d5d7636402d80f4eb6d213245a88"
+  }
+
+### sqs.receive_message
+result: ok (http 200)
+  {
+      "handle": "<long>",
+      "body": "{\"label\":\"attributes\"}",
+      "md5_body": "e92ca974916d878402a9092ede9a58af",
+      "md5_attributes": "b5d36245c48751d0acc27a8ce74f3f7a",
+      "attributes": {
+          "text": {
+              "StringValue": "hello",
+              "DataType": "String"
+          },
+          "unicode": {
+              "StringValue": "räksmörgås ✓",
+              "DataType": "String"
+          },
+          "decimal": {
+              "StringValue": "1.5",
+              "DataType": "Number"
+          },
+          "big": {
+              "StringValue": "<sequence>",
+              "DataType": "Number"
+          },
+          "bin": {
+              "BinaryValue": "AQI=",
+              "DataType": "Binary"
+          },
+          "custom": {
+              "StringValue": "x",
+              "DataType": "String.custom"
+          },
+          "int": {
+              "StringValue": "7",
+              "DataType": "Number.int"
+          }
+      },
+      "system": [
+          "AWSTraceHeader",
+          "ApproximateFirstReceiveTimestamp",
+          "ApproximateReceiveCount",
+          "SenderId",
+          "SentTimestamp"
+      ],
+      "receive_count": "1",
+      "trace": "Root=1-5759e988-bd862e3fe1be46a994272793;Parent=53995c3f42cd8ad8;Sampled=1",
+      "sender_is_set": true
+  }
+
+### sqs.change_visibility.over_12h
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the ChangeMessageVisibility operation: Value 43201 for parameter VisibilityTimeout is invalid. Reason: VisibilityTimeout must be an integer between 0 and 43200.
+
+### sqs.change_visibility.12h
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the ChangeMessageVisibility operation: Value 43200 for parameter VisibilityTimeout is invalid. Reason: Total VisibilityTimeout for the message is beyond the limit [43200 seconds].
+
+### sqs.change_visibility.zero
+result: ok (http 200)
+
+### sqs.change_visibility.released_message
+result: ok (http 200)
+
+### sqs.receive_message.again
+result: ok (http 200)
+  {
+      "handle": "<long>",
+      "receive_count": "2"
+  }
+
+### sqs.delete_message.earlier_handle
+result: ok (http 200)
+
+### sqs.counts_after_earlier_handle
+result: ok (http 200)
+  {
+      "visible": "0",
+      "in_flight": "0"
+  }
+
+### sqs.delete_message.current_handle
+result: ok (http 200)
+
+### sqs.delete_message.again
+result: ok (http 200)
+
+### sqs.change_visibility.deleted_message
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the ChangeMessageVisibility operation: Value <long> for parameter ReceiptHandle is invalid. Reason: Message does not exist or is not available for visibility timeout change.
+
+### sqs.delete_message.garbage_handle
+result: error (http 404)
+error: An error occurred (ReceiptHandleIsInvalid) when calling the DeleteMessage operation: The input receipt handle is invalid.
+
+### sqs.released.receive
+result: ok (http 200)
+  {
+      "handle": "<long>"
+  }
+
+### sqs.released.change_visibility_again
+result: ok (http 200)
+
+### sqs.released.received_afterwards
+result: ok (http 200)
+  0
+
+### sqs.earlier_handle.first_receive
+result: ok (http 200)
+  {
+      "handle": "<long>",
+      "body": "{\"label\":\"earlier\"}"
+  }
+
+### sqs.earlier_handle.second_receive
+result: ok (http 200)
+  {
+      "handle": "<long>",
+      "body": "{\"label\":\"earlier\"}"
+  }
+
+### sqs.earlier_handle.release
+result: ok (http 200)
+
+### sqs.earlier_handle.received_after_release
+result: ok (http 200)
+  [
+      {
+          "body": "{\"label\":\"earlier\"}",
+          "receive_count": "3"
+      }
+  ]
+
+### sqs.number.send.007
+result: ok (http 200)
+  {
+      "md5_attributes": "87ce662c3556103387a2d12d696bc483"
+  }
+
+### sqs.number.send.-0.50
+result: ok (http 200)
+  {
+      "md5_attributes": "54013c210f0552fcff80e721d4537c89"
+  }
+
+### sqs.number.send.1.0E2
+result: ok (http 200)
+  {
+      "md5_attributes": "203f0c2c0d0dd79bb90fb75917f7e590"
+  }
+
+### sqs.number.send.+5
+result: ok (http 200)
+  {
+      "md5_attributes": "10c0e8b095e4864a2a71098958561b25"
+  }
+
+### sqs.number.send.0.000
+result: ok (http 200)
+  {
+      "md5_attributes": "aa89e50052eb0eade5bc8ef6ee771759"
+  }
+
+### sqs.number.send.100
+result: ok (http 200)
+  {
+      "md5_attributes": "372286b355211957a41d30ae27b0edd9"
+  }
+
+### sqs.number.send..5
+result: ok (http 200)
+  {
+      "md5_attributes": "59e907286530de331bce10b256b132b7"
+  }
+
+### sqs.number.send.-0
+result: ok (http 200)
+  {
+      "md5_attributes": "ff18af408458c17837febf0cf5364993"
+  }
+
+### sqs.number.send.1e-3
+result: ok (http 200)
+  {
+      "md5_attributes": "70479a29bee905ce9cf1dba54cc2edfc"
+  }
+
+### sqs.number.send.12345678901234567890123456789012345678
+result: ok (http 200)
+  {
+      "md5_attributes": "24017fc486f7a0cf7c3b9e91537762d3"
+  }
+
+### sqs.number.send.123456789012345678901234567890123456789
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the SendMessage operation: Message (user) attribute 'n' number value [123456789012345678901234567890123456789] must contain fewer than 38 precision digits.
+
+### sqs.number.received
+result: ok (http 200)
+  [
+      {
+          "sent": "-0.50",
+          "received": "-0.5",
+          "md5_attributes": "386dbe1262db7dd8861679e63a123592"
+      },
+      {
+          "sent": "0.000",
+          "received": "0",
+          "md5_attributes": "0378ef2cc830c895dc78fc003f132e76"
+      }
+  ]
+
+### sqs.number.received_more
+result: ok (http 200)
+  [
+      {
+          "sent": ".5",
+          "received": "0.5",
+          "md5_attributes": "a57a8f7fdcab2ab8fa5e413350527a5b"
+      },
+      {
+          "sent": "100",
+          "received": "100",
+          "md5_attributes": "372286b355211957a41d30ae27b0edd9"
+      }
+  ]
+
+### sqs.expiry.first_receive
+result: ok (http 200)
+  {
+      "handle": "<long>",
+      "receive_count": "1"
+  }
+
+### sqs.expiry.second_receive
+result: ok (http 200)
+  {
+      "handle": "<long>",
+      "receive_count": "2"
+  }
+
+### sqs.expiry.change_visibility_first_handle
+result: ok (http 200)
+
+### sqs.expiry.delete_first_handle
+result: ok (http 200)
+
+### sqs.expiry.delete_batch_first_handle
+result: ok (http 200)
+  null
+
+### sqs.expiry.counts
+result: ok (http 200)
+  {
+      "visible": "0",
+      "in_flight": "0"
+  }
+
+### sqs.expiry.delete_second_handle
+result: ok (http 200)
+
+### sqs.send_message.empty_body
+result: error (http 400)
+error: An error occurred (MissingParameter) when calling the SendMessage operation: The request must contain the parameter MessageBody.
+
+### sqs.send_message.invalid_character
+result: error (http 400)
+error: An error occurred (InvalidMessageContents) when calling the SendMessage operation: Invalid binary character '#xFFFE' was found in the message body, the set of allowed characters is #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF].
+
+### sqs.send_message.delay_over_15min
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the SendMessage operation: Value 901 for parameter DelaySeconds is invalid. Reason: DelaySeconds must be >= 0 and <= 900.
+
+### sqs.send_message.attribute_name_with_space
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the SendMessage operation: Message (user) attribute name contains invalid non-alphanumeric character '#x20'. You can use only alphanumeric characters, hyphens (-), underscores (_), or periods (.).
+
+### sqs.send_message.attribute_name_aws_prefix
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the SendMessage operation: You can't use message attribute names beginning with 'AWS.' or 'Amazon'. These strings are reserved for internal use.
+
+### sqs.send_message.attribute_name_leading_dot
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the SendMessage operation: Message (user) attribute name must not begin with character '.'.
+
+### sqs.send_message.empty_attribute_value
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the SendMessage operation: Message (user) attribute 'empty' must contain a non-empty value of type 'String'.
+
+### sqs.send_message.invalid_number
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the SendMessage operation: Can't cast the value of message (user) attribute 'n' to a number.
+
+### sqs.send_message.unknown_data_type
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the SendMessage operation: The type of message (user) attribute 't' is invalid. You must use only the following supported type prefixes: Binary, Number, String.
+
+### sqs.send_message.eleven_attributes
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the SendMessage operation: Number of message attributes [11] exceeds the allowed maximum [10].
+
+### sqs.receive_message.wait_21s
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the ReceiveMessage operation: Value 21 for parameter WaitTimeSeconds is invalid. Reason: Must be >= 0 and <= 20, if provided.
+
+### sqs.receive_message.eleven_messages
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the ReceiveMessage operation: Value 11 for parameter MaxNumberOfMessages is invalid. Reason: Must be between 1 and 10, if provided.
+
+### sqs.receive_message.visibility_over_12h
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the ReceiveMessage operation: Value 43201 for parameter VisibilityTimeout is invalid. Reason: Must be between 0 and 43200, if provided.
+
+### sqs.send_batch.partial_failure
+result: ok (http 200)
+  {
+      "successful": 1,
+      "failed": [
+          {
+              "Id": "empty",
+              "SenderFault": true,
+              "Code": "EmptyValue",
+              "Message": "No Value Found for SendMessageBatchRequestEntry.2.MessageBody."
+          },
+          {
+              "Id": "delay",
+              "SenderFault": true,
+              "Code": "InvalidParameterValue",
+              "Message": "Value 901 for parameter DelaySeconds is invalid. Reason: DelaySeconds must be >= 0 and <= 900."
+          }
+      ]
+  }
+
+### sqs.send_batch.duplicate_ids
+result: error (http 400)
+error: An error occurred (AWS.SimpleQueueService.BatchEntryIdsNotDistinct) when calling the SendMessageBatch operation: Id a repeated.
+
+### sqs.send_batch.invalid_id
+result: error (http 400)
+error: An error occurred (AWS.SimpleQueueService.InvalidBatchEntryId) when calling the SendMessageBatch operation: A batch entry id can only contain alphanumeric characters, hyphens and underscores. It can be at most 80 letters long.
+
+### sqs.send_batch.empty
+result: error (http 400)
+error: An error occurred (AWS.SimpleQueueService.EmptyBatchRequest) when calling the SendMessageBatch operation: There should be at least one SendMessageBatchRequestEntry in the request.
+
+### sqs.send_batch.eleven_entries
+result: error (http 400)
+error: An error occurred (AWS.SimpleQueueService.TooManyEntriesInBatchRequest) when calling the SendMessageBatch operation: Maximum number of entries per request are 10. You have sent 11.
+
+### sqs.delete_batch.garbage_handles
+result: ok (http 200)
+  [
+      {
+          "Id": "a",
+          "SenderFault": true,
+          "Code": "ReceiptHandleIsInvalid",
+          "Message": "The input receipt handle \"garbage\" is not a valid receipt handle."
+      },
+      {
+          "Id": "b",
+          "SenderFault": true,
+          "Code": "ReceiptHandleIsInvalid",
+          "Message": "The input receipt handle \"garbage2\" is not a valid receipt handle."
+      }
+  ]
+
+### sqs.change_visibility_batch.garbage_handle
+result: ok (http 200)
+  [
+      {
+          "Id": "a",
+          "SenderFault": true,
+          "Code": "ReceiptHandleIsInvalid",
+          "Message": "The input receipt handle \"garbage\" is not a valid receipt handle."
+      }
+  ]
+
+### sqs.size.body_at_limit
+result: ok (http 200)
+  "7265f4d211b56873a381d321f586e4a9"
+
+### sqs.size.body_over_limit
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the SendMessage operation: One or more parameters are invalid. Reason: Message must be shorter than 1024 bytes.
+
+### sqs.size.with_attribute_at_limit
+result: ok (http 200)
+  "398533d48111e9f664b1f64cb10c4b63"
+
+### sqs.size.with_attribute_over_limit
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the SendMessage operation: One or more parameters are invalid. Reason: Message must be shorter than 1024 bytes.
+
+### sqs.size.batch_over_limit
+result: ok (http 200)
+  {
+      "Successful": [
+          {
+              "Id": "a",
+              "MessageId": "<uuid>",
+              "MD5OfMessageBody": "2bfac1bb871236a26c9bbc8389d00b83"
+          },
+          {
+              "Id": "b",
+              "MessageId": "<uuid>",
+              "MD5OfMessageBody": "2bfac1bb871236a26c9bbc8389d00b83"
+          }
+      ]
+  }
+
+### sqs.purge
+result: ok (http 200)
+
+### sqs.purge.again
+result: error (http 403)
+error: An error occurred (AWS.SimpleQueueService.PurgeQueueInProgress) when calling the PurgeQueue operation: Only one PurgeQueue operation on <run>-small is allowed every 60 seconds.
+
+### sqs.delete_queue
+result: ok (http 200)
+
+### sqs.delete_queue.again
+result: error (http 400)
+error: An error occurred (AWS.SimpleQueueService.NonExistentQueue) when calling the DeleteQueue operation: The specified queue does not exist.
+
+### sqs.deleted_queue.send
+result: error (http 400)
+error: An error occurred (AWS.SimpleQueueService.NonExistentQueue) when calling the SendMessage operation: The specified queue does not exist.
+
+### sqs.deleted_queue.get_queue_url
+result: error (http 400)
+error: An error occurred (AWS.SimpleQueueService.NonExistentQueue) when calling the GetQueueUrl operation: The specified queue does not exist.
+
+### sqs.deleted_queue.create_again
+result: error (http 400)
+error: An error occurred (AWS.SimpleQueueService.QueueDeletedRecently) when calling the CreateQueue operation: You must wait 60 seconds after deleting a queue before you can create another with the same name.
+
+### sqs.fifo.create_queue
+result: ok (http 200)
+  "<endpoint>/<account>/<run>-f.fifo"
+
+### sqs.fifo.default_attributes
+result: ok (http 200)
+  {
+      "ContentBasedDeduplication": "false",
+      "DeduplicationScope": "queue",
+      "FifoThroughputLimit": "perQueue"
+  }
+
+### sqs.fifo.send.no_group
+result: error (http 400)
+error: An error occurred (MissingParameter) when calling the SendMessage operation: The request must contain the parameter MessageGroupId.
+
+### sqs.fifo.send.no_deduplication_id
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the SendMessage operation: The queue should either have ContentBasedDeduplication enabled or MessageDeduplicationId provided explicitly
+
+### sqs.fifo.send.delay
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the SendMessage operation: Value 2 for parameter DelaySeconds is invalid. Reason: The request include parameter that is not valid for this queue type.
+
+### sqs.fifo.send.group_id_129
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the SendMessage operation: Value <long> for parameter MessageGroupId is invalid. Reason: MessageGroupId can only include alphanumeric and punctuation characters. 1 to 128 in length.
+
+### sqs.fifo.send.group_id_with_space
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the SendMessage operation: Value a b for parameter MessageGroupId is invalid. Reason: MessageGroupId can only include alphanumeric and punctuation characters. 1 to 128 in length.
+
+### sqs.fifo.send.deduplication_id_129
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the SendMessage operation: Value <long> for parameter MessageDeduplicationId is invalid. Reason: MessageDeduplicationId can only include alphanumeric and punctuation characters. 1 to 128 in length.
+
+### sqs.fifo.send.first
+result: ok (http 200)
+  {
+      "id": "<uuid>",
+      "sequence": "<sequence>"
+  }
+
+### sqs.fifo.send.duplicate
+result: ok (http 200)
+  {
+      "id": "<uuid>",
+      "sequence": "<sequence>"
+  }
+
+### sqs.fifo.duplicate_returns_first_message_id
+value: true
+
+### sqs.fifo.duplicate_returns_first_sequence_number
+value: true
+
+### sqs.fifo.receive
+result: ok (http 200)
+  [
+      {
+          "body": "{\"label\":\"m1\"}",
+          "group": "g",
+          "dedup": "d1",
+          "sequence": "<sequence>",
+          "receive_count": "1"
+      },
+      {
+          "body": "{\"label\":\"m2\"}",
+          "group": "g",
+          "dedup": "d2",
+          "sequence": "<sequence>",
+          "receive_count": "1"
+      }
+  ]
+
+### sqs.fifo.receive_while_group_in_flight
+result: ok (http 200)
+  0
+
+### sqs.fifo.expiry.first_receive
+result: ok (http 200)
+  {
+      "handle": "<long>",
+      "body": "{\"label\":\"expiry\"}",
+      "receive_count": "1"
+  }
+
+### sqs.fifo.expiry.second_receive
+result: ok (http 200)
+  {
+      "handle": "<long>",
+      "body": "{\"label\":\"expiry\"}",
+      "receive_count": "2"
+  }
+
+### sqs.fifo.expiry.delete_first_handle
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the DeleteMessage operation: Value <long> for parameter ReceiptHandle is invalid. Reason: The receipt handle has expired.
+
+### sqs.fifo.expiry.change_visibility_first_handle
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the ChangeMessageVisibility operation: Value <long> for parameter ReceiptHandle is invalid. Reason: The receipt handle has expired.
+
+### sqs.fifo.released.receive
+result: ok (http 200)
+  {
+      "handle": "<long>",
+      "body": "{\"label\":\"released\"}"
+  }
+
+### sqs.fifo.released.change_visibility_zero
+result: ok (http 200)
+
+### sqs.fifo.released.change_visibility_again
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the ChangeMessageVisibility operation: Value <long> for parameter ReceiptHandle is invalid. Reason: The receipt handle has expired.
+
+### sqs.fifo.released.received_afterwards
+result: ok (http 200)
+  [
+      "{\"label\":\"released\"}"
+  ]
+
+### sqs.fifo.create_queue.per_group_limit_with_queue_scope
+result: error (http 400)
+error: An error occurred (InvalidAttributeValue) when calling the CreateQueue operation: Invalid value for the parameter FifoThroughputLimit. Reason: To set FifoThroughputLimit to perMessageGroupId, the DeduplicationScope must be messageGroup.
+
+### sqs.fifo.create_queue.high_throughput
+result: ok (http 200)
+  "<endpoint>/<account>/<run>-h.fifo"
+
+### sqs.redrive.create_source
+result: ok (http 200)
+  "<endpoint>/<account>/<run>-src"
+
+### sqs.redrive.policy_as_returned
+result: ok (http 200)
+  "{\"deadLetterTargetArn\":\"arn:aws:sqs:<region>:<account>:<run>-dlq\",\"maxReceiveCount\":1}"
+
+### sqs.redrive.first_receive
+result: ok (http 200)
+  "1"
+
+### sqs.redrive.second_receive
+result: ok (http 200)
+  0
+
+### sqs.redrive.in_dead_letter_queue
+result: ok (http 200)
+  {
+      "handle": "<long>",
+      "body": "{\"label\":\"poison\"}",
+      "receive_count": "2",
+      "source": "arn:aws:sqs:<region>:<account>:<run>-src",
+      "attributes": {
+          "tenant": {
+              "StringValue": "acme",
+              "DataType": "String"
+          }
+      },
+      "message_id": "<uuid>"
+  }
+
+### sqs.redrive.keeps_message_id
+value: true
+
+### sqs.redrive.fifo_target_for_standard
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the CreateQueue operation: Value {"deadLetterTargetArn":"arn:aws:sqs:<region>:<account>:<run>-f.fifo","maxReceiveCount":3} for parameter RedrivePolicy is invalid. Reason: Dead-letter queue must be same type of queue as the source..
+
+### sqs.redrive.missing_target
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the CreateQueue operation: Value {"deadLetterTargetArn":"arn:aws:sqs:<region>:<account>:<run>-dlq-missing","maxReceiveCount":3} for parameter RedrivePolicy is invalid. Reason: Dead letter target does not exist.
+
+### sqs.redrive.max_receive_count_zero
+result: error (http 400)
+error: An error occurred (InvalidParameterValue) when calling the CreateQueue operation: Value {"deadLetterTargetArn":"arn:aws:sqs:<region>:<account>:<run>-dlq","maxReceiveCount":0} for parameter RedrivePolicy is invalid. Reason: Invalid value for maxReceiveCount: 0, valid values are from 1 to 1000 both inclusive.
+
+### sns.create_topic
+result: ok (http 200)
+  "arn:aws:sns:<region>:<account>:<run>-t"
+
+### sns.create_topic.same
+result: ok (http 200)
+  "arn:aws:sns:<region>:<account>:<run>-t"
+
+### sns.create_topic.different_attributes
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the CreateTopic operation: Invalid parameter: Attributes Reason: Topic already exists with different attributes
+
+### sns.create_topic.invalid_name
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the CreateTopic operation: Invalid parameter: Topic Name
+
+### sns.create_topic.fifo_attribute_without_suffix
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the CreateTopic operation: Invalid parameter: Topic Name
+
+### sns.create_topic.fifo_suffix_without_attribute
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the CreateTopic operation: Invalid parameter: Topic Name
+
+### sns.topic_attribute_names
+result: ok (http 200)
+  [
+      "DisplayName",
+      "EffectiveDeliveryPolicy",
+      "Owner",
+      "Policy",
+      "SubscriptionsConfirmed",
+      "SubscriptionsDeleted",
+      "SubscriptionsPending",
+      "TopicArn"
+  ]
+
+### sns.topic_attributes
+result: ok (http 200)
+  {
+      "DisplayName": "",
+      "SignatureVersion": null,
+      "TracingConfig": null,
+      "SubscriptionsConfirmed": "0"
+  }
+
+### sns.topic_default_policy
+result: ok (http 200)
+  "{\"Version\":\"2008-10-17\",\"Id\":\"__default_policy_ID\",\"Statement\":[{\"Sid\":\"__default_statement_ID\",\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"*\"},\"Action\":[\"SNS:GetTopicAttributes\",\"SNS:SetTopicAttributes\",\"SNS:AddPermission\",\"SNS:RemovePermission\",\"SNS:DeleteTopic\",\"SNS:Subscribe\",\"SNS:ListSubscriptionsByTopic\",\"SNS:Publish\"],\"Resource\":\"arn:aws:sns:<region>:<account>:<run>-t\",\"Condition\":{\"StringEquals\":{\"AWS:SourceOwner\":\"<account>\"}}}]}"
+
+### sns.topic_default_delivery_policy
+result: ok (http 200)
+  "{\"http\":{\"defaultHealthyRetryPolicy\":{\"minDelayTarget\":20,\"maxDelayTarget\":20,\"numRetries\":3,\"numMaxDelayRetries\":0,\"numNoDelayRetries\":0,\"numMinDelayRetries\":0,\"backoffFunction\":\"linear\"},\"disableSubscriptionOverrides\":false,\"defaultRequestPolicy\":{\"headerContentType\":\"text/plain; charset=UTF-8\"}}}"
+
+### sns.set_topic_attributes.fifo
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the SetTopicAttributes operation: Invalid parameter: AttributeName
+
+### sns.set_topic_attributes.signature_version_3
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the SetTopicAttributes operation: Invalid parameter: SignatureVersion: Invalid value '[3]'. Must be 1 or 2.
+
+### sns.attributes_after_mutations
+result: ok (http 200)
+  {
+      "DisplayName": "",
+      "FifoTopic": null,
+      "SignatureVersion": null
+  }
+
+### sns.get_topic_attributes.missing
+result: error (http 404)
+error: An error occurred (NotFound) when calling the GetTopicAttributes operation: Topic does not exist
+
+### sns.publish.missing_topic
+result: error (http 404)
+error: An error occurred (NotFound) when calling the Publish operation: Topic does not exist
+
+### sns.publish.other_region
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the Publish operation: Invalid parameter: TopicArn
+
+### sns.other_region.publish_batch
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the PublishBatch operation: Invalid parameter: TopicArn
+
+### sns.other_region.get_topic_attributes
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the GetTopicAttributes operation: Invalid parameter: TopicArn
+
+### sns.other_region.list_subscriptions
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the ListSubscriptionsByTopic operation: Invalid parameter: TopicArn
+
+### sns.other_region.subscribe
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the Subscribe operation: Invalid parameter: TopicArn
+
+### sns.other_region.set_topic_attributes
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the SetTopicAttributes operation: Invalid parameter: TopicArn
+
+### sns.other_region.delete_topic
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the DeleteTopic operation: Invalid parameter: TopicArn
+
+### sns.publish.foreign_account
+result: error (http 403)
+error: An error occurred (InvalidClientTokenId) when calling the Publish operation: No account found for the given parameters
+
+### sns.publish.empty_message
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the Publish operation: Invalid parameter: Empty message
+
+### sns.publish.at_limit
+result: ok (http 200)
+  true
+
+### sns.publish.over_limit
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the Publish operation: Invalid parameter: Message too long
+
+### sns.publish.eleven_attributes
+result: ok (http 200)
+  true
+
+### sns.publish.invalid_number_attribute
+result: error (http 400)
+error: An error occurred (ParameterValueInvalid) when calling the Publish operation: Could not cast message attribute 'n' value to number.
+
+### sns.publish.invalid_string_array
+result: ok (http 200)
+  true
+
+### sns.publish_batch.partial_failure
+result: ok (http 200)
+  {
+      "successful": 1,
+      "failed": [
+          {
+              "Id": "empty",
+              "Code": "InvalidParameter",
+              "Message": "Invalid parameter: Empty message",
+              "SenderFault": true
+          }
+      ]
+  }
+
+### sns.publish_batch.duplicate_ids
+result: error (http 400)
+error: An error occurred (BatchEntryIdsNotDistinct) when calling the PublishBatch operation: Two or more batch entries in the request have the same Id.
+
+### sns.publish_batch.eleven_entries
+result: error (http 400)
+error: An error occurred (TooManyEntriesInBatchRequest) when calling the PublishBatch operation: The batch request contains more entries than permissible.
+
+### sns.queue_policy_as_returned
+result: ok (http 200)
+  "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"sns.amazonaws.com\"},\"Action\":\"sqs:SendMessage\",\"Resource\":\"arn:aws:sqs:<region>:<account>:<run>-raw\",\"Condition\":{\"ArnEquals\":{\"aws:SourceArn\":\"arn:aws:sns:<region>:<account>:<run>-t\"}}}]}"
+
+### sns.subscribe.raw
+result: ok (http 200)
+  "arn:aws:sns:<region>:<account>:<run>-t:<uuid>"
+
+### sns.subscribe.wrapped
+result: ok (http 200)
+  "arn:aws:sns:<region>:<account>:<run>-t:<uuid>"
+
+### sns.subscribe.same_again
+result: ok (http 200)
+  "arn:aws:sns:<region>:<account>:<run>-t:<uuid>"
+
+### sns.subscribe.same_again_returns_same_arn
+value: true
+
+### sns.subscribe.different_attributes
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the Subscribe operation: Invalid parameter: Attributes Reason: Subscription already exists with different attributes
+
+### sns.subscribe.after_different_attributes
+result: ok (http 200)
+  1
+
+### sns.subscribe.fifo_queue_to_standard_topic
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the Subscribe operation: Invalid parameter: Invalid parameter: Endpoint Reason: FIFO SQS Queues can not be subscribed to standard SNS topics
+
+### sns.subscription_attribute_names
+result: ok (http 200)
+  [
+      "ConfirmationWasAuthenticated",
+      "Endpoint",
+      "Owner",
+      "PendingConfirmation",
+      "Protocol",
+      "RawMessageDelivery",
+      "SubscriptionArn",
+      "SubscriptionPrincipal",
+      "TopicArn"
+  ]
+
+### sns.subscription_attributes
+result: ok (http 200)
+  {
+      "RawMessageDelivery": "true",
+      "PendingConfirmation": "false",
+      "ConfirmationWasAuthenticated": "true",
+      "FilterPolicyScope": null
+  }
+
+### sns.subscription_principal
+result: ok (http 200)
+  "<caller-arn>"
+
+### sns.list_subscriptions_by_topic
+result: ok (http 200)
+  [
+      {
+          "protocol": "sqs",
+          "endpoint": "arn:aws:sqs:<region>:<account>:<run>-raw"
+      },
+      {
+          "protocol": "sqs",
+          "endpoint": "arn:aws:sqs:<region>:<account>:<run>-wrapped"
+      }
+  ]
+
+### sns.delivery.raw
+result: ok (http 200)
+  {
+      "body": "{\"label\":\"delivered\"}",
+      "attributes": {
+          "region": {
+              "StringValue": "eu",
+              "DataType": "String"
+          },
+          "n": {
+              "StringValue": "3",
+              "DataType": "Number"
+          },
+          "bin": {
+              "BinaryValue": "AQI=",
+              "DataType": "Binary"
+          },
+          "arr": {
+              "StringValue": "[\"a\",1,true]",
+              "DataType": "String.Array"
+          }
+      },
+      "md5_attributes": "ac781a7ad194af489661640df1c11f9c",
+      "system": [
+          "ApproximateFirstReceiveTimestamp",
+          "ApproximateReceiveCount",
+          "SenderId",
+          "SentTimestamp"
+      ]
+  }
+
+### sns.delivery.wrapped
+result: ok (http 200)
+  {
+      "body": "{\n  \"Type\" : \"Notification\",\n  \"MessageId\" : \"<uuid>\",\n  \"TopicArn\" : \"arn:aws:sns:<region>:<account>:<run>-t\",\n  \"Subject\" : \"Probe subject\",\n  \"Message\" : \"{\\\"label\\\":\\\"delivered\\\"}\",\n  \"Timestamp\" : \"<time>\",\n  \"SignatureVersion\" : \"1\",\n  \"Signature\" : \"<long>\",\n  \"SigningCertURL\" : \"<endpoint>/SimpleNotificationService-1e59c4574facfe41babdb2d652f8ebef.pem\",\n  \"UnsubscribeURL\" : \"<endpoint>/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:<region>:<account>:<run>-t:<uuid>\",\n  \"MessageAttributes\" : {\n    \"arr\" : {\"Type\":\"String.Array\",\"Value\":\"[\\\"a\\\",1,true]\"},\n    \"bin\" : {\"Type\":\"Binary\",\"Value\":\"AQI=\"},\n    \"region\" : {\"Type\":\"String\",\"Value\":\"eu\"},\n    \"n\" : {\"Type\":\"Number\",\"Value\":\"3.0\"}\n  }\n}",
+      "attributes": null
+  }
+
+### sns.delivery.wrapped.notification_keys
+result: ok (http 200)
+  "{\n  \"Type\" : \"Notification\",\n  \"MessageId\" : \"<uuid>\",\n  \"TopicArn\" : \"arn:aws:sns:<region>:<account>:<run>-t\",\n  \"Subject\" : \"Probe subject\",\n  \"Message\" : \"{\\\"label\\\":\\\"delivered\\\"}\",\n  \"Timestamp\" : \"<time>\",\n  \"SignatureVersion\" : \"1\",\n  \"Signature\" : \"<long>\",\n  \"SigningCertURL\" : \"<endpoint>/SimpleNotificationService-1e59c4574facfe41babdb2d652f8ebef.pem\",\n  \"UnsubscribeURL\" : \"<endpoint>/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:<region>:<account>:<run>-t:<uuid>\",\n  \"MessageAttributes\" : {\n    \"arr\" : {\"Type\":\"String.Array\",\"Value\":\"[\\\"a\\\",1,true]\"},\n    \"bin\" : {\"Type\":\"Binary\",\"Value\":\"AQI=\"},\n    \"region\" : {\"Type\":\"String\",\"Value\":\"eu\"},\n    \"n\" : {\"Type\":\"Number\",\"Value\":\"3.0\"}\n  }\n}"
+
+### sns.filter_policy.unknown_operator
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the Subscribe operation: Invalid parameter: Attributes Reason: FilterPolicy: Unrecognized match type glob
+error:  at [Source: (String)"{"color":[{"glob":"r*"}]}"; line: 1, column: 20]
+
+### sns.filter_policy.six_keys
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the Subscribe operation: Invalid parameter: Attributes Reason: FilterPolicy: Filter policy can not have more than 5 keys
+
+### sns.filter_policy.151_combinations
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the Subscribe operation: Invalid parameter: Attributes Reason: FilterPolicy: Filter policy is too complex
+
+### sns.filter_policy.numeric_not_a_number
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the Subscribe operation: Invalid parameter: Attributes Reason: FilterPolicy: Value of > must be numeric
+error:  at [Source: (String)"{"price":[{"numeric":[">","ten"]}]}"; line: 1, column: 28]
+
+### sns.filter_policy.nested_in_attribute_scope
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the Subscribe operation: Invalid parameter: Attributes Reason: Filter policy scope MessageAttributes does not support nested filter policy
+
+### sns.filter_policy.empty_values
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the Subscribe operation: Invalid parameter: Attributes Reason: FilterPolicy: Empty arrays are not allowed
+error:  at [Source: (String)"{"color":[]}"; line: 1, column: 12]
+
+### sns.filter_policy.exists_not_boolean
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the Subscribe operation: Invalid parameter: Attributes Reason: FilterPolicy: exists match pattern must be either true or false.
+error:  at [Source: (String)"{"color":[{"exists":"yes"}]}"; line: 1, column: 22]
+
+### sns.filter_policy.flat_in_body_scope
+result: ok (http 200)
+  "arn:aws:sns:<region>:<account>:<run>-t:<uuid>"
+
+### sns.filter_policy.valid_body_scope
+result: ok (http 200)
+  "arn:aws:sns:<region>:<account>:<run>-t:<uuid>"
+
+### sns.filter_policy.not_json
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the Subscribe operation: Invalid parameter: Attributes Reason: FilterPolicy: failed to parse JSON. Unexpected end-of-input: expected close marker for Array (start marker at [Source: REDACTED (`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION` disabled); line: 1, column: 11])
+error:  at [Source: REDACTED (`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION` disabled); line: 1, column: 17]
+
+### sns.unsubscribe
+result: ok (http 200)
+
+### sns.unsubscribe.again
+result: ok (http 200)
+
+### sns.get_subscription_attributes.unsubscribed
+result: error (http 404)
+error: An error occurred (NotFound) when calling the GetSubscriptionAttributes operation: Subscription does not exist
+
+### sns.fifo.create_topic
+result: ok (http 200)
+  "arn:aws:sns:<region>:<account>:<run>-ft.fifo"
+
+### sns.fifo.topic_attributes
+result: ok (http 200)
+  {
+      "FifoTopic": "true",
+      "ContentBasedDeduplication": "false",
+      "FifoThroughputScope": null
+  }
+
+### sns.fifo.publish.no_group
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the Publish operation: Invalid parameter: The MessageGroupId parameter is required for FIFO topics
+
+### sns.fifo.publish.no_deduplication_id
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the Publish operation: Invalid parameter: The topic should either have ContentBasedDeduplication enabled or MessageDeduplicationId provided explicitly
+
+### sns.fifo.publish.group_id_129
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the Publish operation: Invalid parameter: The MessageGroupId parameter can only include alphanumeric and punctuation characters. 1 to 128 in length
+
+### sns.fifo.publish.group_id_with_space
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the Publish operation: Invalid parameter: The MessageGroupId parameter can only include alphanumeric and punctuation characters. 1 to 128 in length
+
+### sns.fifo.publish.deduplication_id_129
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the Publish operation: Invalid parameter: The MessageDeduplicationId parameter can only include alphanumeric and punctuation characters. 1 to 128 in length
+
+### sns.fifo.publish_batch.group_id_with_space
+result: error (http 400)
+error: An error occurred (InvalidParameter) when calling the PublishBatch operation: Invalid parameter: The MessageGroupId parameter can only include alphanumeric and punctuation characters. 1 to 128 in length
+
+### sns.fifo.publish.first
+result: ok (http 200)
+  {
+      "id": "<uuid>",
+      "has_sequence": true
+  }
+
+### sns.fifo.publish.duplicate
+result: ok (http 200)
+  {
+      "id": "<uuid>",
+      "has_sequence": true
+  }
+
+### sns.fifo.duplicate_returns_first_message_id
+value: true
+
+### sns.fifo.subscribe
+result: ok (http 200)
+  true
+
+### sns.fifo.delivery
+result: ok (http 200)
+  {
+      "body": "{\"label\":\"fifo\"}",
+      "group": "g",
+      "has_sequence": true,
+      "system": [
+          "ApproximateFirstReceiveTimestamp",
+          "ApproximateReceiveCount",
+          "MessageDeduplicationId",
+          "MessageGroupId",
+          "SenderId",
+          "SentTimestamp",
+          "SequenceNumber"
+      ]
+  }
+
+### sns.delete_topic
+result: ok (http 200)
+
+### sns.delete_topic.again
+result: ok (http 200)
+
+### sns.deleted_topic.publish
+result: error (http 404)
+error: An error occurred (NotFound) when calling the Publish operation: Topic does not exist
+
+### sns.deleted_topic.subscriptions
+result: error (http 404)
+error: An error occurred (NotFound) when calling the ListSubscriptionsByTopic operation: Topic does not exist
+
+### s3.create_bucket
+result: ok (http 200)
+  {
+      "Location": "http://<run>-b.s3.amazonaws.com/",
+      "BucketArn": "arn:aws:s3:::<run>-b"
+  }
+
+### s3.create_bucket.again
+result: error (http 409)
+error: An error occurred (BucketAlreadyOwnedByYou) when calling the CreateBucket operation: Your previous request to create the named bucket succeeded and you already own it.
+
+### s3.create_bucket.without_location
+result: error (http 400)
+error: An error occurred (IllegalLocationConstraintException) when calling the CreateBucket operation: The unspecified location constraint is incompatible for the region specific endpoint this request was sent to.
+
+### s3.create_bucket.invalid_name
+result: error (http 400)
+error: An error occurred (IllegalLocationConstraintException) when calling the CreateBucket operation: The unspecified location constraint is incompatible for the region specific endpoint this request was sent to.
+
+### s3.head_bucket
+result: ok (http 200)
+  {
+      "BucketArn": "arn:aws:s3:::<run>-b",
+      "BucketRegion": "<region>",
+      "AccessPointAlias": false
+  }
+
+### s3.head_bucket.missing
+result: error (http 404)
+error: An error occurred (404) when calling the HeadBucket operation: Not Found
+
+### s3.get_bucket_location
+result: ok (http 200)
+  {
+      "LocationConstraint": "<region>"
+  }
+
+### credentials.invalid.s3_head_existing_bucket
+result: error (http 403)
+error: An error occurred (403) when calling the HeadBucket operation: Forbidden
+
+### credentials.invalid.s3_get_bucket_location
+result: error (http 403)
+error: An error occurred (InvalidAccessKeyId) when calling the GetBucketLocation operation: The AWS Access Key Id you provided does not exist in our records.
+
+### credentials.invalid.s3_list_objects
+result: error (http 403)
+error: An error occurred (InvalidAccessKeyId) when calling the ListObjectsV2 operation: The AWS Access Key Id you provided does not exist in our records.
+
+### s3.put_object
+result: ok (http 200)
+  {
+      "etag": "\"7b51a4ced1e3a27b892bf59de55ed3a7\"",
+      "encryption": "AES256"
+  }
+
+### s3.put_object.sse_s3
+result: ok (http 200)
+  {
+      "encryption": "AES256"
+  }
+
+### s3.put_object.sse_kms
+result: ok (http 200)
+  {
+      "encryption": "aws:kms",
+      "bucket_key": true,
+      "key_is_set": true
+  }
+
+### s3.put_object.missing_bucket
+result: error (http 404)
+error: An error occurred (NoSuchBucket) when calling the PutObject operation: The specified bucket does not exist
+
+### s3.get_object
+result: ok (http 200)
+  {
+      "length": 19,
+      "type": "application/json"
+  }
+
+### s3.get_object.sse_kms
+result: ok (http 200)
+  {
+      "length": 19,
+      "encryption": "aws:kms"
+  }
+
+### s3.get_object.missing_key
+result: error (http 404)
+error: An error occurred (NoSuchKey) when calling the GetObject operation: The specified key does not exist.
+
+### s3.get_object.missing_bucket
+result: error (http 404)
+error: An error occurred (NoSuchBucket) when calling the GetObject operation: The specified bucket does not exist
+
+### s3.head_object.missing_key
+result: error (http 404)
+error: An error occurred (404) when calling the HeadObject operation: Not Found
+
+### s3.delete_object.missing_key
+result: ok (http 204)
+
+### s3.presigned.valid
+value: http 200
+
+### s3.presigned.sse_kms
+value: http 200
+
+### s3.presigned.missing_key
+value: http 404 NoSuchKey
+
+### s3.presigned.missing_bucket
+value: http 404 NoSuchBucket
+
+### s3.presigned.expired
+value: http 403 AccessDenied
+
+### s3.presigned.url_shape
+value: https://<run>-b.s3.<region>.amazonaws.com/fanferro/m1/sha?<query>
+

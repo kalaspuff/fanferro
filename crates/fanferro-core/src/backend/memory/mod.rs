@@ -1099,7 +1099,7 @@ impl SqsApi for MemorySqs {
                 };
                 let Some(message) = queue.messages.get(sequence) else { return Err(invalid_receipt(&entry.receipt_handle)) };
                 // A standard queue changes the visibility of a message that is visible again too
-                // (hiding it); whether a FIFO queue does is an open question (docs/parity O1).
+                // (hiding it); a FIFO queue expires the handle (docs/parity M6, still to model).
                 if queue.fifo && !message.in_flight {
                     return Err(receipt_error("MessageNotInflight", "The message referred to is not in flight."));
                 }
@@ -1466,7 +1466,7 @@ fn publish_locked(inner: &Inner, state: &mut State, topic_arn: &str, request: Pu
                 "Invalid parameter: The MessageGroupId parameter is required for FIFO topics",
             ));
         }
-        // SNS refuses the ids SQS refuses (docs/parity M8; its text is open question O7).
+        // SNS refuses the ids SQS refuses (docs/parity M8; its text is finding S11).
         for (parameter, id) in
             [("MessageGroupId", &request.group_id), ("MessageDeduplicationId", &request.deduplication_id)]
         {

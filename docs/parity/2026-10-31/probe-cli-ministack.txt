@@ -11,7 +11,7 @@ result: ok (http 200)
   {
       "UserId": "<account>",
       "Account": "<account>",
-      "Arn": "arn:aws:iam::<account>:root"
+      "Arn": "<caller-arn>"
   }
 
 ### credentials.invalid.sqs
