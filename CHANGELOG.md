@@ -122,7 +122,7 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 
 ### Tests
 
-- The immediate-stop tests no longer fail on slow CI runners (#105) (#105)
+- The immediate-stop tests no longer fail on slow CI runners (#105)
 
 ## [0.5.0] - 2026-10-17
 
