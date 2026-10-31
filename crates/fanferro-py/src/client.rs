@@ -539,10 +539,11 @@ impl PyCoreClient {
         future_into_py(py, async move { client.topic_attributes(&arn).await })
     }
 
-    /// Deletes an offloaded payload object.
+    /// Deletes an offloaded payload object (refused for buckets outside `allowed_buckets`).
     fn delete_payload<'py>(&self, py: Python<'py>, bucket: String, key: String) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client()?;
-        future_into_py(py, async move { client.backend().objects.delete_object(&bucket, &key).await })
+        let pointer = PayloadPointer { bucket: Some(bucket), key: Some(key), ..PayloadPointer::default() };
+        future_into_py(py, async move { client.transport().delete_payload(&pointer).await })
     }
 
     /// Creates a consumer engine for a queue (call `start()` on it). With `envelopes` (built-in

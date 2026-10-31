@@ -20,7 +20,7 @@ During 0.x only the latest minor release receives fixes.
 * **Payload buckets**: pointers with a bucket and key are read with the consumer's credentials.
   Grant consumers `s3:GetObject` (and `s3:DeleteObject` with `delete_offloaded_payloads=True`) on
   the payload buckets only, or list them in `PayloadFetch.allowed_buckets`, so that a crafted
-  message cannot have them read other objects.
+  message cannot have them read or delete other objects.
 * **Integrity**: offloaded payloads are verified against the size and SHA-256 recorded in the pointer;
   SQS MD5 digests of message bodies and attributes are verified.
 * **Secrets**: fanferro never logs message bodies or credentials; presigned URLs are redacted from

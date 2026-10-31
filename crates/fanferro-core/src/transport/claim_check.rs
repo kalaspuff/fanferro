@@ -187,8 +187,9 @@ pub struct FetchSettings {
     pub allowed_url_hosts: Vec<String>,
     /// Allow plain `http://` URLs (always allowed for an `http://` custom endpoint).
     pub allow_http: bool,
-    /// Buckets that S3 pointers may name (exact names). Empty means any bucket, as far as the
-    /// credentials allow.
+    /// Buckets that S3 pointers may name (exact names), to read their payloads and to delete them
+    /// ([`Transport::delete_payload`](super::Transport::delete_payload)). Empty means any bucket,
+    /// as far as the credentials allow.
     pub allowed_buckets: Vec<String>,
     /// Preferred retrieval method.
     pub prefer: FetchPreference,
@@ -356,7 +357,7 @@ pub async fn fetch(backend: &Backend, settings: &FetchSettings, pointer: &Payloa
         let result = match method {
             FetchPreference::S3 if has_s3 => {
                 let (Some(bucket), Some(key)) = (&pointer.bucket, &pointer.key) else { continue };
-                match check_bucket_allowed(bucket, settings) {
+                match check_bucket_allowed(bucket, settings, "read") {
                     Ok(()) => backend.objects.get_object(bucket, key, settings.max_bytes).await,
                     Err(err) => Err(err),
                 }
@@ -424,13 +425,14 @@ fn host_matches(pattern: &str, host: &str) -> bool {
     }
 }
 
-/// Rejects S3 pointers to a bucket outside [`FetchSettings::allowed_buckets`], when it is set.
-pub fn check_bucket_allowed(bucket: &str, settings: &FetchSettings) -> Result<()> {
+/// Rejects S3 pointers to a bucket outside [`FetchSettings::allowed_buckets`], when it is set;
+/// `operation` (`read`, `delete`) is what the error says was refused.
+pub fn check_bucket_allowed(bucket: &str, settings: &FetchSettings, operation: &str) -> Result<()> {
     if settings.allowed_buckets.is_empty() || settings.allowed_buckets.iter().any(|allowed| allowed == bucket) {
         Ok(())
     } else {
         Err(Error::Payload(format!(
-            "refusing to read a payload from bucket {bucket:?}: not in the allowed bucket list (configure \
+            "refusing to {operation} a payload from bucket {bucket:?}: not in the allowed bucket list (configure \
              allowed_buckets)"
         )))
     }

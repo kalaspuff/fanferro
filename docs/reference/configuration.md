@@ -145,7 +145,7 @@ the client's `bucket_prefix` applies; `False` for a bucket shared by environment
 
 `PayloadFetch`: `max_bytes` (64 MiB), `prefer` (`"s3"`), `allowed_url_hosts` (S3 endpoints; the
 `endpoint_url`'s scheme, host and port are allowed either way), `allow_http` (`False`),
-`allowed_buckets` (any bucket), `verify_checksum` (`True`).
+`allowed_buckets` (any bucket; also limits `delete_offloaded_payloads`), `verify_checksum` (`True`).
 
 `Telemetry`: `tracing` (`True`), `metrics` (`True`), `propagation` (`Propagation()`),
 `consumer_span_parent` (`"child"`), `tracer_provider`, `meter_provider`.

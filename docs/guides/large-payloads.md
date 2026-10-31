@@ -57,10 +57,12 @@ their own. `PayloadFetch` (client option `payload_fetch=`) limits what consumers
   either way.
 * `allow_http`: plain `http://` URLs (an `http://` `endpoint_url` needs no such permission).
 * `allowed_buckets`: the buckets (their names in S3, with any `bucket_prefix`) that pointers with a
-  bucket and key may name. By default any bucket the consumer's credentials can read: grant
-  consumers `s3:GetObject` on the payload buckets only, or list them here, so that a crafted
-  pointer cannot have a consumer read (or, with `delete_offloaded_payloads=True`, delete) other
-  objects.
+  bucket and key may name, to read payloads from and, with `delete_offloaded_payloads=True`, to
+  delete them from. By default any bucket the consumer's credentials allow: grant consumers
+  `s3:GetObject` (and `s3:DeleteObject`) on the payload buckets only, or list them here, so that a
+  crafted pointer cannot have a consumer read or delete other objects. A pointer can carry a URL
+  as well as a bucket and key that were never read, so deletes are checked on their own: the
+  consumer refuses to delete in another bucket and emits `consumer.error`.
 * `verify_checksum`: the size and SHA-256 recorded in the pointer are checked (on by default).
 
 A pointer whose payload is fetched by URL must record its SHA-256, which fanferro writes in every

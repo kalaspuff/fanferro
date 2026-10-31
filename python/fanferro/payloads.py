@@ -142,9 +142,11 @@ class PayloadFetch:
             pointer whose payload is fetched by URL must record its SHA-256 (fanferro always does).
         allow_http: Allow plain ``http://`` URLs (always allowed for an ``http://`` ``endpoint_url``).
         allowed_buckets: Buckets (their names in S3, with any ``bucket_prefix``) that pointers with
-            a bucket and key may name. Empty means any bucket the credentials can read: a crafted
-            message can then have the consumer read (and, with ``delete_offloaded_payloads``,
-            delete) objects of other buckets it has access to.
+            a bucket and key may name: consumers read payloads only from these, and
+            ``delete_offloaded_payloads`` deletes objects only in these (a pointer whose payload
+            came from its URL names a bucket and key that were not read). Empty means any bucket
+            the credentials allow: a crafted message can then have the consumer read (and, with
+            ``delete_offloaded_payloads``, delete) objects of other buckets it has access to.
         verify_checksum: Verify the recorded size and SHA-256.
     """
 

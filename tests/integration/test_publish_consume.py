@@ -474,6 +474,44 @@ async def test_a_copy_whose_offloaded_payload_was_deleted_is_skipped_as_a_duplic
     assert duplicates[0].fields["reason"] == "payload_deleted"
 
 
+async def test_payloads_outside_the_allowed_buckets_are_not_deleted(client_factory: ClientFactory, name: Any) -> None:
+    # With delete_offloaded_payloads, the consumer deleted the bucket and key a pointer names even
+    # when allowed_buckets refused to read from it and the payload came from the pointer's URL: a
+    # crafted pointer could have it delete any object it may delete.
+    bucket = name("payloads")
+    publisher = client_factory(
+        large_payloads=fanferro.LargePayloads(bucket, threshold=1024, reference="both", create_bucket=True)
+    )
+    topic = publisher.topic(name("shared-payload"))
+    restricted_name = name("restricted")
+    other_queue = publisher.queue(name("other"))
+    publisher.subscription(topic, publisher.queue(restricted_name))
+    publisher.subscription(topic, other_queue)
+    restricted = client_factory(payload_fetch=fanferro.PayloadFetch(allowed_buckets=[name("elsewhere")]))
+    restricted_queue = restricted.queue(restricted_name)
+    processed: list[Any] = []
+    errors: list[fanferro.Event] = []
+    deleted: list[fanferro.Event] = []
+    restricted.on("consumer.error", errors.append)
+    restricted.on("payload.deleted", deleted.append)
+
+    async def handle(message: fanferro.Message[Any]) -> None:
+        processed.append(message.json())
+
+    consumer = restricted.consumer(restricted_queue, handle, wait_time=1, delete_offloaded_payloads=True)
+    big = {"blob": "x" * 5000}
+    async with publisher, restricted:
+        result = await topic.publish(big)
+        assert result.offloaded is not None
+        await consume_until(consumer, lambda: len(errors) + len(deleted) == 1)
+        # The other subscriber still finds the payload both queues point to.
+        received = await drain_queue(publisher, other_queue)
+    assert processed == [big], "read through the URL"
+    assert deleted == []
+    assert "refusing to delete a payload from bucket" in str(errors[0].error.message)  # type: ignore[union-attr]
+    assert [message.json() for message in received] == [big]
+
+
 async def test_messages_over_the_queue_limit_are_offloaded_below_the_threshold(
     client_factory: ClientFactory, name: Any
 ) -> None:
