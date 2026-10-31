@@ -15,9 +15,9 @@ client = fanferro.Client(
 
 Publishing a message whose encoded size exceeds the threshold (or the destination's size limit, when
 that is lower: 256 KiB for SNS topics by default, a queue's `max_message_size`) uploads the body to
-`s3://bucket/{prefix}{message_id}` and sends a small pointer instead. Consumers resolve pointers
-before your handler runs; handlers never notice. Per destination: `client.topic("x",
-large_payloads=LargePayloads(...))` or `large_payloads=None` to disable.
+`s3://bucket/{prefix}{message_id}/{sha256 of the body}` and sends a small pointer instead. Consumers
+resolve pointers before your handler runs; handlers never notice. Per destination:
+`client.topic("x", large_payloads=LargePayloads(...))` or `large_payloads=None` to disable.
 
 ## Bucket + key or presigned URL
 
@@ -50,5 +50,7 @@ using them can read fanferro messages. fanferro reads both formats regardless.
 
 Objects are kept by default because SNS fan-out delivers the same pointer to several queues. Use
 an S3 lifecycle rule on the prefix, or `client.consumer(queue, delete_offloaded_payloads=True)` on
-point-to-point queues. The key is derived from the message id, so publish retries overwrite the
-same object instead of creating new ones.
+point-to-point queues. The key is derived from the message id and the body, so publish retries
+of the same bytes overwrite the same object instead of creating new ones, while a message published
+again with the same id but another body (CloudEvents stamp a new time) gets its own object rather
+than replacing the one an earlier copy points to.

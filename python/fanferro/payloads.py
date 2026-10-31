@@ -41,7 +41,8 @@ class LargePayloads:
 
     Attributes:
         bucket: Bucket for payload objects.
-        prefix: Key prefix; the object key is ``{prefix}{message_id}`` (idempotent across retries).
+        prefix: Key prefix; the object key is ``{prefix}{message_id}/{sha256 of the body}``
+            (idempotent across retries of the same bytes).
         threshold: Offload when the encoded message (body plus attributes) exceeds this many bytes,
             or the destination's size limit when that is lower.
         always: Offload every message regardless of size.

@@ -305,8 +305,11 @@ pub async fn offload(
     message_id: &str,
     data: Bytes,
 ) -> Result<PayloadPointer> {
-    let key = format!("{}{}", settings.key_prefix, message_id);
     let sha256 = hex::encode(Sha256::digest(&data));
+    // The body's hash in the key: a message published again with the same id but other bytes
+    // (CloudEvents stamp the time) must not replace the object an earlier copy points to, while
+    // retries of the same bytes keep writing the same object.
+    let key = format!("{}{}/{}", settings.key_prefix, message_id, sha256);
     let size = data.len() as u64;
     backend.objects.put_object(&settings.bucket, &key, data, &settings.put_options()).await?;
     let url = match settings.reference {
@@ -488,7 +491,9 @@ mod tests {
         let backend = broker.backend();
         backend.objects.create_bucket("b").await.unwrap();
         let pointer = offload(&backend, &settings("b"), "m1", Bytes::from_static(b"payload")).await.unwrap();
-        assert_eq!(pointer.key.as_deref(), Some("p/m1"));
+        let sha256 = hex::encode(Sha256::digest(b"payload"));
+        assert_eq!(pointer.key, Some(format!("p/m1/{sha256}")));
+        assert_eq!(pointer.sha256, Some(sha256));
         assert!(pointer.url.as_deref().unwrap().starts_with("memory://"));
         let fetched = fetch(&backend, &FetchSettings::default(), &pointer).await.unwrap();
         assert_eq!(&fetched[..], b"payload");
