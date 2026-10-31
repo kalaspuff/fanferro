@@ -867,7 +867,7 @@ async fn queues_are_created_again_and_purged_again_only_after_60_seconds() {
 
 #[test]
 fn numbers_are_stored_without_leading_and_trailing_zeros() {
-    // docs/parity M1 (1.50 and 3.0 were recorded on AWS; the rest follows the same rule, O4).
+    // docs/parity M1 (AWS returned 1.50, 3.0, -0.50, 0.000, .5 and 100 so; the rest follows the rule).
     for (sent, stored) in [
         ("1.50", Some("1.5")),
         ("3.0", Some("3")),
