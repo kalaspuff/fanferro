@@ -8,6 +8,15 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 
 ## [Unreleased]
 
+### Bug fixes
+
+- Errors cross process boundaries: `ProvisioningError` and `BatchPublishError` could not be
+  unpickled, and an error holding a value that does not pickle (a failed message's body of a class
+  defined in a function, an `AttributeValue` attribute, a `PreparedMessage`) could not be pickled,
+  so raised in a `ProcessPoolExecutor` worker, multiprocessing or a task queue they never reached
+  the caller. Errors now unpickle with their attributes, leaving out (`None`) only the values that
+  do not pickle; copies keep every attribute, and `AttributeValue` and `WireMessage` pickle (#167)
+
 ## [0.7.0] - 2026-10-31
 
 ### Features
