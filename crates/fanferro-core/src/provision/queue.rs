@@ -49,7 +49,10 @@ fn queue_url_for(client: &Client, account: &str, name: &str) -> String {
         None if client.backend().kind == crate::backend::BackendKind::Memory => {
             format!("memory://{}/{account}/{name}", client.region())
         }
-        None => format!("https://sqs.{}.amazonaws.com/{account}/{name}", client.region()),
+        None => {
+            let region = client.region();
+            format!("https://sqs.{region}.{}/{account}/{name}", arn::dns_suffix(arn::partition_for_region(region)))
+        }
     }
 }
 
