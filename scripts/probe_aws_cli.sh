@@ -83,6 +83,7 @@ normalize() {
         -e 's/"[0-9]{13}"/"<ms>"/g' \
         -e 's/"[0-9]{20,}"/"<sequence>"/g' \
         -e "s/$ACCOUNT/<account>/g" \
+        -e 's#arn:aws[a-z-]*:(iam|sts)::<account>:[^" ]*#<caller-arn>#g' \
         -e "s/$REGION/<region>/g" \
         -e 's#https://(sqs|sns)\.<region>\.amazonaws\.com#<endpoint>#g' \
         -e 's/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/<uuid>/g' \

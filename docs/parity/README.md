@@ -29,6 +29,11 @@ uv run python scripts/probe_backends.py compare docs/parity/2026-10-31/probe-aws
 | Directory | Targets | Versions |
 | --- | --- | --- |
 | [2026-10-31](2026-10-31/) | AWS `eu-north-1`, LocalStack, MiniStack, memory | fanferro 0.6.0, AWS CLI v2, MiniStack 1.5.27, LocalStack 2026.x |
+| [2026-10-31-second](2026-10-31-second/) | AWS `eu-north-1` (with the cases of the open questions), memory | fanferro with #146-#154, AWS CLI v2 |
+
+The second run used fanferro with the fixes of #146-#154. Where those changed fanferro itself (the 60
+second limits as throttling, FIFO ids refused before sending, payload buckets with unknown
+credentials), it shows the fixes on AWS; it answered the open questions of the first run.
 
 Each directory holds `probe-<target>.json` (scenarios through fanferro) and
 `probe-cli-<target>.txt` (raw AWS CLI calls). Names, account ids, ids, receipt handles and times are
@@ -60,24 +65,25 @@ quoted as the services return them; `<v>` stands for a value from the request.
 
 | ID | Real AWS | Differences | Status |
 | --- | --- | --- | --- |
-| M1 | `Number` attributes come back without leading and trailing zeros (`1.50` as `1.5`, `3.0` from SNS as `3`); `MD5OfMessageAttributes` of a received message is computed over the values as returned, the one `SendMessage` returns over the values as sent | memory, emulators return the value as sent | **Fixed** (#149): memory returns normalised numbers with their MD5 (values the probe did not send: open question O4) |
-| M2 | Standard queue, message received again after its visibility timeout ran out: the earlier receipt handle still works: `ChangeMessageVisibility` succeeds, `DeleteMessage`/`DeleteMessageBatch` succeed and delete the message | memory: batch entry `InvalidParameterValue` "The receipt handle has expired." and the message stays; MiniStack: `ReceiptHandleIsInvalid`; LocalStack like AWS | **Fixed** (#147): memory follows AWS |
+| M1 | `Number` attributes come back without leading and trailing zeros (`1.50` as `1.5`, `3.0` from SNS as `3`); `MD5OfMessageAttributes` of a received message is computed over the values as returned, the one `SendMessage` returns over the values as sent The second run confirmed `-0.50` as `-0.5`, `0.000` as `0`, `.5` as `0.5` and `100` as `100`. | memory, emulators return the value as sent | **Fixed** (#149): memory returns normalised numbers with their MD5 |
+| M2 | Standard queue, message received again after its visibility timeout ran out: the earlier receipt handle still works: `ChangeMessageVisibility` succeeds, `DeleteMessage`/`DeleteMessageBatch` succeed and delete the message A visibility change with the earlier handle applies to the message (second run). | memory: batch entry `InvalidParameterValue` "The receipt handle has expired." and the message stays; MiniStack: `ReceiptHandleIsInvalid`; LocalStack like AWS | **Fixed** (#147): memory follows AWS |
 | M3 | FIFO queue, same situation: the earlier handle fails; batch entries `ReceiptHandleIsInvalid` "The receipt handle has expired"; single calls `InvalidParameterValue` "Value `<handle>` for parameter ReceiptHandle is invalid. Reason: The receipt handle has expired." | memory: `InvalidParameterValue` for deletes, "The input receipt handle is invalid." for visibility changes; LocalStack accepts the handle | **Fixed** (#147): memory uses the AWS codes and texts |
 | M4 | `ChangeMessageVisibility` for a deleted message: `InvalidParameterValue` "Value `<handle>` for parameter ReceiptHandle is invalid. Reason: Message does not exist or is not available for visibility timeout change." | memory, MiniStack: `ReceiptHandleIsInvalid` | **Fixed** (#147): memory follows AWS |
 | M5 | A handle that is no receipt handle: single calls `ReceiptHandleIsInvalid` (404) "The input receipt handle is invalid."; batch entries "The input receipt handle "`<handle>`" is not a valid receipt handle." | memory's batch text differs | **Fixed** (#147): memory uses the AWS text |
-| M6 | `ChangeMessageVisibility` on a standard-queue message that is visible again (released with timeout 0), with its latest handle, succeeds | memory: `MessageNotInflight` | **Fixed** (#147) for standard queues: memory follows AWS; FIFO queues still answer `MessageNotInflight` (open question O1) |
+| M6 | `ChangeMessageVisibility` on a standard-queue message that is visible again (released with timeout 0), with its latest handle, succeeds and hides it again. A FIFO queue answers `InvalidParameterValue` "Value `<handle>` for parameter ReceiptHandle is invalid. Reason: The receipt handle has expired." (second run) | memory: `MessageNotInflight` | **Fixed** (#147) for standard queues. FIFO queues: Open. Plan: memory answers like SQS (`ReceiptHandleIsInvalid` "The receipt handle has expired" in batches) |
 | M7 | Visibility limits: a timeout over 43200: `InvalidParameterValue` "Value 43201 for parameter VisibilityTimeout is invalid. Reason: VisibilityTimeout must be an integer between 0 and 43200."; a timeout that ends more than 12 hours after the receive: "Value 43200 for parameter VisibilityTimeout is invalid. Reason: Total VisibilityTimeout for the message is beyond the limit [43200 seconds]." | memory checks only the first; emulators neither | **Fixed** (#147): memory checks both (fanferro's heartbeats already stop 12 hours after the receive) |
 | M8 | FIFO `MessageGroupId` and `MessageDeduplicationId`: 1-128 alphanumeric or punctuation characters, else `InvalidParameterValue` "Value `<v>` for parameter MessageGroupId is invalid. Reason: MessageGroupId can only include alphanumeric and punctuation characters. 1 to 128 in length." | fanferro sends them unchecked; memory, MiniStack accept them | **Fixed** (#151): fanferro validates them before sending (architecture invariant 6); memory refuses them like SQS |
 | M9 | Batch entry errors carry only the service's text, e.g. `EmptyValue` "No Value Found for SendMessageBatchRequestEntry.2.MessageBody."; a too large message: "One or more parameters are invalid. Reason: Message must be shorter than 1024 bytes." | memory's entry texts include fanferro's own error formatting; its size text lacks the first sentence | **Fixed** (#150): memory uses the AWS texts. Attribute names, numbers and receive parameters SQS refuses keep the broker's texts: fanferro refuses them before the network with its own |
-| M10 | A long poll that is aborted on the client goes on on the server until its wait time ends, and a message sent meanwhile goes to it: it comes back after its visibility timeout, with a receive count of 2 (ADR 0007) | memory, MiniStack: the poll ends with the connection; LocalStack like AWS | **Fixed** (#155) as an option: `MemoryBroker(orphaned_polls=True)` serves aborted polls like SQS, and the engine protects released messages on any backend that does. Off by default, so that tests that stop a consumer and go on at once do not wait for visibility timeouts |
+| M10 | A long poll that is aborted on the client goes on on the server until its wait time ends, and a message sent meanwhile goes to it: it comes back after its visibility timeout, with a receive count of 2 (ADR 0007) (the second run: it comes back with a receive count of 2) | memory, MiniStack: the poll ends with the connection; LocalStack like AWS | **Fixed** (#155) as an option: `MemoryBroker(orphaned_polls=True)` serves aborted polls like SQS, and the engine protects released messages on any backend that does. Off by default, so that tests that stop a consumer and go on at once do not wait for visibility timeouts |
+| M11 | A `Number` value with more than 38 significant digits fails: `InvalidParameterValue` "Message (user) attribute 'n' number value [`<v>`] must contain fewer than 38 precision digits." (39 digits; 38 pass; second run) | fanferro sends it; memory, emulators accept it | Open. Plan: fanferro refuses it before sending (architecture invariant 6); memory refuses it with the AWS text |
 
 ### SNS
 
 | ID | Real AWS | Differences | Status |
 | --- | --- | --- | --- |
 | S1 | Errors use the code `InvalidParameter`: topic names "Invalid parameter: Topic Name" (also a `.fifo` name without `FifoTopic=true`, or the reverse); an existing topic "Invalid parameter: Attributes Reason: Topic already exists with different attributes"; `ContentBasedDeduplication` on a standard topic "Invalid parameter: Attributes Reason: Unknown attribute ContentBasedDeduplication"; `SignatureVersion` 3: "Invalid parameter: Attributes Reason: SignatureVersion: Invalid value '[3]'. Must be 1 or 2." (`SetTopicAttributes`: "Invalid parameter: SignatureVersion: ..."); changing `FifoTopic`: "Invalid parameter: AttributeName" | memory uses `InvalidParameterValue`, other texts, and accepts the attributes; MiniStack accepts most and turns a topic FIFO | **Fixed** (#152): memory follows AWS |
-| S2 | Topics report `Policy` (the default policy) and `EffectiveDeliveryPolicy`; subscriptions report `SubscriptionPrincipal`, and `FilterPolicyScope=MessageAttributes` once they have a filter policy | memory omits them | **Fixed** (#152): memory reports them (the values follow the AWS documentation, open question O7) |
-| S3 | Publishing to a topic ARN of another region: `InvalidParameter` (400) "Invalid parameter: TopicArn" | memory, MiniStack: `NotFound`; LocalStack like AWS | **Fixed** (#152): memory follows AWS for `Publish` and `PublishBatch` (other operations: open question O2) |
+| S2 | Topics report `Policy` (the default policy) and `EffectiveDeliveryPolicy`; subscriptions report `SubscriptionPrincipal`, and `FilterPolicyScope=MessageAttributes` once they have a filter policy | memory omits them | **Fixed** (#152): memory reports them; the second run confirmed the default `Policy` and `EffectiveDeliveryPolicy` values. Open. Plan: memory writes the policy with AWS's key order (its text differs, its content does not). `SubscriptionPrincipal` is the subscriber's IAM ARN on AWS; the broker has no caller and reports the account root (no change) |
+| S3 | Every topic operation with a topic ARN of another region (`Publish`, `PublishBatch`, `GetTopicAttributes`, `SetTopicAttributes`, `Subscribe`, `ListSubscriptionsByTopic`, `DeleteTopic`; second run) answers `InvalidParameter` (400) "Invalid parameter: TopicArn" | memory, MiniStack: `NotFound`; LocalStack like AWS | **Fixed** (#152) for `Publish` and `PublishBatch`. Open. Plan: the other operations |
 | S4 | Subscribing a FIFO queue to a standard topic: "Invalid parameter: Invalid parameter: Endpoint Reason: FIFO SQS Queues can not be subscribed to standard SNS topics"; again with other attributes: "Invalid parameter: Attributes Reason: Subscription already exists with different attributes" | memory's code and texts differ; MiniStack accepts both | **Fixed** (#152): memory follows AWS (fanferro refuses the first before the network) |
 | S5 | Filter policies are validated with "Invalid parameter: Attributes Reason: FilterPolicy: `<reason>`": "Unrecognized match type glob", "Filter policy can not have more than 5 keys", "Filter policy is too complex", "Value of > must be numeric", "Empty arrays are not allowed", "exists match pattern must be either true or false.", "failed to parse JSON. ..."; nested in the attribute scope: "Invalid parameter: Attributes Reason: Filter policy scope MessageAttributes does not support nested filter policy" | memory refuses the same policies with other texts; MiniStack accepts them all; LocalStack does not support `wildcard` | **Fixed** (#152): memory uses the AWS reasons; it leaves out the JSON parser position SNS appends to some (" at [Source: ...; line: 1, column: N]"), which differs between AWS APIs |
 | S6 | Filter policy matching, 19 policies (attributes and body, every operator) over 8 messages | memory matches AWS exactly; MiniStack lets numeric operators match `String` attributes | No change |
@@ -85,12 +91,13 @@ quoted as the services return them; `<v>` stands for a value from the request.
 | S8 | SNS does not deliver to a queue encrypted with the AWS managed key `alias/aws/sqs` (its key policy cannot allow SNS); nothing reports it | memory, emulators deliver | **Fixed** (#153): memory drops such deliveries; provisioning emits a `config.warning` for such subscriptions |
 | S9 | Notifications (raw delivery off) keep `Number` values as published (`3.0`) and carry `Binary` values in base64; the document is pretty-printed | memory like AWS; MiniStack sends `Binary` values empty | No change (fanferro reads both layouts) |
 | S10 | FIFO: a duplicate publish returns the first message id; deliveries to FIFO queues carry a `SequenceNumber` | MiniStack: no `SequenceNumber`; LocalStack: a new id, and duplicates reach standard queues | No change |
+| S11 | SNS FIFO ids: `InvalidParameter` "Invalid parameter: The MessageGroupId parameter can only include alphanumeric and punctuation characters. 1 to 128 in length" (and the same for `MessageDeduplicationId`); `PublishBatch` refuses the whole call with it (second run) | memory (#151) uses another text and fails only the entries | Open. Plan: memory uses the AWS text and refuses the call (fanferro refuses such ids before sending) |
 
 ### S3 and payloads
 
 | ID | Real AWS | Differences | Status |
 | --- | --- | --- | --- |
-| P1 | `HeadBucket` with credentials AWS does not know answers 403 without a body, like for a bucket of another account | emulators do not check credentials | **Fixed** (#154): after a 403 fanferro asks `GetBucketLocation`, whose error names unknown credentials, so provisioning no longer reports the bucket as found |
+| P1 | `HeadBucket` with credentials AWS does not know answers 403 without a body, like for a bucket of another account `GetBucketLocation` answers `InvalidAccessKeyId` (403) for such credentials (second run). | emulators do not check credentials | **Fixed** (#154): after a 403 fanferro asks `GetBucketLocation`, whose error names unknown credentials, so provisioning no longer reports the bucket as found |
 | P2 | A presigned URL of a missing object: 404 "Not Found" (`NoSuchKey`); an expired one: 403 `AccessDenied` | memory's text says "HTTP 404" instead of "HTTP 404 Not Found"; LocalStack does not expire URLs | **Fixed** (#150): memory uses the AWS status text |
 | P3 | `CreateBucket` for an owned bucket outside `us-east-1`: 409 `BucketAlreadyOwnedByYou` | emulators succeed | No change (fanferro treats both as success) |
 
@@ -100,26 +107,23 @@ quoted as the services return them; `<v>` stands for a value from the request.
 | --- | --- | --- | --- |
 | C1 | Unknown credentials: `InvalidClientTokenId` (403) "The security token included in the request is invalid." from STS, SQS and SNS, `InvalidAccessKeyId` (403) from S3; fanferro reports access denied | emulators accept any credentials; memory has none | No change |
 
-## Open questions
+## Questions the second run answered
 
-These need another run of the probes on AWS (the cases are in the scripts):
+* **O1** A FIFO queue refuses a visibility change for a released message with its latest handle:
+  the handle has expired (M6).
+* **O2** Every SNS topic operation answers "Invalid parameter: TopicArn" for an ARN of another
+  region (S3).
+* **O3** On a standard queue, a visibility change with an earlier handle applies to the message, and
+  one on a released message hides it again (M2, M6).
+* **O4** SQS normalises `Number` values as the broker does; it refuses values with more than 38
+  significant digits (M1, M11).
+* **O5** S3 answers `GetBucketLocation` with unknown credentials with `InvalidAccessKeyId` (P1).
+* **O6** A message an aborted long poll took comes back with a receive count of 2 (M10).
+* **O7** The default `Policy` and `EffectiveDeliveryPolicy` are what the broker reports;
+  `SubscriptionPrincipal` is the subscriber's IAM ARN; SNS refuses invalid FIFO ids with its own
+  text (S2, S11).
 
-* **O1** Does a FIFO queue accept a visibility change for a message that is visible again, with its
-  latest handle (`sqs.fifo.released.*` in the CLI probe)?
-* **O2** Which SNS operations answer "Invalid parameter: TopicArn" for an ARN of another region
-  (`sns.other_region.*`)?
-* **O3** Does a visibility change with an earlier receipt handle (standard queue) apply to the
-  message (`sqs.earlier_handle.*`), and does one on a released message hide it again
-  (`sqs.released.*`)?
-* **O4** How does SQS normalise other `Number` values (`007`, `-0.50`, `1.0E2`, `+5`, `.5`, 38 and
-  39 digits; `sqs.number.*`)?
-* **O5** Which code does S3 send for a `GetBucketLocation` with unknown credentials
-  (`credentials.invalid.s3_get_bucket_location`)?
-* **O6** The receive count of a message an aborted long poll took (`sqs.consumer_stop` in the
-  fanferro probe).
-* **O7** Default `Policy`, `EffectiveDeliveryPolicy` and `SubscriptionPrincipal` values
-  (`sns.topic_default_*`, `sns.subscription_principal`), and the validation of SNS FIFO ids
-  (`sns.fifo.publish.*`).
+No question is open.
 
 ## Emulator differences fanferro's tests must not rely on
 
