@@ -12,7 +12,7 @@ import pytest
 import fanferro
 from fanferro import _core
 from fanferro.__main__ import main
-from fanferro.consumer import Duplicate
+from fanferro.consumer import Duplicate, _Postpone
 from fanferro.idempotency import Claim, InMemoryIdempotencyStore, idempotent
 from fanferro.outbox import InMemoryOutbox, OutboxRelay
 from fanferro.testing import build_message
@@ -114,11 +114,65 @@ async def test_concurrent_claims_retry() -> None:
 
     first = asyncio.create_task(middleware(build_message({}, id="x"), slow))
     await started.wait()
-    with pytest.raises(fanferro.Retry) as raised:
+    with pytest.raises(_Postpone) as raised:
         await middleware(build_message({}, id="x"), slow)
-    assert raised.value.delay == 7
+    assert raised.value.delay == 7, "postponed, not retried: no attempt is used up"
     release.set()
     await first
+
+
+async def test_idempotency_stores_may_return_strings() -> None:
+    """Claims are compared by value: a store reading them back from a database returns strings."""
+
+    class StringStore:
+        def __init__(self) -> None:
+            self.state: dict[str, str] = {}
+
+        async def claim(self, key: str, *, lock_ttl: float) -> str:
+            if key in self.state:
+                return self.state[key]
+            self.state[key] = "in_progress"
+            return "acquired"
+
+        async def complete(self, key: str, *, ttl: float) -> None:
+            self.state[key] = "completed"
+
+        async def release(self, key: str) -> None:
+            self.state.pop(key, None)
+
+    store = StringStore()
+    middleware = idempotent(store)
+    calls: list[str] = []
+
+    async def handler(msg: fanferro.Message[object]) -> None:
+        calls.append(msg.id)
+
+    await middleware(build_message({}, id="s"), handler)
+    with pytest.raises(Duplicate):
+        await middleware(build_message({}, id="s"), handler)
+    store.state["queue:t"] = "in_progress"
+    with pytest.raises(_Postpone):
+        await middleware(build_message({}, id="t", queue="queue"), handler)
+    assert calls == ["s"]
+
+
+async def test_idempotency_middleware_survives_a_failed_completion() -> None:
+    class FailingStore(InMemoryIdempotencyStore):
+        async def complete(self, key: str, *, ttl: float) -> None:
+            raise ConnectionError("store unavailable")
+
+    calls: list[str] = []
+
+    async def handler(msg: fanferro.Message[object]) -> None:
+        calls.append(msg.id)
+
+    await idempotent(FailingStore())(build_message({}, id="c"), handler)  # does not raise
+    assert calls == ["c"]
+
+
+def test_idempotent_keeps_an_empty_store() -> None:
+    store = InMemoryIdempotencyStore()
+    assert idempotent(store).store is store, "an empty store has a length of 0, but is the store to use"
 
 
 async def test_in_memory_outbox() -> None:

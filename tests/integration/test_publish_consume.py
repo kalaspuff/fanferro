@@ -391,6 +391,27 @@ async def test_routing_by_version(client_factory: ClientFactory, name: Any) -> N
     assert sorted(calls) == ["v1:1", "v2:2"]
 
 
+async def test_a_route_without_a_type_for_a_whole_message_handler_receives_every_message(
+    client_factory: ClientFactory, name: Any
+) -> None:
+    # Regression test for #176: such a route took typing.Any as its type and dead-lettered everything.
+    client = client_factory()
+    queue = client.queue(name("untyped-route"))
+    received: list[Any] = []
+    consumer = client.consumer(queue, wait_time=1)
+
+    @consumer.route
+    async def handle(message: fanferro.Message[Any]) -> None:
+        received.append(message.body)
+
+    async with client:
+        await queue.send(OrderCreated(order_id=1))
+        await queue.send({"plain": True}, type="something.else")
+        await consume_until(consumer, lambda: len(received) == 2)
+    assert sorted(received, key=str) == sorted([{"order_id": 1, "total": 0.0}, {"plain": True}], key=str)
+    assert consumer.stats()["unroutable"] == 0
+
+
 async def test_large_payloads(client_factory: ClientFactory, name: Any) -> None:
     bucket = name("payloads")
     client = client_factory(

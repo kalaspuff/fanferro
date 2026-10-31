@@ -65,8 +65,10 @@ async def other(message: fanferro.Message[bytes]) -> None: ...
 
 Rules: routes are evaluated by `priority` (higher first), then registration order; the first match
 wins; `default` routes run last. A typed route without `when` matches messages whose type is the
-class's type name (or an alias from `@message_type("name", "alias")`). Messages without a type
-(foreign producers) only match `when=` routes and the default route. `client.consumer(queue, handler)`
+class's type name (or an alias from `@message_type("name", "alias")`). A route without a type or
+`when` for a handler that takes the whole message (`Message`, `Message[Any]`, no annotation) or an
+untyped body (`Any`, `object`, `dict`...) matches every message. Messages without a type (foreign
+producers) only match such routes, `when=` routes and the default route. `client.consumer(queue, handler)`
 with a single handler uses it as the default route, so it receives everything.
 
 Matchers (all in `fanferro.matchers`): `attribute(name)`, `header(name)` (falls back to attributes),
@@ -75,7 +77,8 @@ Matchers (all in `fanferro.matchers`): `attribute(name)`, `header(name)` (falls 
 when the client has a `topic_prefix`), `group_id()`; comparisons `==`, `!=`, `<`, `<=`, `>`,
 `>=`, `.is_in()`, `.exists()`, `.missing()`, `.startswith()`, `.endswith()`, `.contains()`,
 `.matches(regex)`, `.test(fn)`; combine with `&`, `|`, `~` (parenthesize comparisons:
-`(m.topic() == "orders") | ...`). Any `(Message) -> bool` callable works too.
+`(m.topic() == "orders") | ...`). Python's `and`, `or` and `not` raise `TypeError` on matchers
+(they would silently drop a condition). Any `(Message) -> bool` callable works too.
 
 No route → the dead-letter policy's `on_unroutable` action (default: dead-letter).
 
