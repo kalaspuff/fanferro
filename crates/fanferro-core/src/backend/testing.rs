@@ -74,16 +74,25 @@ impl ObjectStoreApi for SlowUploads {
     }
 }
 
-/// SQS whose first `stuck` visibility changes never complete (a connection that stopped answering).
+/// SQS whose first `stuck` visibility changes never complete (a connection that stopped
+/// answering), or complete only after a delay (a slow connection: the change still applies).
 #[derive(Debug)]
 pub(crate) struct StuckVisibility {
     inner: Arc<dyn SqsApi>,
     stuck: parking_lot::Mutex<usize>,
+    delay: Option<Duration>,
+    /// Stuck or slow calls that started.
+    pub(crate) started: std::sync::atomic::AtomicUsize,
 }
 
 impl StuckVisibility {
     pub(crate) fn new(inner: Arc<dyn SqsApi>, stuck: usize) -> Self {
-        Self { inner, stuck: parking_lot::Mutex::new(stuck) }
+        Self { inner, stuck: parking_lot::Mutex::new(stuck), delay: None, started: Default::default() }
+    }
+
+    /// The first `slow` visibility changes take `delay` before they reach `inner`.
+    pub(crate) fn slow(inner: Arc<dyn SqsApi>, slow: usize, delay: Duration) -> Self {
+        Self { delay: Some(delay), ..Self::new(inner, slow) }
     }
 }
 
@@ -114,7 +123,11 @@ impl SqsApi for StuckVisibility {
             }
         };
         if stuck {
-            std::future::pending::<()>().await;
+            self.started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match self.delay {
+                Some(delay) => tokio::time::sleep(delay).await,
+                None => std::future::pending::<()>().await,
+            }
         }
         self.inner.change_visibility_batch(queue_url, entries).await
     }

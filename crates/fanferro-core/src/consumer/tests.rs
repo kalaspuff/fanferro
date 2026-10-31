@@ -546,6 +546,75 @@ async fn a_stuck_extension_call_does_not_stall_heartbeats() {
     engine.close(true).await;
 }
 
+/// A fixture whose first visibility change (a heartbeat extension) takes `delay` and still applies.
+async fn slow_extension_fixture(delay: Duration) -> (Fixture, Arc<StuckVisibility>) {
+    let broker = MemoryBroker::new("us-east-1", "000000000000");
+    let mut backend = broker.backend();
+    let slow = Arc::new(StuckVisibility::slow(backend.sqs.clone(), 1, delay));
+    backend.sqs = slow.clone();
+    let client = Client::with_backend(backend, ClientConfig::default()).unwrap();
+    let url = client.backend().sqs.create_queue("work", &StringMap::new(), &StringMap::new()).await.unwrap();
+    (Fixture { broker, client, url }, slow)
+}
+
+async fn until_extension_in_flight(slow: &StuckVisibility) {
+    while slow.started.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_retry_is_not_overridden_by_a_heartbeat_in_flight() {
+    // The retry did not wait for the extension call in flight: reaching SQS after it, the extension
+    // hid the message for another visibility timeout (30 s) instead of the retry's 2 s.
+    let (fx, slow) = slow_extension_fixture(Duration::from_millis(400)).await;
+    fx.send("retried").await;
+    let engine = fx.engine(|c| {
+        c.visibility_timeout = 30.0;
+        c.heartbeat.interval = Some(1.0);
+    });
+    let delivery = collect(&engine, 1).await.remove(0);
+    until_extension_in_flight(&slow).await;
+    delivery.lease.nack(Duration::from_secs(2)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let stored = fx.stored();
+    // Visible after the retry's delay: received again by the engine.
+    assert!(!stored[0].in_flight || stored[0].receive_count == 2, "still hidden by the extension");
+    assert!(engine.stats().metrics["lease_extensions"] >= 1);
+    engine.close(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn releases_are_not_overridden_by_a_heartbeat_in_flight() {
+    // A dropped delivery and the releases of close() wait for the extension in flight, and are
+    // still released. (An extension that arrives after a release to visibility 0 fails, the message
+    // being visible; one that arrives after a release kept hidden during shutdown, see
+    // `visibility_floor`, would hide it again.)
+    for close in [false, true] {
+        let (fx, slow) = slow_extension_fixture(Duration::from_millis(400)).await;
+        fx.send("released").await;
+        let engine = fx.engine(|c| {
+            c.visibility_timeout = 30.0;
+            c.heartbeat.interval = Some(1.0);
+        });
+        let delivery = collect(&engine, 1).await.remove(0);
+        until_extension_in_flight(&slow).await;
+        if close {
+            delivery.lease.mark_active();
+            std::mem::forget(delivery); // still unsettled when the engine closes
+            engine.close(true).await;
+        } else {
+            drop(delivery);
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let stored = fx.stored();
+        assert!(!stored[0].in_flight || stored[0].receive_count == 2, "still hidden (close: {close})");
+        if !close {
+            engine.close(true).await;
+        }
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn without_heartbeats_messages_reappear() {
     let fx = fixture(ClientConfig::default()).await;

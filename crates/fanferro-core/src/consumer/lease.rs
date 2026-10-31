@@ -20,6 +20,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::sync::{OwnedSemaphorePermit, oneshot};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 use super::EngineInner;
 use super::config::MAX_VISIBILITY;
@@ -71,7 +72,8 @@ pub(crate) struct LeaseEntry {
     pub next_heartbeat: Instant,
     pub max_until: Instant,
     pub status: LeaseStatus,
-    pub extending: bool,
+    /// Set while a heartbeat extension of the lease is in flight; cancelled when its call ended.
+    pub extending: Option<CancellationToken>,
 }
 
 /// How a message was settled (used for events and metrics).
@@ -340,6 +342,7 @@ impl Lease {
     /// Makes the message visible again after `delay` (retry with backoff).
     pub async fn nack(&self, delay: Duration) -> Result<()> {
         self.begin().await?;
+        self.inner.after_extension(self.id).await;
         let delay = self.cap_visibility(self.inner.visibility_floor(delay));
         let result = self.settle(SettleKind::Visibility(delay)).await;
         self.finish(Outcome::Retried, &result);
@@ -361,6 +364,7 @@ impl Lease {
     /// Makes the message visible again immediately (no processing happened).
     pub async fn release(&self) -> Result<()> {
         self.begin().await?;
+        self.inner.after_extension(self.id).await;
         let result = self.settle(SettleKind::Visibility(self.inner.visibility_floor(Duration::ZERO))).await;
         self.finish(Outcome::Released, &result);
         if result.is_ok() {
@@ -523,10 +527,9 @@ impl Drop for Lease {
         self.end_settling();
         let was_settled = self.settled.swap(true, Ordering::SeqCst);
         // `finish` and `close` remove settled entries; anything still tracked is ours to clean up.
-        let tracked = self.inner.leases.lock().remove(&self.id).is_some();
-        if !tracked {
+        let Some(entry) = self.inner.leases.lock().remove(&self.id) else {
             return;
-        }
+        };
         self.inner.metrics.in_flight.add(-1);
         if was_settled {
             // A settlement was interrupted (its future was dropped); nothing left to do.
@@ -536,14 +539,35 @@ impl Drop for Lease {
             // Stopping without releasing unfinished messages: left to time out.
             return;
         }
-        // Dropped without settlement: stop heartbeating and make the message visible again.
-        if let Some(queue) = self.inner.settle_queue() {
-            let _ = queue.push(SettleCommand::new(
-                self.message.receipt_handle.clone(),
-                SettleKind::Visibility(self.inner.visibility_floor(Duration::ZERO)),
-                None,
-            ));
-            self.inner.metrics.messages_released.inc();
+        // Dropped without settlement: stop heartbeating and make the message visible again, once
+        // an extension in flight ended (it would hide the message again).
+        let inner = self.inner.clone();
+        let receipt_handle = self.message.receipt_handle.clone();
+        let release = move || {
+            if let Some(queue) = inner.settle_queue()
+                && queue
+                    .push(SettleCommand::new(
+                        receipt_handle,
+                        SettleKind::Visibility(inner.visibility_floor(Duration::ZERO)),
+                        None,
+                    ))
+                    .is_ok()
+            {
+                inner.metrics.messages_released.inc();
+            }
+        };
+        match entry.extending.filter(|extension| !extension.is_cancelled()) {
+            None => release(),
+            Some(extension) => {
+                let wait = self.inner.extension_wait();
+                self.inner.settlements.spawn_on(
+                    async move {
+                        let _ = tokio::time::timeout(wait, extension.cancelled()).await;
+                        release();
+                    },
+                    &self.inner.runtime,
+                );
+            }
         }
     }
 }

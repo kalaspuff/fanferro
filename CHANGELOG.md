@@ -104,6 +104,9 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   share it, instead of leaving it out; `Client(split_batches_by_trace_header=True)` sends entries
   with different headers in separate calls. The in-memory broker keeps a batch's trace header only
   when its entries share it, like SNS (#139)
+- **consumer:** A retry or a release waits for a heartbeat extension of the message that is in
+  flight, which could otherwise reach SQS after it and hide the message for another visibility
+  timeout (#140)
 
 ## [0.5.0] - 2026-10-17
 
