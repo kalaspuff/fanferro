@@ -100,10 +100,11 @@ Publish options (keywords or `fanferro.OutgoingMessage`): `type`, `attributes`, 
 `delay` (queues), `sns_subject` (topics), `codec`, `envelope`.
 
 Consumer options: `concurrency`, `prefetch`, `batch_size`, `min_receive_batch`,
-`receive_batch_wait`, `wait_time`, `pollers`, `rate_limit`, `visibility_timeout`, `heartbeat`,
-`retry`, `dead_letter`, `shutdown`, `handler_timeout`, `ordering`, `strict_ordering`, `envelopes`,
-`middleware`, `auto_ack`, `settle_linger`, `sns_unwrap`, `auto_confirm_subscriptions`,
-`delete_offloaded_payloads`, `name`.
+`receive_batch_wait`, `wait_time`, `pollers`, `max_pollers`, `rate_limit`, `visibility_timeout`,
+`heartbeat`, `retry`, `dead_letter`, `shutdown`, `handler_timeout`, `ordering`, `strict_ordering`,
+`envelopes`, `middleware`, `auto_ack`, `settle_linger`, `sns_unwrap`, `auto_confirm_subscriptions`,
+`delete_offloaded_payloads`, `name`. For throughput, raise `concurrency`: receives follow (extra
+receive loops run while receives come back full), so `pollers` rarely needs changing.
 
 ## Credentials and region
 

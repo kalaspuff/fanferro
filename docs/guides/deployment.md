@@ -31,8 +31,9 @@ one tolerates longer stalls (GC, network partitions) before redelivery.
 
 ## Throughput tuning
 
-* I/O-bound handlers: raise `concurrency` (100+ is fine on asyncio) and `pollers` (each long poll
-  returns at most 10 messages).
+* I/O-bound handlers: raise `concurrency` (100+ is fine on asyncio). Receives follow: while they
+  come back full, extra receive loops run (up to `max_pollers`), so `pollers` rarely needs
+  raising; it sets the long polls that always run, also on an idle queue.
 * Keep `prefetch` low for slow handlers (prefetched messages wait while invisible).
 * Use `publish_batch`/`send_batch` for bulk publishing (10 messages per API call).
 * CPU-bound handlers block the event loop: offload with `asyncio.to_thread` or a process pool

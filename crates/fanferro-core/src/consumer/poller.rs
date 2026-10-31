@@ -1,26 +1,42 @@
 //! Receive loops.
 
-use std::sync::Arc;
-
 use tokio::sync::OwnedSemaphorePermit;
 
 use crate::backend::{ReceiveRequest, ReceivedMessage, VisibilityChange};
 use crate::events::{Event, EventKind};
 use crate::retry::sleep_or_cancel;
 
-use super::EngineInner;
+use super::{EngineInner, PollerSlot};
 
 /// How long a poller with `wait_time` 0 (short polling) waits after an empty receive.
 const EMPTY_SHORT_POLL_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// One receive loop. Runs until the engine's receive token is cancelled.
-pub(crate) async fn poll_loop(inner: Arc<EngineInner>) {
+/// The longest an extra receive loop waits for messages: when the backlog is gone, its in-flight
+/// slots are back after this instead of after a whole `wait_time`.
+const EXTRA_WAIT_TIME: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// One receive loop. Runs until the engine's receive token is cancelled; an `extra` loop (see
+/// [`EngineInner::add_poller`]) ends earlier, at its first receive that does not come back full
+/// or when no full batch of in-flight slots becomes free within `receive_batch_wait`.
+pub(crate) async fn poll_loop(slot: PollerSlot, extra: bool) {
+    let inner = slot.inner.clone();
+    let batch_size = usize::from(inner.settings.batch_size);
+    let wait_time = if extra { inner.settings.wait_time.min(EXTRA_WAIT_TIME) } else { inner.settings.wait_time };
     let mut consecutive_failures: u32 = 0;
     loop {
-        if inner.receive_token.is_cancelled() || !inner.wait_unpaused().await {
-            break;
-        }
-        let Some(mut permits) = acquire_permits(&inner).await else {
+        inner.trim_permits();
+        let permits = if extra {
+            if inner.receive_token.is_cancelled() || inner.is_paused() {
+                break;
+            }
+            take_free_batch(&inner).await
+        } else {
+            if inner.receive_token.is_cancelled() || !inner.wait_unpaused().await {
+                break;
+            }
+            acquire_permits(&inner).await
+        };
+        let Some(mut permits) = permits else {
             break;
         };
         if let Some(limiter) = &inner.rate_limiter {
@@ -36,12 +52,15 @@ pub(crate) async fn poll_loop(inner: Arc<EngineInner>) {
             if let Some(limiter) = &inner.rate_limiter {
                 limiter.refund(u32::try_from(requested).unwrap_or(0));
             }
+            if extra {
+                break;
+            }
             continue;
         }
         let request = ReceiveRequest {
             queue_url: inner.settings.queue_url.clone(),
             max_messages: u8::try_from(requested).unwrap_or(10),
-            wait_time: inner.settings.wait_time,
+            wait_time,
             visibility_timeout: Some(inner.settings.visibility_timeout),
             attempt_id: inner.settings.fifo.then(|| uuid::Uuid::new_v4().to_string()),
         };
@@ -83,6 +102,9 @@ pub(crate) async fn poll_loop(inner: Arc<EngineInner>) {
                         Event::new(EventKind::ReceiveEmpty, "no messages received")
                             .field("queue", &inner.settings.queue_url)
                     });
+                    if extra {
+                        break;
+                    }
                     // A short poll of an empty queue returns at once: do not call again right away.
                     if inner.settings.wait_time.is_zero()
                         && !sleep_or_cancel(EMPTY_SHORT_POLL_PAUSE, &inner.receive_token).await
@@ -100,8 +122,15 @@ pub(crate) async fn poll_loop(inner: Arc<EngineInner>) {
                         .field("queue", &inner.settings.queue_url)
                         .field("count", messages.len())
                 });
+                let full = messages.len() == batch_size;
                 permits.truncate(messages.len());
                 inner.accept(messages, permits);
+                if full {
+                    // The queue has more: receive it in parallel while slots are free.
+                    inner.add_poller();
+                } else if extra {
+                    break;
+                }
             }
             Err(error) => {
                 drop(permits);
@@ -118,12 +147,14 @@ pub(crate) async fn poll_loop(inner: Arc<EngineInner>) {
                         .field("retry_in_seconds", delay.as_secs_f64())
                         .error(&error)
                 });
-                if !sleep_or_cancel(delay, &inner.receive_token).await {
+                // Extra loops leave the backing off to the loops that always run.
+                if extra || !sleep_or_cancel(delay, &inner.receive_token).await {
                     break;
                 }
             }
         }
     }
+    drop(slot);
 }
 
 /// In-flight permits for the next receive, one per requested message: waits for a free slot,
@@ -159,6 +190,23 @@ async fn acquire_permits(inner: &EngineInner) -> Option<Vec<OwnedSemaphorePermit
             Ok(permit) => permits.push(permit),
             Err(_) => break,
         }
+    }
+    Some(permits)
+}
+
+/// A full batch of in-flight permits for an extra receive loop, if one is free within
+/// `receive_batch_wait` (the handlers are not keeping up otherwise).
+async fn take_free_batch(inner: &EngineInner) -> Option<Vec<OwnedSemaphorePermit>> {
+    let batch_size = inner.settings.batch_size;
+    let mut batch = tokio::select! {
+        biased; // free permits are taken also with a `receive_batch_wait` of 0
+        () = inner.receive_token.cancelled() => return None,
+        batch = inner.permits.clone().acquire_many_owned(u32::from(batch_size)) => batch.ok()?,
+        () = tokio::time::sleep(inner.settings.receive_batch_wait) => return None,
+    };
+    let mut permits = Vec::with_capacity(usize::from(batch_size));
+    while let Some(permit) = batch.split(1) {
+        permits.push(permit);
     }
     Some(permits)
 }

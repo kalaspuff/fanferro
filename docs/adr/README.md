@@ -17,3 +17,4 @@ Status values: Accepted, Superseded by NNNN, Deprecated.
 | [0009](0009-results-reach-asyncio-in-batches.md) | Results of Rust futures reach asyncio in batches, without runtime threads taking the GIL |
 | [0010](0010-payload-keys-include-the-body-hash.md) | Offloaded payload keys include the body's hash (amends 0003) |
 | [0011](0011-real-aws-is-the-reference.md) | Real AWS is the reference for the in-memory broker and the error mapping (amends 0005, 0006) |
+| [0012](0012-receives-follow-the-backlog.md) | Receives in flight follow the backlog: extra receive loops while receives come back full |
