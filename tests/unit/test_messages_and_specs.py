@@ -94,6 +94,15 @@ def test_prepared_message_roundtrip() -> None:
         destination={}, destination_name="x", wire=fanferro.WireMessage("hello"), message_id="1"
     )
     assert text.to_dict()["body"] == {"text": "hello"}
+    # Valid UTF-8 with characters SQS does not take as text (PostgreSQL's jsonb rejects the JSON
+    # escape of U+0000): such bodies are stored as base64, like binary ones.
+    for body in ("a\x00b", b"\x08\x00", "bell\x07"):
+        control = fanferro.PreparedMessage(
+            destination={}, destination_name="x", wire=fanferro.WireMessage(body), message_id="1"
+        )
+        assert "text" not in control.to_dict()["body"]
+        assert "\\u00" not in control.to_json()
+        assert fanferro.PreparedMessage.from_json(control.to_json()) == control
     with pytest.raises(ValueError, match="version"):
         fanferro.PreparedMessage.from_dict({"version": 2})
 

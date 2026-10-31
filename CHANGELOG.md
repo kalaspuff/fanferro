@@ -68,6 +68,8 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 - **routing:** `m.topic() !=` and `.is_in()` accept topic names like `==` (#118)
 - **outbox:** Prepared messages for a queue named like a topic use the queue's large payload
   settings (#121)
+- **outbox:** Prepared message bodies with control characters such as NUL are stored as base64, so
+  that a `jsonb` outbox column takes them (#122)
 
 ## [0.5.0] - 2026-10-17
 
