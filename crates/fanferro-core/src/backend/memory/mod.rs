@@ -541,6 +541,7 @@ fn enqueue(state: &mut State, queue_url: &str, operation: &'static str, request:
             receive_count,
             first_receive,
             receipt_handle: None,
+            received_at: None,
             in_flight: false,
             group_id: request.group_id,
             deduplication_id,
@@ -625,7 +626,7 @@ fn try_receive(state: &mut State, request: &ReceiveRequest, now: Instant) -> Res
     let mut received = Vec::with_capacity(sequences.len());
     let mut retired = Vec::new();
     for sequence in sequences {
-        let Some((message, previous)) = queue.messages.receive(sequence, now + visibility) else { continue };
+        let Some((message, previous)) = queue.messages.receive(sequence, now, now + visibility) else { continue };
         if let Some(previous) = previous {
             retired.push((previous, message.message_id.clone()));
         }
@@ -657,6 +658,51 @@ fn try_receive(state: &mut State, request: &ReceiveRequest, now: Instant) -> Res
 
 fn receipt_error(code: &str, message: &str) -> BatchEntryError {
     BatchEntryError { code: code.into(), message: Some(message.into()), sender_fault: true }
+}
+
+/// The longest visibility timeout, also counted from the receive.
+const MAX_VISIBILITY: Duration = Duration::from_secs(43_200);
+
+/// A FIFO queue's answer to the receipt handle of an earlier receive.
+fn expired_receipt() -> BatchEntryError {
+    receipt_error("ReceiptHandleIsInvalid", "The receipt handle has expired")
+}
+
+fn invalid_receipt(handle: &str) -> BatchEntryError {
+    receipt_error(
+        "ReceiptHandleIsInvalid",
+        &format!("The input receipt handle \"{handle}\" is not a valid receipt handle."),
+    )
+}
+
+/// What a receipt handle refers to in a queue.
+enum Receipt {
+    /// The handle of the message's latest receive.
+    Current(u64),
+    /// The handle of an earlier receive of a message that was received again since.
+    Earlier(u64),
+    /// A handle of a message that is gone (deleted, or moved by a redrive policy).
+    Gone,
+    /// No receipt handle the broker handed out.
+    Invalid,
+}
+
+impl Receipt {
+    fn of(queue: &Queue, retired: &HashMap<String, String>, handle: &str) -> Self {
+        if let Some(sequence) = queue.messages.by_receipt(handle) {
+            return Self::Current(sequence);
+        }
+        let earlier = retired.get(handle).map(String::as_str);
+        // The broker's handles are `<message id>#<uuid>`.
+        let Some(message_id) = earlier.or_else(|| handle.split_once('#').map(|(id, _)| id)) else {
+            return Self::Invalid;
+        };
+        match queue.messages.by_id(message_id) {
+            Some(sequence) if earlier.is_some() => Self::Earlier(sequence),
+            Some(_) => Self::Invalid,
+            None => Self::Gone,
+        }
+    }
 }
 
 #[async_trait]
@@ -758,24 +804,20 @@ impl SqsApi for MemorySqs {
         queue.notify.notify_waiters();
         Ok(receipt_handles
             .into_iter()
-            .map(|handle| {
-                if let Some(sequence) = queue.messages.by_receipt(&handle) {
+            .map(|handle| match Receipt::of(queue, retired_receipts, &handle) {
+                Receipt::Current(sequence) => {
                     queue.messages.remove(sequence);
                     Ok(())
-                } else if let Some(message_id) = retired_receipts.get(&handle) {
-                    if queue.messages.contains_id(message_id) {
-                        Err(receipt_error("InvalidParameterValue", "The receipt handle has expired."))
-                    } else {
-                        Ok(())
-                    }
-                } else if let Some((message_id, _)) = handle.split_once('#')
-                    && !queue.messages.contains_id(message_id)
-                {
-                    // Already deleted with its current handle: deleting again succeeds.
-                    Ok(())
-                } else {
-                    Err(receipt_error("ReceiptHandleIsInvalid", "The input receipt handle is invalid."))
                 }
+                // A standard queue deletes the message with the handle of an earlier receive too.
+                Receipt::Earlier(sequence) if !queue.fifo => {
+                    queue.messages.remove(sequence);
+                    Ok(())
+                }
+                Receipt::Earlier(_) => Err(expired_receipt()),
+                // Deleted already (with this handle or another one): deleting again succeeds.
+                Receipt::Gone => Ok(()),
+                Receipt::Invalid => Err(invalid_receipt(&handle)),
             })
             .collect())
     }
@@ -786,7 +828,8 @@ impl SqsApi for MemorySqs {
         entries: Vec<VisibilityChange>,
     ) -> Result<BatchResult<()>> {
         let mut state = self.0.state.lock();
-        let queue = state.queues.get_mut(queue_url).ok_or_else(|| queue_not_found("ChangeMessageVisibilityBatch"))?;
+        let State { queues, retired_receipts, .. } = &mut *state;
+        let queue = queues.get_mut(queue_url).ok_or_else(|| queue_not_found("ChangeMessageVisibilityBatch"))?;
         let now = Instant::now();
         // Messages whose visibility timeout expired are no longer in flight.
         queue.messages.promote(now);
@@ -794,19 +837,49 @@ impl SqsApi for MemorySqs {
         let results = entries
             .into_iter()
             .map(|entry| {
-                if whole_seconds(entry.timeout) > Duration::from_secs(43_200) {
+                let timeout = whole_seconds(entry.timeout);
+                if timeout > MAX_VISIBILITY {
                     return Err(receipt_error(
                         "InvalidParameterValue",
-                        "VisibilityTimeout must be at most 43200 seconds.",
+                        &format!(
+                            "Value {} for parameter VisibilityTimeout is invalid. Reason: VisibilityTimeout must be an integer between 0 and 43200.",
+                            timeout.as_secs()
+                        ),
                     ));
                 }
-                let Some(sequence) = queue.messages.by_receipt(&entry.receipt_handle) else {
-                    return Err(receipt_error("ReceiptHandleIsInvalid", "The input receipt handle is invalid."));
+                let sequence = match Receipt::of(queue, retired_receipts, &entry.receipt_handle) {
+                    Receipt::Current(sequence) => sequence,
+                    // A standard queue applies the handle of an earlier receive too.
+                    Receipt::Earlier(sequence) if !queue.fifo => sequence,
+                    Receipt::Earlier(_) => return Err(expired_receipt()),
+                    Receipt::Gone => {
+                        return Err(receipt_error(
+                            "InvalidParameterValue",
+                            &format!(
+                                "Value {} for parameter ReceiptHandle is invalid. Reason: Message does not exist or is not available for visibility timeout change.",
+                                entry.receipt_handle
+                            ),
+                        ));
+                    }
+                    Receipt::Invalid => return Err(invalid_receipt(&entry.receipt_handle)),
                 };
-                if !queue.messages.get(sequence).is_some_and(|message| message.in_flight) {
+                let Some(message) = queue.messages.get(sequence) else { return Err(invalid_receipt(&entry.receipt_handle)) };
+                // A standard queue changes the visibility of a message that is visible again too
+                // (hiding it); whether a FIFO queue does is an open question (docs/parity O1).
+                if queue.fifo && !message.in_flight {
                     return Err(receipt_error("MessageNotInflight", "The message referred to is not in flight."));
                 }
-                queue.messages.change_visibility(sequence, now, whole_seconds(entry.timeout));
+                // The visibility of a received message ends at most 12 hours after the receive.
+                if message.received_at.is_some_and(|at| now.duration_since(at) + timeout > MAX_VISIBILITY) {
+                    return Err(receipt_error(
+                        "InvalidParameterValue",
+                        &format!(
+                            "Value {} for parameter VisibilityTimeout is invalid. Reason: Total VisibilityTimeout for the message is beyond the limit [43200 seconds].",
+                            timeout.as_secs()
+                        ),
+                    ));
+                }
+                queue.messages.change_visibility(sequence, now, timeout);
                 changed = true;
                 Ok(())
             })
