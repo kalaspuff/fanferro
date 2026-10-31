@@ -394,6 +394,43 @@ async def test_outbox_prepare_and_relay(client_factory: ClientFactory, name: Any
     assert [message.json()["order_id"] for message in fifo_messages] == [0, 1]
 
 
+async def test_the_outbox_relay_gives_up_on_records_it_cannot_publish(client_factory: ClientFactory, name: Any) -> None:
+    # Records for a deleted queue at the head of the outbox were claimed again every round, so the
+    # relay never got to the records behind them.
+    client = client_factory()
+    gone = client.queue(name("outbox-gone"))
+    worker = client.queue(name("outbox-worker"))
+    outbox = InMemoryOutbox()
+    async with client:
+        lost = [outbox.add(await gone.prepare({"n": i})) for i in range(3)]
+        kept = outbox.add(await worker.prepare({"n": 3}))
+        await gone.delete()
+        relay = OutboxRelay(client, outbox, batch_size=2, max_attempts=3)
+        for _ in range(10):
+            await relay.run_once()
+            if not outbox.pending:
+                break
+        assert outbox.published == [kept]
+        assert [(record.id, record.attempts) for record in outbox.abandoned] == [(i, 3) for i in lost]
+        assert [message.json() for message in await drain_queue(client, worker)] == [{"n": 3}]
+
+
+async def test_the_outbox_relay_keeps_held_back_fifo_records(client_factory: ClientFactory, name: Any) -> None:
+    # A FIFO record held back behind a failing earlier one of its group did not fail itself.
+    client = client_factory()
+    queue = client.queue(f"{name('outbox-fifo')}.fifo", attributes=fanferro.QueueAttributes(max_message_size=1024))
+    outbox = InMemoryOutbox()
+    async with client:
+        too_large = outbox.add(await queue.prepare({"blob": "x" * 2000}, group_id="g"))
+        later = outbox.add(await queue.prepare({"n": 1}, group_id="g"))
+        relay = OutboxRelay(client, outbox, max_attempts=2)
+        for _ in range(5):
+            await relay.run_once()
+        assert outbox.published == [later]
+        assert [record.id for record in outbox.abandoned] == [too_large]
+        assert [message.json() for message in await drain_queue(client, queue)] == [{"n": 1}]
+
+
 async def test_publish_middleware(client_factory: ClientFactory, name: Any) -> None:
     async def tenant(context: fanferro.PublishContext, call_next: fanferro.PrepareNext) -> fanferro.PreparedMessage:
         context.message.attributes.setdefault("tenant", "acme")

@@ -18,6 +18,10 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 - Dicts keyed by members of `(str, Enum)` or `(int, Enum)` classes are encoded with the members'
   values as keys (`{"dark": 3}`) instead of their names (`{"Shade.DARK": 3}`), as for other enums;
   the dataclass codec reads both.
+- `OutboxRelay` gives up a record after `max_attempts` (10) attempts that failed with an error
+  retrying cannot fix, through the new `OutboxStore.mark_abandoned()`, instead of retrying it
+  forever ahead of every record behind it. Implement `mark_abandoned` in your store (keep the
+  record, never claim it again); without it the relay warns and keeps retrying, as before.
 
 ## [0.5.0] - 2026-10-17
 
