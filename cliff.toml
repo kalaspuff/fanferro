@@ -12,10 +12,12 @@ body = """
 {% for group, commits in commits | group_by(attribute="group") %}
 ### {{ group | striptags | trim | upper_first }}
 {% for commit in commits %}
+{# Squash merges end the subject with "(#N)" already; add the number only to commits without it. #}\
 - {% if commit.scope %}**{{ commit.scope }}:** {% endif %}\
 {% if commit.breaking %}[**breaking**] {% endif %}\
 {{ commit.message | upper_first }}\
-{% if commit.remote.pr_number %} (#{{ commit.remote.pr_number }}){% endif %}\
+{% if commit.remote.pr_number %}{% set pr = "(#" ~ commit.remote.pr_number ~ ")" %}\
+{% if commit.message is not ending_with(pr) %} {{ pr }}{% endif %}{% endif %}\
 {% endfor %}
 {% endfor %}
 """
