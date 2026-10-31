@@ -17,7 +17,10 @@ accept both formats regardless of this setting.
 
 Lifecycle: payload objects are not deleted by default (with SNS fan-out several subscribers read
 the same object). Configure an S3 lifecycle rule on the prefix, or pass
-``delete_offloaded_payloads=True`` to consumers of point-to-point queues.
+``delete_offloaded_payloads=True`` to consumers of point-to-point queues. Such a consumer acks a
+message whose object no longer exists as an already processed duplicate (``message.duplicate``),
+because the ack of another copy deleted it: a message whose object expired or was deleted for any
+other reason is dropped the same way rather than dead-lettered.
 """
 
 from __future__ import annotations

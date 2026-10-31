@@ -63,3 +63,23 @@ point-to-point queues. The key is derived from the message id and the body, so p
 of the same bytes overwrite the same object instead of creating new ones, while a message published
 again with the same id but another body (CloudEvents stamp a new time) gets its own object rather
 than replacing the one an earlier copy points to.
+
+With `delete_offloaded_payloads=True`, every copy of a message (a duplicate delivery of a standard
+queue, a publish retry of the same bytes) points to the same object, which the ack of the first
+copy deletes. A consumer with this option therefore treats a payload object that no longer exists
+(S3 answers `NoSuchKey`) as the sign of a message that was already processed: it acks the message
+without running a handler and emits `message.duplicate` (with `reason="payload_deleted"`), as
+`IdempotencyMiddleware` does for a completed message.
+
+Take into account before enabling it:
+
+* A message whose object is missing for any other reason is dropped the same way, not
+  dead-lettered: an S3 lifecycle rule that expired the object before the message was consumed, a
+  manual or scripted delete, a consumer of another queue (SNS fan-out) that deleted the shared
+  object. Keep a lifecycle rule's expiry well above the longest time a message can wait in the
+  queue (its retention period, and the time it spends in redrive from a dead-letter queue), and
+  enable the option only on point-to-point queues. Watch `message.duplicate` events with
+  `reason="payload_deleted"` if such losses must be noticed.
+* A missing bucket (`NoSuchBucket`), denied access and other errors are not affected: they are
+  decode failures as before (`on_decode_error`, or retried when transient).
+* Without the option, a missing object stays a decode failure and the message is dead-lettered.

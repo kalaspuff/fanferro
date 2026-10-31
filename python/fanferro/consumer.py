@@ -31,7 +31,7 @@ from fanferro._utils import optional_seconds
 from fanferro.actions import Discard, HandlerAction, Reject, Requeue, Retry
 from fanferro.codecs import is_json_content_type, media_type
 from fanferro.envelopes import CloudEvents, CloudEventsProtobuf, Envelope, Raw, default_envelopes, unwrap_first
-from fanferro.errors import ConsumerStateError, HandlerTimeoutError, error_details
+from fanferro.errors import ConsumerStateError, HandlerTimeoutError, ResourceNotFoundError, error_details
 from fanferro.events import EventKind
 from fanferro.messages import Message, Outcome
 from fanferro.middleware import ConsumeMiddleware, chain_consume
@@ -1050,8 +1050,10 @@ class Consumer:
         try:
             message = self._build_message(delivery)
         except Exception as error:  # noqa: BLE001 - deliberate catch-all; the error is reported, never swallowed silently
-            self._stats.decode_failures += 1
             slot.release()
+            if self.delete_offloaded_payloads and _is_missing_payload(error):
+                return await self._payload_gone(delivery)
+            self._stats.decode_failures += 1
             return await self._undecodable(delivery, error)
         message._slot = slot
         telemetry = self._client._telemetry
@@ -1283,6 +1285,30 @@ class Consumer:
             receive_count=delivery.receive_count,
             retryable=retryable,
         )
+        message = self._undecoded_message(delivery)
+        if retryable and not self.retry_policy.exhausted(message.attempt):
+            await self._apply_action(message, "retry", "transient decode failure", error)
+        else:
+            await self._apply_action(message, self.dead_letter_policy.on_decode_error, "decode failed", error)
+        return None if message._settlement_failed else message.outcome
+
+    async def _payload_gone(self, delivery: Delivery) -> Outcome | None:
+        # The offloaded payload no longer exists: with delete_offloaded_payloads, the ack of
+        # another copy of this message (a duplicate delivery or a publisher retry) deleted it, so
+        # this copy is skipped as already processed. A payload that expired for another reason (a
+        # lifecycle rule) is acked this way too: that is the documented cost of the option.
+        message = self._undecoded_message(delivery)
+        self._stats.duplicates += 1
+        self._emit(
+            EventKind.MESSAGE_DUPLICATE,
+            "duplicate message skipped: its offloaded payload was already deleted",
+            message=message,
+            reason="payload_deleted",
+        )
+        await self._settle_safely(message, "ack", None)
+        return None if message._settlement_failed else message.outcome
+
+    def _undecoded_message(self, delivery: Delivery) -> Message[Any]:
         message = Message(
             payload=_raw_payload(delivery),
             attributes=delivery.raw_attributes,
@@ -1292,11 +1318,7 @@ class Consumer:
             settler=self._settler,
         )
         message._handed_back = self._handed_back.get(delivery.sqs_message_id, 0)
-        if retryable and not self.retry_policy.exhausted(message.attempt):
-            await self._apply_action(message, "retry", "transient decode failure", error)
-        else:
-            await self._apply_action(message, self.dead_letter_policy.on_decode_error, "decode failed", error)
-        return None if message._settlement_failed else message.outcome
+        return message
 
     async def _after_ack(self, message: Message[Any]) -> None:
         if not self.delete_offloaded_payloads:
@@ -1325,6 +1347,11 @@ class Consumer:
 def _is_json(content_type: str) -> bool:
     """:func:`is_json_content_type`, memoized for the few content types a consumer sees."""
     return is_json_content_type(content_type)
+
+
+def _is_missing_payload(error: BaseException) -> bool:
+    """Whether a delivery could not be decoded because S3 no longer has its offloaded payload."""
+    return isinstance(error, ResourceNotFoundError) and getattr(error, "code", None) == "NoSuchKey"
 
 
 def _raw_payload(delivery: Delivery) -> Any:
