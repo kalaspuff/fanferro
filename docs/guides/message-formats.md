@@ -17,7 +17,10 @@ your application.
 
 Decoding is driven by the handler's annotation: `Message[Order]` decodes into `Order` with the
 first codec that supports that type and the message's content type. Protobuf classes accept both
-binary and protobuf-JSON payloads.
+binary and protobuf-JSON payloads. Containers and unions decode with the codec of the types they
+hold, whatever else the application imported: `list[Item]` or `Item | None` with the dataclass
+codec, `list[Point]` with msgspec, `list[Model]` with pydantic; plain JSON shapes (`list[int]`,
+`dict[str, Any]`) with pydantic when it is imported (validated), otherwise as JSON data.
 
 Custom codec:
 
