@@ -547,8 +547,8 @@ class Consumer:
         starting = self._starting = asyncio.get_running_loop().create_future()
         # Registered right away: closing the client meanwhile stops the consumer once it started.
         self._client._register_consumer(self)
-        self._emit(EventKind.CONSUMER_STARTING, f"consumer {self.name} starting")
         try:
+            self._emit(EventKind.CONSUMER_STARTING, f"consumer {self.name} starting")
             await self._start()
         except BaseException:
             self._state = "stopped"
