@@ -272,3 +272,33 @@ async def test_queues_share_a_dead_letter_queue(client_factory: ClientFactory, n
             await asyncio.gather(*(consumer.stop() for consumer in consumers))
         messages = await drain_queue(client, first.dead_letter_queue)
     assert sorted(message.json()["order_id"] for message in messages) == [1, 2]
+
+
+async def test_resources_create_their_own_payload_buckets(client_factory: ClientFactory, name: Any) -> None:
+    # Only the client's LargePayloads created its bucket: a queue's own one with create_bucket=True
+    # failed its first send with NoSuchBucket.
+    client = client_factory()
+    topic = client.topic(name("big"), large_payloads=fanferro.LargePayloads(name("topic-payloads"), create_bucket=True))
+    shared = fanferro.LargePayloads(name("queue-payloads"), always=True, create_bucket=True)
+    queue = client.queue(name("big-worker"), large_payloads=shared)
+    other = client.queue(name("big-other"), large_payloads=shared)
+    client.subscription(topic, queue)
+    async with client:
+        sent = await queue.send({"n": 1})
+        assert sent.offloaded is not None
+        assert sent.offloaded.bucket == shared.bucket
+        assert (await other.send({"n": 2})).offloaded is not None
+        assert (await topic.publish({"blob": "x" * 300_000})).offloaded is not None
+        bodies = [message.json() for message in await drain_queue(client, queue)]
+    assert sorted(bodies, key=lambda body: "blob" in body) == [{"n": 1}, {"blob": "x" * 300_000}]
+
+
+async def test_provisioning_a_queue_creates_its_payload_bucket(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory(auto_provision=False)
+    queue = client.queue(
+        name("jobs"), large_payloads=fanferro.LargePayloads(name("jobs-payloads"), always=True, create_bucket=True)
+    )
+    async with client:
+        await client.provision(queue)
+        assert (await queue.send({"n": 1})).offloaded is not None
+        assert [message.json() for message in await drain_queue(client, queue)] == [{"n": 1}]

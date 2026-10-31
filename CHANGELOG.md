@@ -77,6 +77,7 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   settled, so that it can still be settled (#125)
 - Declaring a topic or queue again with an equal envelope or codec (`CloudEvents()`, `JsonCodec()`)
   returns it instead of raising `ConfigurationError` (#126)
+- **provisioning:** `create_bucket` of a topic's or queue's own `LargePayloads` creates its bucket (#127)
 
 ## [0.5.0] - 2026-10-17
 
