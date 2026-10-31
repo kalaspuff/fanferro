@@ -27,6 +27,31 @@ impl AwsObjectStore {
     }
 }
 
+impl AwsObjectStore {
+    /// Whether a bucket whose `HeadBucket` S3 answered with 403 exists. The answer to a `HEAD` has
+    /// no body, so it is the same for a bucket of another account and for credentials S3 does not
+    /// know (docs/parity P1); the error of a `GET` names its reason.
+    async fn denied_bucket_exists(&self, bucket: &str) -> Result<bool> {
+        let Err(err) = self.client.get_bucket_location().bucket(bucket).send().await else { return Ok(true) };
+        let error = map_sdk_error("s3", "GetBucketLocation", err);
+        let code = error.aws().and_then(|aws| aws.code.as_deref());
+        if matches!(
+            code,
+            Some(
+                "InvalidAccessKeyId"
+                    | "SignatureDoesNotMatch"
+                    | "ExpiredToken"
+                    | "InvalidToken"
+                    | "TokenRefreshRequired"
+            )
+        ) {
+            return Err(error);
+        }
+        // Access denied (another account's bucket, or no s3:GetBucketLocation): it exists.
+        Ok(!error.is_not_found())
+    }
+}
+
 #[async_trait]
 impl ObjectStoreApi for AwsObjectStore {
     async fn put_object(&self, bucket: &str, key: &str, data: Bytes, options: &PutOptions) -> Result<()> {
@@ -127,9 +152,9 @@ impl ObjectStoreApi for AwsObjectStore {
                 match error.aws().map(|aws| (aws.kind, aws.status)) {
                     Some((AwsErrorKind::NotFound, _)) => Ok(false),
                     // S3 answered 403: the bucket exists but belongs to someone else / we lack
-                    // ListBucket. Credentials that could not be loaded are access denied without an
-                    // answer: nothing was checked.
-                    Some((AwsErrorKind::AccessDenied, Some(_))) => Ok(true),
+                    // ListBucket, or S3 does not know the credentials. Credentials that could not
+                    // be loaded are access denied without an answer: nothing was checked.
+                    Some((AwsErrorKind::AccessDenied, Some(_))) => self.denied_bucket_exists(bucket).await,
                     _ => Err(error),
                 }
             }

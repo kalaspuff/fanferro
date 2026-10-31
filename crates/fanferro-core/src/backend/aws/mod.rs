@@ -473,6 +473,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_bucket_hidden_behind_403_is_found_only_with_known_credentials() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // HeadBucket answers 403 without a body both for a bucket of another account and for
+        // credentials S3 does not know: provisioning reported the bucket as found with the latter
+        // (docs/parity P1). The answer to GetBucketLocation tells them apart.
+        async fn s3(location_status: &str, location_code: &str) -> Result<bool> {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let answer = if location_code.is_empty() {
+                format!("HTTP/1.1 {location_status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            } else {
+                let body = format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>{location_code}</Code><Message>m</Message><RequestId>r</RequestId></Error>"
+                );
+                format!(
+                    "HTTP/1.1 {location_status}\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+            };
+            let server = tokio::spawn(async move {
+                for _ in 0..2 {
+                    let (mut connection, _) = listener.accept().await.unwrap();
+                    let mut request = [0u8; 4096];
+                    let read = connection.read(&mut request).await.unwrap();
+                    let response = if request[..read].starts_with(b"HEAD ") {
+                        "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+                    } else {
+                        answer.clone()
+                    };
+                    connection.write_all(response.as_bytes()).await.unwrap();
+                }
+            });
+            let config = AwsConfig {
+                region: Some("us-east-1".into()),
+                endpoint_url: Some(format!("http://{address}")),
+                credentials: Some(StaticCredentials {
+                    access_key_id: "test".into(),
+                    secret_access_key: "test".into(),
+                    session_token: None,
+                }),
+                retry: RetrySettings { max_attempts: 1, ..RetrySettings::default() },
+                ..AwsConfig::default()
+            };
+            let backend = connect(&config).await.unwrap();
+            let exists = backend.objects.bucket_exists("payloads").await;
+            server.abort();
+            exists
+        }
+        let error = s3("403 Forbidden", "InvalidAccessKeyId").await.unwrap_err();
+        assert_eq!(error.aws().map(|aws| aws.kind), Some(AwsErrorKind::AccessDenied), "{error:?}");
+        assert_eq!(error.aws().and_then(|aws| aws.code.as_deref()), Some("InvalidAccessKeyId"));
+        assert!(s3("403 Forbidden", "SignatureDoesNotMatch").await.is_err());
+        // Another account's bucket, or no permission to ask: it exists.
+        assert!(s3("403 Forbidden", "AccessDenied").await.unwrap());
+        assert!(s3("200 OK", "").await.unwrap());
+    }
+
+    #[tokio::test]
     async fn payload_urls_are_not_redirected() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
