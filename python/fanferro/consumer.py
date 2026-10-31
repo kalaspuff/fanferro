@@ -1116,6 +1116,8 @@ class Consumer:
             try:
                 await self._handle(message, slot)
             except asyncio.CancelledError:
+                if message._settlements is not None:
+                    self._abandon_settlements(message)
                 if not message.settled and self.shutdown_policy.release_unfinished:
                     with contextlib.suppress(Exception):
                         message.outcome = "released"
@@ -1130,6 +1132,8 @@ class Consumer:
                 # The traceback refers to this frame: no cycle that holds the delivery until the
                 # garbage collector runs.
                 error = None
+            if message._settlements is not None:
+                await self._confirm_settlements(message)
         # None when a settlement failed: the message comes back, so a FIFO group must wait for it.
         return None if message._settlement_failed else message.outcome
 
@@ -1194,7 +1198,8 @@ class Consumer:
                     or (self._sequenced and self.strict_ordering and message.group_id is not None)
                 ):
                     # Awaited: a sequenced group's next message starts once the delete is confirmed.
-                    await message.ack()
+                    message._begin("acked")
+                    await self._settler.ack(message)
                 else:
                     # The engine deletes the message in the background (batched, tracked until the
                     # consumer closes, failures reported as `message.ack_failed` events): no
@@ -1218,6 +1223,60 @@ class Consumer:
                 duration=round(monotonic() - handler_started, 6),
                 outcome=message.outcome,
             )
+
+    async def _confirm_settlements(self, message: Message[Any]) -> None:
+        """Completes the settlements the handler started (``message.ack()``...) but did not await.
+
+        Each one is waited for (a sequenced group's next message waits for its confirmation), a
+        failure is reported like a failed automatic ack (``message.ack_failed``), and a
+        ``config.warning`` names the call.
+        """
+        settlements = message._settlements
+        assert settlements is not None
+        message._settlements = None
+        for settlement in settlements:
+            task = settlement._task
+            assert task is not None
+            if settlement._awaited:
+                if not task.done():
+                    # The handler was cancelled while it waited (handler_timeout): still complete it.
+                    with contextlib.suppress(Exception):
+                        await asyncio.shield(task)
+                continue
+            self._emit(
+                EventKind.CONFIG_WARNING,
+                f"message.{settlement.operation}() was not awaited; the consumer completed it after the handler "
+                "returned (await it in the handler)",
+                message=message,
+                operation=settlement.operation,
+            )
+            try:
+                await asyncio.shield(task)
+            except FanferroError as settle_error:  # LeaseError, ShutdownError and AWS errors
+                self._emit(
+                    EventKind.MESSAGE_ACK_FAILED,
+                    f"could not settle message ({settlement.operation}); it will be redelivered",
+                    message=message,
+                    exception=settle_error,
+                )
+            except Exception as settle_error:  # noqa: BLE001 - deliberate catch-all; the error is reported, never swallowed silently
+                self._emit(
+                    EventKind.CONSUMER_ERROR,
+                    f"failed to settle message ({settlement.operation}); "
+                    "it will be redelivered after its visibility timeout",
+                    message=message,
+                    exception=settle_error,
+                )
+
+    def _abandon_settlements(self, message: Message[Any]) -> None:
+        """Lets the settlements of a cancelled handler complete on their own, errors retrieved."""
+        settlements = message._settlements
+        assert settlements is not None
+        message._settlements = None
+        for settlement in settlements:
+            task = settlement._task
+            assert task is not None
+            task.add_done_callback(_retrieve_error)
 
     async def _failed(self, message: Message[Any], error: BaseException) -> None:
         if message.settled and not isinstance(error, HandlerAction):
@@ -1452,6 +1511,11 @@ class Consumer:
 
     def __repr__(self) -> str:
         return f"Consumer({self.name!r}, queue={self.queue.name!r}, state={self._state!r})"
+
+
+def _retrieve_error(task: asyncio.Task[None]) -> None:
+    if not task.cancelled():
+        task.exception()
 
 
 @functools.lru_cache(maxsize=256)
