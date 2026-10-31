@@ -80,6 +80,91 @@ fn invalid(service: &'static str, operation: &'static str, message: impl Into<St
     aws_error(service, operation, AwsErrorKind::InvalidRequest, "InvalidParameterValue", message)
 }
 
+/// Queue attributes holding whole seconds or bytes, with the values SQS accepts.
+const QUEUE_RANGES: [(&str, u64, u64); 6] = [
+    ("DelaySeconds", 0, 900),
+    ("KmsDataKeyReusePeriodSeconds", 60, 86_400),
+    ("MaximumMessageSize", 1024, 1_048_576),
+    ("MessageRetentionPeriod", 60, 1_209_600),
+    ("ReceiveMessageWaitTimeSeconds", 0, 20),
+    ("VisibilityTimeout", 0, 43_200),
+];
+
+fn unknown_queue_attribute(operation: &'static str, name: &str) -> Error {
+    aws_error(
+        "sqs",
+        operation,
+        AwsErrorKind::InvalidRequest,
+        "InvalidAttributeName",
+        format!("Unknown Attribute {name}."),
+    )
+}
+
+fn invalid_queue_attribute(operation: &'static str, name: &str) -> Error {
+    aws_error(
+        "sqs",
+        operation,
+        AwsErrorKind::InvalidRequest,
+        "InvalidAttributeValue",
+        format!("Invalid value for the parameter {name}."),
+    )
+}
+
+/// Validates attributes of `CreateQueue` (`existing` is `None`) or `SetQueueAttributes` like SQS:
+/// names it does not know, FIFO attributes of a standard queue and `FifoQueue` on an existing queue
+/// are unknown attributes; values must be in range. Redrive policies are validated separately.
+fn validate_queue_attributes(
+    operation: &'static str,
+    attributes: &StringMap,
+    fifo: bool,
+    existing: Option<&StringMap>,
+) -> Result<()> {
+    for (name, value) in attributes {
+        let value = value.as_str();
+        let valid = if let Some((_, min, max)) = QUEUE_RANGES.iter().find(|(known, ..)| known == name) {
+            value.parse::<u64>().is_ok_and(|seconds| (*min..=*max).contains(&seconds))
+        } else {
+            match name.as_str() {
+                "FifoQueue" if existing.is_none() => matches!(value, "true" | "false"),
+                "ContentBasedDeduplication" if fifo => matches!(value, "true" | "false"),
+                "DeduplicationScope" if fifo => matches!(value, "queue" | "messageGroup"),
+                "FifoThroughputLimit" if fifo => matches!(value, "perQueue" | "perMessageGroupId"),
+                "SqsManagedSseEnabled" => matches!(value, "true" | "false"),
+                "Policy" | "RedrivePolicy" | "RedriveAllowPolicy" | "KmsMasterKeyId" => true,
+                _ => return Err(unknown_queue_attribute(operation, name)),
+            }
+        };
+        if !valid {
+            return Err(invalid_queue_attribute(operation, name));
+        }
+    }
+    let current = |name: &str| {
+        attributes.get(name).or_else(|| existing.and_then(|existing| existing.get(name))).map(String::as_str)
+    };
+    if fifo
+        && current("FifoThroughputLimit") == Some("perMessageGroupId")
+        && current("DeduplicationScope").unwrap_or("queue") != "messageGroup"
+    {
+        return Err(aws_error(
+            "sqs",
+            operation,
+            AwsErrorKind::InvalidRequest,
+            "InvalidAttributeValue",
+            "Invalid value for the parameter FifoThroughputLimit. Reason: To set FifoThroughputLimit to perMessageGroupId, the DeduplicationScope must be messageGroup.",
+        ));
+    }
+    Ok(())
+}
+
+/// A queue encrypted with a KMS key is not encrypted with SQS managed keys (SQS reports
+/// `SqsManagedSseEnabled=false`), unless the request sets that attribute itself.
+fn sse_follows_kms(attributes: &mut StringMap, requested: &StringMap) {
+    let kms = attributes.get("KmsMasterKeyId").is_some_and(|key| !key.is_empty());
+    if kms && !requested.contains_key("SqsManagedSseEnabled") {
+        attributes.insert("SqsManagedSseEnabled".into(), "false".into());
+    }
+}
+
 #[derive(Debug)]
 struct Queue {
     name: String,
@@ -339,7 +424,8 @@ impl RedrivePolicy {
             match state.queues.values().find(|queue| queue.arn == policy.target_arn) {
                 None => Err("Dead letter target does not exist.".to_string()),
                 Some(target) if target.fifo != fifo => {
-                    Err("Dead-letter queue must be same type of queue as the source.".to_string())
+                    // SQS's text, with its two full stops.
+                    Err("Dead-letter queue must be same type of queue as the source..".to_string())
                 }
                 Some(_) => Ok(()),
             }
@@ -756,29 +842,39 @@ impl SqsApi for MemorySqs {
     }
 
     async fn create_queue(&self, name: &str, attributes: &StringMap, tags: &StringMap) -> Result<String> {
-        let valid_name = !name.is_empty()
-            && name.len() <= 80
-            && name.trim_end_matches(".fifo").chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-        if !valid_name {
-            return Err(invalid("sqs", "CreateQueue", format!("Invalid queue name {name:?}")));
-        }
         let fifo_attribute = attributes.get("FifoQueue").map(String::as_str) == Some("true");
-        if fifo_attribute != name.ends_with(".fifo") {
-            return Err(invalid("sqs", "CreateQueue", "FIFO queue names must end with .fifo and set FifoQueue=true"));
+        // Only a queue created with FifoQueue=true may (and must) end with .fifo.
+        let base = if fifo_attribute { name.strip_suffix(".fifo") } else { Some(name) };
+        let valid_name = base.is_some_and(|base| {
+            !base.is_empty()
+                && name.len() <= 80
+                && base.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        });
+        if !valid_name {
+            return Err(invalid(
+                "sqs",
+                "CreateQueue",
+                if fifo_attribute {
+                    "The name of a FIFO queue can only include alphanumeric characters, hyphens, or underscores, must end with .fifo suffix and be 1 to 80 in length."
+                } else {
+                    "Can only include alphanumeric characters, hyphens, or underscores. 1 to 80 in length"
+                },
+            ));
         }
+        validate_queue_attributes("CreateQueue", attributes, fifo_attribute, None)?;
         let mut state = self.0.state.lock();
         if let Some(policy) = attributes.get("RedrivePolicy") {
             RedrivePolicy::validate(&state, "CreateQueue", policy, fifo_attribute)?;
         }
         if let Some(existing) = state.queues.values().find(|queue| queue.name == name) {
-            let conflicting = attributes.iter().any(|(key, value)| existing.attributes.get(key) != Some(value));
-            if conflicting {
+            if let Some((key, _)) = attributes.iter().find(|(key, value)| existing.attributes.get(*key) != Some(value))
+            {
                 return Err(aws_error(
                     "sqs",
                     "CreateQueue",
                     AwsErrorKind::InvalidRequest,
                     "QueueAlreadyExists",
-                    "A queue already exists with the same name and a different value for attribute(s)",
+                    format!("A queue already exists with the same name and a different value for attribute {key}"),
                 ));
             }
             return Ok(existing.url.clone());
@@ -803,6 +899,7 @@ impl SqsApi for MemorySqs {
             all.insert("FifoThroughputLimit".into(), "perQueue".into());
         }
         all.extend(attributes.clone());
+        sse_follows_kms(&mut all, attributes);
         state.queues.insert(
             url.clone(),
             Queue {
@@ -821,11 +918,10 @@ impl SqsApi for MemorySqs {
     }
 
     async fn set_queue_attributes(&self, queue_url: &str, attributes: &StringMap) -> Result<()> {
-        if attributes.contains_key("FifoQueue") {
-            return Err(invalid("sqs", "SetQueueAttributes", "FifoQueue cannot be changed"));
-        }
         let mut state = self.0.state.lock();
-        let fifo = state.queues.get(queue_url).ok_or_else(|| queue_not_found("SetQueueAttributes"))?.fifo;
+        let queue = state.queues.get(queue_url).ok_or_else(|| queue_not_found("SetQueueAttributes"))?;
+        let fifo = queue.fifo;
+        validate_queue_attributes("SetQueueAttributes", attributes, fifo, Some(&queue.attributes))?;
         if let Some(policy) = attributes.get("RedrivePolicy")
             && !policy.is_empty()
         {
@@ -839,6 +935,7 @@ impl SqsApi for MemorySqs {
                 queue.attributes.insert(key.clone(), value.clone());
             }
         }
+        sse_follows_kms(&mut queue.attributes, attributes);
         queue.attributes.insert("LastModifiedTimestamp".into(), OffsetDateTime::now_utc().unix_timestamp().to_string());
         queue.notify.notify_waiters();
         Ok(())

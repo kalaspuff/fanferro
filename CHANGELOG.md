@@ -8,6 +8,14 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 
 ## [Unreleased]
 
+### Bug fixes
+
+- **memory:** The in-memory broker refuses queue attributes and names that SQS refuses, with SQS's
+  error codes and texts: out-of-range values, unknown attribute names, FIFO attributes of standard
+  queues, `FifoQueue` on an existing queue, a per-message-group throughput limit without the
+  message group deduplication scope; queues encrypted with a KMS key report
+  `SqsManagedSseEnabled=false` (#146)
+
 ## [0.6.0] - 2026-10-31
 
 ### Behaviour changes
