@@ -32,6 +32,11 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 - FIFO group ids, deduplication ids and message ids used as deduplication ids must be 1-128 ASCII
   letters, digits and punctuation, as SQS and SNS require: others raise `ValidationError` before
   sending instead of failing at AWS (and passing on the in-memory broker) (#151)
+- **memory:** SNS topics and subscriptions of the in-memory broker are validated and reported like
+  SNS's: the code `InvalidParameter` with SNS's texts (also for the filter policies SNS refuses), FIFO
+  attributes and invalid `SignatureVersion` values of standard topics refused, topic ARNs of other
+  regions refused, and the default `Policy`, `EffectiveDeliveryPolicy`, `SubscriptionPrincipal` and
+  `FilterPolicyScope` reported (#152)
 
 ## [0.6.0] - 2026-10-31
 
