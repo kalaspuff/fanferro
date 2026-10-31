@@ -16,7 +16,7 @@ and hidden from `message.attributes` (they remain in `message.raw_attributes`).
 | `fanferro.attempt` | consumer | Attempt counter carried across re-enqueues (`RetryPolicy(strategy='requeue')`). |
 | `fanferro.dead-letter` | consumer | JSON describing why fanferro dead-lettered the message (reason, source, receive count, error, time). |
 | `ExtendedPayloadSize` | transport | AWS Extended Client Library pointer marker (read always, written with `format='aws_extended'`). |
-| `SQSLargePayloadSize` | transport | Legacy AWS Extended Client Library pointer marker (read only). |
+| `SQSLargePayloadSize` | transport | Legacy AWS Extended Client Library pointer marker, with a `MessageS3Pointer` body (read only). |
 | `traceparent` | telemetry | W3C trace context (message-attribute propagation). |
 | `tracestate` | telemetry | W3C trace state (message-attribute propagation, when non-empty). |
 | `baggage` | telemetry | W3C baggage (only when added to `Propagation.attribute_keys`). |

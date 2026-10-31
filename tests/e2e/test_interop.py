@@ -129,6 +129,29 @@ async def test_aws_extended_client_pointers(ministack_endpoint: str, aws: dict[s
     assert json.loads(stored) == big, "the stored object is the message body"
 
 
+async def test_legacy_aws_extended_client_pointers(ministack_endpoint: str, aws: dict[str, Any], name: Any) -> None:
+    # The legacy marker was read, but its pointer class refused: such messages were dead-lettered.
+    bucket = name("legacy-extended")
+    aws["s3"].create_bucket(Bucket=bucket)
+    client = emulator_client(ministack_endpoint)
+    queue = client.queue(name("legacy-extended-queue"))
+    big = {"data": "z" * 5000}
+    async with client:
+        info = await queue.resolve()
+        aws["s3"].put_object(Bucket=bucket, Key="legacy-written", Body=json.dumps(big).encode())
+        aws["sqs"].send_message(
+            QueueUrl=info.url,
+            MessageBody=json.dumps(
+                ["com.amazon.sqs.javamessaging.MessageS3Pointer", {"s3BucketName": bucket, "s3Key": "legacy-written"}]
+            ),
+            MessageAttributes={"SQSLargePayloadSize": {"DataType": "Number", "StringValue": str(len(json.dumps(big)))}},
+        )
+        received = await drain_queue(client, queue)
+        assert [(message.json(), message.attributes) for message in received] == [(big, {})]
+        with pytest.raises(fanferro.ValidationError, match="reserved for the transport layer"):
+            await queue.send({"n": 1}, attributes={"SQSLargePayloadSize": 5})
+
+
 async def test_presigned_url_pointers_are_allow_listed(ministack_endpoint: str, aws: dict[str, Any], name: Any) -> None:
     client = emulator_client(ministack_endpoint)
     queue = client.queue(name("ssrf"), dead_letter=fanferro.DeadLetterQueue(f"{name('ssrf')}-dlq"))

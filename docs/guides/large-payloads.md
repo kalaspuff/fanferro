@@ -48,7 +48,9 @@ cannot lead a consumer to a host outside the list.
 
 `format="aws_extended"` writes pointers in the format of the AWS SQS/SNS Extended Client
 Libraries (`ExtendedPayloadSize` attribute, `PayloadS3Pointer` body), so Java/Python services
-using them can read fanferro messages. fanferro reads both formats regardless.
+using them can read fanferro messages. fanferro reads both formats regardless, and the legacy
+pointers of those libraries too (`SQSLargePayloadSize` attribute, `MessageS3Pointer` body: the Java
+library before 2.0, the Python ones with `use_legacy_attribute=True`).
 
 ## Cleanup
 
