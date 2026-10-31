@@ -33,6 +33,11 @@ pub struct ClientConfig {
     /// already protects messages in transit).
     #[serde(default)]
     pub verify_md5: bool,
+    /// Split batch publishes to topics so that the entries of each `PublishBatch` call have the
+    /// same trace header: SNS takes one `X-Amzn-Trace-Id` per call, so a call whose entries
+    /// differ sends none. Off by default: one call per ten entries, as for queues.
+    #[serde(default)]
+    pub split_batches_by_trace_header: bool,
     /// Maximum number of buffered events before new ones are dropped.
     #[serde(default = "default_event_capacity")]
     pub event_capacity: usize,
@@ -45,6 +50,7 @@ impl Default for ClientConfig {
             fetch: FetchSettings::default(),
             publish_retry: RetrySettings::default(),
             verify_md5: false,
+            split_batches_by_trace_header: false,
             event_capacity: default_event_capacity(),
         }
     }

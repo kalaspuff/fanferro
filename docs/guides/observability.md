@@ -71,10 +71,13 @@ fanferro.Telemetry(
 | `ENVELOPE` | CloudEvents distributed-tracing extension | free; CloudEvents envelopes only |
 | `AWS_TRACE_HEADER` | `AWSTraceHeader` system attribute (SQS), `X-Amzn-Trace-Id` (SNS) | free; X-Ray format; understood by AWS Lambda/X-Ray |
 
-SNS takes one `X-Amzn-Trace-Id` per `PublishBatch` call, not one per entry, so a batch publish to
-a topic makes one call per trace header among its entries: messages of one `publish_batch()` share
-the batch's span and need one call, prepared messages with their own trace contexts (an outbox
-relay) one call each. They are sent at once on standard topics, one after the other on FIFO topics.
+SNS takes one `X-Amzn-Trace-Id` per `PublishBatch` call, not one per entry. A call whose entries
+share a trace header sends it: messages of one `publish_batch()` share the batch's span, so they
+keep it. A call whose entries differ (prepared messages of an outbox relay, each with the trace
+context it was prepared in) sends none, and those messages carry their context in the `traceparent`
+attribute only. `Client(split_batches_by_trace_header=True)` sends such batches in one call per
+trace header instead (at once on standard topics, one after the other on FIFO topics): up to ten
+calls per ten messages, for consumers that rely on the X-Ray header alone.
 
 Context is injected from the current span (your web request's span if tracing is off for
 fanferro), so `Telemetry(tracing=False)` still propagates. `Telemetry.disabled()` turns everything off.

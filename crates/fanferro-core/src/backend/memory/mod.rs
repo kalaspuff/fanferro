@@ -1096,9 +1096,12 @@ impl SnsApi for MemorySns {
         if !state.topics.contains_key(topic_arn) {
             return Err(topic_not_found("PublishBatch"));
         }
+        // Like SNS: one trace header per call, kept only when every entry has the same one.
+        let trace_header = crate::backend::shared_trace_header(&entries).map(str::to_string);
         Ok(entries
             .into_iter()
             .map(|entry| {
+                let entry = PublishRequest { trace_header: trace_header.clone(), ..entry };
                 publish_locked(&self.0, &mut state, topic_arn, entry).map_err(|err| {
                     let aws = err.aws().cloned();
                     BatchEntryError {
