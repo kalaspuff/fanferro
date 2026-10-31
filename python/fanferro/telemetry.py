@@ -343,7 +343,13 @@ class TelemetryRuntime:
             attributes["messaging.batch.message_count"] = batch_size
         operation = "publish" if kind == "topic" else "send"
         with self._tracer.start_as_current_span(
-            f"{operation} {destination}", kind=trace.SpanKind.PRODUCER, attributes=attributes, record_exception=True
+            f"{operation} {destination}",
+            kind=trace.SpanKind.PRODUCER,
+            attributes=attributes,
+            # mark_error() records the exception on failure paths: the SDK must not add a
+            # second exception event (as consumer spans, _process_span already leaves it out).
+            record_exception=False,
+            set_status_on_exception=False,
         ) as span:
             yield span
 
