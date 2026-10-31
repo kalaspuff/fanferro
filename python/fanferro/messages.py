@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
-from fanferro._core import AttributeValue, Delivery, Payload, WireMessage, new_message_id
+from fanferro._core import AttributeValue, Delivery, Payload, WireMessage, is_sqs_safe_text, new_message_id
 from fanferro.codecs._base import loads_json
 from fanferro.errors import DecodeError
 
@@ -643,6 +643,10 @@ class PreparedMessage:
         """A JSON-compatible representation."""
         body = self.wire.body
         text = self.wire.body_text
+        if text is not None and not is_sqs_safe_text(text):
+            # Control characters such as NUL are valid UTF-8 but not text that every store keeps
+            # (PostgreSQL rejects the JSON escape of U+0000 in jsonb): such bodies go as base64.
+            text = None
         return {
             "version": 1,
             "destination": dict(self.destination),
