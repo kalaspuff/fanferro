@@ -459,10 +459,17 @@ class EventDispatcher:
                 extra={"fanferro": {"kind": event.kind.value, "fields": dict(event.fields), "error": event.error}},
             )
         except Exception as error:  # noqa: BLE001 - a filter, handler or formatter must never break an operation
-            self._logging_broken(logger, event, error)
+            self._logging_broken(logger, f"event {event.kind.value}", error)
 
-    def _logging_broken(self, logger: logging.Logger, event: Event, error: Exception) -> None:
-        """Reports, once, that the application's logging setup raised for an event."""
+    def _internal_log(self, level: int, message: str, *args: object, exc_info: BaseException | None = None) -> None:
+        """Logs a message of the dispatcher itself (never raising, like :meth:`_log`)."""
+        try:
+            _LOGGER.log(level, message, *args, exc_info=exc_info)
+        except Exception as error:  # noqa: BLE001 - a filter, handler or formatter must never break an operation
+            self._logging_broken(_LOGGER, "a message of fanferro.events", error)
+
+    def _logging_broken(self, logger: logging.Logger, what: str, error: Exception) -> None:
+        """Reports, once, that the application's logging setup raised."""
         if self._logging_failed:
             return
         self._logging_failed = True
@@ -472,8 +479,8 @@ class EventDispatcher:
             logging.WARNING,
             __file__,
             0,
-            "logging %s for event %s raised %s: %s (fanferro goes on; further failures are not reported)",
-            (logger.name, event.kind.value, type(error).__name__, error),
+            "logging %s for %s raised %s: %s (fanferro goes on; further failures are not reported)",
+            (logger.name, what, type(error).__name__, error),
             None,
         )
         with contextlib.suppress(Exception):
@@ -501,14 +508,15 @@ class EventDispatcher:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            _LOGGER.warning("async event hook %r skipped: no running event loop", hook)
+            self._internal_log(logging.WARNING, "async event hook %r skipped: no running event loop", hook)
             close = getattr(awaitable, "close", None)
             if callable(close):  # a coroutine: closing it spares the "never awaited" warning
                 close()
             return
         if len(self._tasks) >= self.max_pending_hooks:
             if not self._unreported_skips:
-                _LOGGER.warning(
+                self._internal_log(
+                    logging.WARNING,
                     "%d async event hook calls are running: hooks are skipped for further events until they finish",
                     len(self._tasks),
                 )
@@ -545,7 +553,9 @@ class EventDispatcher:
     def _hook_failed(self, hook: EventHook, event: Event, error: Exception) -> None:
         name = getattr(hook, "__qualname__", repr(hook))
         if event.kind is EventKind.HOOK_FAILED:
-            _LOGGER.error("event hook %s failed while handling a hook failure", name, exc_info=error)
+            self._internal_log(
+                logging.ERROR, "event hook %s failed while handling a hook failure", name, exc_info=error
+            )
             return
         self.dispatch(
             Event.create(
@@ -571,7 +581,8 @@ class EventDispatcher:
             await asyncio.wait(list(self._tasks), timeout=remaining)
         left = [task for task in self._tasks if not task.done()]
         if left:
-            _LOGGER.warning(
+            self._internal_log(
+                logging.WARNING,
                 "cancelled %d async event hooks still running after %.1f s",
                 len(left),
                 self.flush_timeout if timeout is None else timeout,

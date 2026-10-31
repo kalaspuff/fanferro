@@ -285,3 +285,39 @@ async def test_a_raising_logging_filter_never_breaks_an_operation(
             logging.getLogger(name).removeFilter(picky)
     assert seen == [{"n": 1}]
     assert capsys.readouterr().err.count("raised KeyError") == 1
+
+
+async def test_the_dispatchers_own_warnings_survive_a_raising_logging_filter(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # flush() and the hook cap log through fanferro.events: a raising filter there made flush()
+    # raise before it cancelled the hooks, and the cap's warning raise into emit().
+    class Picky(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            raise KeyError("request_id")
+
+    logger = logging.getLogger("fanferro.events")
+    picky = Picky()
+    logger.addFilter(picky)
+    try:
+        dispatcher = EventDispatcher(LoggingConfig(enabled=False))
+        dispatcher.max_pending_hooks = 1
+        dispatcher.flush_timeout = 0.1
+        cancelled: list[bool] = []
+
+        async def hang(event: Event) -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+
+        dispatcher.subscribe("message.*", hang)
+        dispatcher.emit(EventKind.MESSAGE_ACKED, "acked")
+        dispatcher.emit(EventKind.MESSAGE_ACKED, "acked")  # over the cap: warns
+        assert dispatcher.hooks_skipped == 1
+        await asyncio.wait_for(dispatcher.flush(), 3)
+    finally:
+        logger.removeFilter(picky)
+    assert cancelled == [True]
+    assert capsys.readouterr().err.count("raised KeyError") == 1
