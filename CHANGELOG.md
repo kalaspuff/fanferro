@@ -8,6 +8,8 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-31
+
 ### Features
 
 - **memory:** `MemoryBroker(orphaned_polls=True)` serves long polls that a stopping consumer
@@ -59,6 +61,7 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   writes the default topic policy as SNS does (#159)
 - `Number` attributes with more than 38 significant digits raise `ValidationError` before sending,
   as SQS refuses them; the in-memory broker refuses them with SQS's text (#160)
+- **release:** Generated changelog entries list their pull request once (#144)
 
 ### Documentation
 
