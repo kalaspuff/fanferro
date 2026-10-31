@@ -1099,9 +1099,10 @@ impl SqsApi for MemorySqs {
                 };
                 let Some(message) = queue.messages.get(sequence) else { return Err(invalid_receipt(&entry.receipt_handle)) };
                 // A standard queue changes the visibility of a message that is visible again too
-                // (hiding it); a FIFO queue expires the handle (docs/parity M6, still to model).
+                // (hiding it); a FIFO queue expires the handle once the message is visible
+                // (docs/parity M6).
                 if queue.fifo && !message.in_flight {
-                    return Err(receipt_error("MessageNotInflight", "The message referred to is not in flight."));
+                    return Err(expired_receipt());
                 }
                 // The visibility of a received message ends at most 12 hours after the receive.
                 if message.received_at.is_some_and(|at| now.duration_since(at) + timeout > MAX_VISIBILITY) {

@@ -125,6 +125,25 @@ fn entry(result: std::result::Result<(), BatchEntryError>) -> (String, String) {
 }
 
 #[tokio::test(start_paused = true)]
+async fn fifo_queues_expire_the_handle_of_a_released_message() {
+    // docs/parity M6: SQS answered a visibility change for a FIFO message that is visible again,
+    // with its latest handle, with "The receipt handle has expired"; the broker said
+    // MessageNotInflight.
+    let (broker, backend) = broker();
+    let url =
+        backend.sqs.create_queue("q.fifo", &attributes(&[("FifoQueue", "true")]), &StringMap::new()).await.unwrap();
+    let request = SendRequest { group_id: Some("g".into()), deduplication_id: Some("d".into()), ..send("a") };
+    backend.sqs.send_message(&url, request).await.unwrap();
+    let message = backend.sqs.receive_messages(receive(&url, 1, Some(30))).await.unwrap().remove(0);
+    change_visibility(&backend, &url, &message.receipt_handle, 0).await.unwrap();
+    assert_eq!(
+        entry(change_visibility(&backend, &url, &message.receipt_handle, 10).await),
+        ("ReceiptHandleIsInvalid".to_string(), "The receipt handle has expired".to_string())
+    );
+    assert!(!broker.queue_messages(&url).unwrap()[0].in_flight, "the message stays visible");
+}
+
+#[tokio::test(start_paused = true)]
 async fn fifo_queues_refuse_receipt_handles_of_earlier_receives() {
     // docs/parity M3: the broker refused them with other codes and texts.
     let (broker, backend) = broker();
