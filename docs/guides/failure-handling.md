@@ -6,6 +6,8 @@ When a handler raises:
 
 1. **Handler actions** decide explicitly: `fanferro.Retry(delay=...)`, `fanferro.Requeue(delay=...)`,
    `fanferro.Reject(reason)` (dead-letter now), `fanferro.Discard(reason)` (delete, no retries).
+   A delay is a non-negative number of seconds: `Retry(delay=-1)` and `message.retry(delay=-1)`
+   raise `ValueError` and leave the message unsettled.
 2. `RetryPolicy.classify(error)` (if set) may return `"retry"`, `"dead_letter"` or `"discard"`.
 3. `RetryPolicy.dead_letter_on` exceptions are dead-lettered immediately.
 4. Otherwise the message is retried, unless the attempt number reached `max_attempts`, in which

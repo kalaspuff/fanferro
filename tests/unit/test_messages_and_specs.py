@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import json
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
@@ -43,6 +44,27 @@ async def test_message_api_and_settlement() -> None:
         await message.ack()
     with pytest.raises(RuntimeError):
         await message.extend(10)
+
+
+@pytest.mark.parametrize("delay", [-1, float("nan"), "5"])
+async def test_invalid_retry_delays_settle_nothing(delay: Any) -> None:
+    # The delay was only checked by the native call, after the message had been marked settled.
+    settler = RecordingSettler()
+    message = build_message({"a": 1}, settler=settler)
+    error = TypeError if isinstance(delay, str) else ValueError
+    with pytest.raises(error, match="delay"):
+        await message.retry(delay=delay)
+    with pytest.raises(error, match="delay"):
+        await message.requeue(delay=delay)
+    with pytest.raises(error, match="delay"):
+        fanferro.Retry(delay=delay)
+    with pytest.raises(error, match="delay"):
+        fanferro.Requeue(delay=delay)
+    assert not message.settled
+    assert settler.calls == []
+    await message.retry(delay=2)
+    assert settler.calls == [("retry", {"delay": 2.0, "error": None})]
+    assert fanferro.Retry(delay=3).delay == fanferro.Requeue(delay=3).delay == 3.0
 
 
 def test_internal_attributes_are_hidden() -> None:
