@@ -454,3 +454,19 @@ async def test_a_dead_letter_queue_is_resolved_alone_when_its_queue_fails_first(
         await memory_client.provision()
     assert queue.dead_letter_queue is not None
     assert queue.dead_letter_queue.resolved
+
+
+async def test_a_missing_dead_letter_queue_is_looked_up_again_on_use(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory(provisioning=fanferro.Provisioning(on_missing="log"))
+    dlq_name = name("dlq")
+    queue = client.queue(name("work"), dead_letter=fanferro.DeadLetterQueue(dlq_name))
+    creator = client_factory()
+    await creator.queue(queue.name).resolve()
+    await queue.resolve()  # its dead-letter queue is missing: drift, logged
+    assert queue.dead_letter_queue is not None
+    assert queue.dead_letter_queue.last_report is not None
+    assert queue.dead_letter_queue.last_report.status == "missing"
+    await creator.queue(dlq_name).resolve()
+    assert queue.dead_letter_queue is not None
+    # Its queue's failed resolution put no back-off on it: it is found at once.
+    assert (await queue.dead_letter_queue.resolve()).name == dlq_name

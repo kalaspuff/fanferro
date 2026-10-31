@@ -661,16 +661,14 @@ class Queue(_Destination):
         self.last_report = report
         if report.dead_letter is not None and self._dead_letter_queue is not None:
             await self._dead_letter_queue._adopt(report.dead_letter)
+        # A failure leaves this queue's own retry back-off alone: the next use of it looks it up again.
         try:
             info = await self._client._settle_report(report, self.provisioning)
         except Exception as error:
-            self._note_failure(error)
             self._adopted = error
             raise
         if info is None:
-            unavailable = ResourceUnavailableError(f"{self.kind} {self.name!r} is not available")
-            self._note_failure(unavailable)
-            self._adopted = unavailable
+            self._adopted = ResourceUnavailableError(f"{self.kind} {self.name!r} is not available")
             return
         self._info = info
         self._failures = 0
