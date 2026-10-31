@@ -51,6 +51,9 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 - **payloads:** Provisioning a payload bucket with credentials S3 does not know fails with
   `AccessDeniedError` instead of reporting the bucket as found (S3 answers `HeadBucket` with 403 for
   both) (#154)
+- **memory:** A FIFO queue of the in-memory broker expires the receipt handle of a message that is
+  visible again ("The receipt handle has expired"), as SQS does, instead of answering
+  `MessageNotInflight` (#158)
 
 ## [0.6.0] - 2026-10-31
 
