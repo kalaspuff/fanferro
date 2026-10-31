@@ -71,13 +71,24 @@ fn aws_error(
 const SQS_COOLDOWN: Duration = Duration::from_secs(60);
 
 fn queue_not_found(operation: &'static str) -> Error {
-    aws_error(
-        "sqs",
-        operation,
-        AwsErrorKind::NotFound,
-        "AWS.SimpleQueueService.NonExistentQueue",
-        "The specified queue does not exist.",
+    // SQS answers with 400 (SNS and S3 with 404).
+    Error::from(
+        AwsError::new("sqs", operation, AwsErrorKind::NotFound, "The specified queue does not exist.")
+            .with_code("AWS.SimpleQueueService.NonExistentQueue")
+            .with_status(400),
     )
+}
+
+/// The entry error of a batch call: the service's code and text, without fanferro's formatting.
+fn entry_error(error: &Error) -> BatchEntryError {
+    match error.aws() {
+        Some(aws) => BatchEntryError {
+            code: aws.code.clone().unwrap_or_else(|| "InternalError".into()),
+            message: aws.message.clone(),
+            sender_fault: !aws.kind.is_retryable(),
+        },
+        None => BatchEntryError { code: "InternalError".into(), message: Some(error.to_string()), sender_fault: false },
+    }
 }
 
 fn invalid(service: &'static str, operation: &'static str, message: impl Into<String>) -> Error {
@@ -457,12 +468,16 @@ fn enqueue(state: &mut State, queue_url: &str, operation: &'static str, request:
         ));
     }
     if !is_sqs_safe_text(&request.body) {
+        let character = request.body.chars().find(|c| !is_sqs_safe_text(c.encode_utf8(&mut [0; 4]))).unwrap_or('\0');
         return Err(aws_error(
             "sqs",
             operation,
             AwsErrorKind::InvalidRequest,
             "InvalidMessageContents",
-            "Invalid characters found in the message body.",
+            format!(
+                "Invalid binary character '#x{:X}' was found in the message body, the set of allowed characters is #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF].",
+                u32::from(character)
+            ),
         ));
     }
     validate_attributes(&request.attributes).map_err(|err| invalid("sqs", operation, err.to_string()))?;
@@ -471,7 +486,10 @@ fn enqueue(state: &mut State, queue_url: &str, operation: &'static str, request:
         return Err(invalid(
             "sqs",
             operation,
-            format!("Message must be shorter than {} bytes.", queue.max_message_size()),
+            format!(
+                "One or more parameters are invalid. Reason: Message must be shorter than {} bytes.",
+                queue.max_message_size()
+            ),
         ));
     }
     let now = Instant::now();
@@ -805,7 +823,18 @@ impl SqsApi for MemorySqs {
         }
         Ok(entries
             .into_iter()
-            .map(|request| {
+            .enumerate()
+            .map(|(index, request)| {
+                if request.body.is_empty() {
+                    return Err(BatchEntryError {
+                        code: "EmptyValue".into(),
+                        message: Some(format!(
+                            "No Value Found for SendMessageBatchRequestEntry.{}.MessageBody.",
+                            index + 1
+                        )),
+                        sender_fault: true,
+                    });
+                }
                 enqueue(
                     &mut state,
                     queue_url,
@@ -822,14 +851,7 @@ impl SqsApi for MemorySqs {
                         sent: None,
                     },
                 )
-                .map_err(|err| {
-                    let aws = err.aws().cloned();
-                    BatchEntryError {
-                        code: aws.as_ref().and_then(|a| a.code.clone()).unwrap_or_else(|| "InternalError".into()),
-                        message: Some(err.to_string()),
-                        sender_fault: aws.is_some_and(|a| !a.kind.is_retryable()),
-                    }
-                })
+                .map_err(|err| entry_error(&err))
             })
             .collect())
     }
@@ -1368,14 +1390,7 @@ impl SnsApi for MemorySns {
             .into_iter()
             .map(|entry| {
                 let entry = PublishRequest { trace_header: trace_header.clone(), ..entry };
-                publish_locked(&self.0, &mut state, topic_arn, entry).map_err(|err| {
-                    let aws = err.aws().cloned();
-                    BatchEntryError {
-                        code: aws.as_ref().and_then(|a| a.code.clone()).unwrap_or_else(|| "InternalError".into()),
-                        message: Some(err.to_string()),
-                        sender_fault: aws.is_some_and(|a| !a.kind.is_retryable()),
-                    }
-                })
+                publish_locked(&self.0, &mut state, topic_arn, entry).map_err(|err| entry_error(&err))
             })
             .collect())
     }
@@ -1693,7 +1708,7 @@ impl HttpFetch for MemoryHttp {
         let key = decode_key(key).ok_or_else(|| Error::Http("malformed memory URL".into()))?;
         MemoryObjects(self.0.clone()).get_object(bucket, &key, max_bytes).await.map_err(|err| {
             if err.is_not_found() {
-                Error::Payload("payload URL is not accessible (HTTP 404); it may have expired".into())
+                Error::Payload("payload URL is not accessible (HTTP 404 Not Found); it may have expired".into())
             } else {
                 err
             }
