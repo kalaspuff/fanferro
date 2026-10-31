@@ -913,7 +913,11 @@ class Client:
     async def publish_prepared_batch(
         self, messages: Sequence[PreparedMessage], *, raise_on_failure: bool = False
     ) -> BatchPublishResult:
-        """Sends prepared messages, batching those with the same destination."""
+        """Sends prepared messages, batching those with the same destination.
+
+        Like ``publish_batch``, each destination's batch emits ``publish.succeeded`` (with the
+        count) and ``publish.failed`` per failed entry, and records the publish metrics.
+        """
         core = await self._core()
         results: list[PublishResult | BatchFailure | None] = [None] * len(messages)
         groups: dict[str, list[int]] = {}
@@ -922,18 +926,47 @@ class Client:
             groups.setdefault(key, []).append(index)
         for indexes in groups.values():
             first = messages[indexes[0]]
-            transport = await self._transport_for_destination(first)
-            try:
-                receipts = await core.publish_batch(
-                    first.destination, [messages[i].core_entry() for i in indexes], transport=transport
-                )
-            except Exception as error:  # noqa: BLE001 - deliberate catch-all; the error is reported, never swallowed silently
-                receipts = [error] * len(indexes)
+            name = first.destination_name
+            kind = first.destination.get("kind", "queue")
+            started = monotonic()
+            with self._telemetry.publish_span(name, kind, None, batch_size=len(indexes)) as span:
+                try:
+                    transport = await self._transport_for_destination(first)
+                    receipts = await core.publish_batch(
+                        first.destination, [messages[i].core_entry() for i in indexes], transport=transport
+                    )
+                except Exception as error:  # noqa: BLE001 - deliberate catch-all; the error is reported, never swallowed silently
+                    self._telemetry.mark_error(span, error)
+                    receipts = [error] * len(indexes)
+            duration = monotonic() - started
+            succeeded = 0
             for index, receipt in zip(indexes, receipts, strict=True):
                 if isinstance(receipt, BaseException):
                     results[index] = BatchFailure(index, messages[index], receipt)
+                    self._telemetry.record_publish(name, kind, duration, 1, receipt)
+                    self.events.emit(
+                        EventKind.PUBLISH_FAILED,
+                        f"failed to publish prepared batch entry {index} to {kind} {name}",
+                        exception=receipt,
+                        destination=name,
+                        kind=kind,
+                        index=index,
+                        message_id=messages[index].message_id,
+                    )
                 else:
-                    results[index] = PublishResult.from_core(receipt, messages[index].destination_name)
+                    results[index] = PublishResult.from_core(receipt, name)
+                    succeeded += 1
+            if succeeded:
+                self._telemetry.record_publish(name, kind, duration, succeeded, None)
+                if self.events.is_enabled(EventKind.PUBLISH_SUCCEEDED):
+                    self.events.emit(
+                        EventKind.PUBLISH_SUCCEEDED,
+                        f"published {succeeded} prepared messages to {kind} {name}",
+                        destination=name,
+                        kind=kind,
+                        count=succeeded,
+                        duration=round(duration, 6),
+                    )
         batch = BatchPublishResult(tuple(r for r in results if r is not None))
         self._drain_core_events()
         if raise_on_failure:

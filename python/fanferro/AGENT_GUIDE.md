@@ -226,8 +226,11 @@ asyncio.create_task(relay.run())  # separate worker
 ```
 
 `OutboxStore.claim_batch` must lock rows (`FOR UPDATE SKIP LOCKED`) and skip rows given up with
-`mark_abandoned` (records whose attempts failed for good `OutboxRelay(max_attempts=10)` times). See
-`docs/guides/patterns.md`.
+`mark_abandoned` (records whose attempts failed for good `OutboxRelay(max_attempts=10)` times). With
+several relays, claims must also be exclusive per FIFO message group (store
+`prepared.fifo_group` in a column), else groups arrive out of order; or run one relay. A round
+cancelled at shutdown still marks what it published and releases the other claims
+(`OutboxStore.release`, optional). See `docs/guides/patterns.md`.
 
 ## Observability
 
