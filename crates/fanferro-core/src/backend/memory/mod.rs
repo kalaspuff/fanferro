@@ -19,7 +19,7 @@
 pub mod filter_policy;
 mod store;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -194,6 +194,19 @@ struct Queue {
     notify: Arc<Notify>,
     /// When the queue was purged last (SQS allows one purge every 60 seconds).
     purged_at: Option<Instant>,
+    /// Long polls their clients aborted, which take messages until their wait time ends
+    /// ([`MemoryOptions::orphaned_polls`]), oldest first.
+    orphans: Vec<Orphan>,
+}
+
+/// A `ReceiveMessage` long poll whose client went away while it waited.
+#[derive(Clone, Debug)]
+struct Orphan {
+    /// When the client aborted the poll.
+    since: Instant,
+    until: Instant,
+    max_messages: u8,
+    visibility_timeout: Option<Duration>,
 }
 
 impl Queue {
@@ -272,6 +285,18 @@ struct Inner {
     state: Mutex<State>,
     region: String,
     account: String,
+    options: MemoryOptions,
+}
+
+/// Options of a [`MemoryBroker`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MemoryOptions {
+    /// Serve long polls whose client aborted them until their wait time ends, as SQS does: a
+    /// message that arrives meanwhile is received by nobody and stays invisible for its visibility
+    /// timeout (docs/parity M10, ADR 0007). Off by default, so that tests that stop a consumer and
+    /// go on at once do not wait for visibility timeouts; turn it on to test shutdowns and
+    /// deployments as they behave on SQS.
+    pub orphaned_polls: bool,
 }
 
 impl fmt::Debug for Inner {
@@ -309,13 +334,24 @@ pub struct MemoryBroker {
 impl MemoryBroker {
     /// Creates an empty broker for `region` and `account`.
     pub fn new(region: impl Into<String>, account: impl Into<String>) -> Self {
+        Self::with_options(region, account, MemoryOptions::default())
+    }
+
+    /// Creates an empty broker for `region` and `account` with `options`.
+    pub fn with_options(region: impl Into<String>, account: impl Into<String>, options: MemoryOptions) -> Self {
         Self {
             inner: Arc::new(Inner {
                 state: Mutex::new(State::default()),
                 region: region.into(),
                 account: account.into(),
+                options,
             }),
         }
+    }
+
+    /// The broker's options.
+    pub fn options(&self) -> MemoryOptions {
+        self.inner.options
     }
 
     /// A [`Backend`] whose services all use this broker.
@@ -324,6 +360,7 @@ impl MemoryBroker {
             kind: BackendKind::Memory,
             region: self.inner.region.clone(),
             endpoint_url: None,
+            orphaned_polls: self.inner.options.orphaned_polls,
             sqs: Arc::new(MemorySqs(self.inner.clone())),
             sns: Arc::new(MemorySns(self.inner.clone())),
             objects: Arc::new(MemoryObjects(self.inner.clone())),
@@ -335,8 +372,9 @@ impl MemoryBroker {
     /// Messages currently stored in a queue (visible, delayed and in flight), in order.
     pub fn queue_messages(&self, queue_url: &str) -> Result<Vec<MessageSnapshot>> {
         let mut state = self.inner.state.lock();
-        let queue = state.queues.get_mut(queue_url).ok_or_else(|| queue_not_found("Snapshot"))?;
         let now = Instant::now();
+        serve_orphans(&mut state, queue_url, now);
+        let queue = state.queues.get_mut(queue_url).ok_or_else(|| queue_not_found("Snapshot"))?;
         queue.messages.promote(now);
         Ok(queue
             .messages
@@ -597,12 +635,80 @@ fn enqueue(state: &mut State, queue_url: &str, operation: &'static str, request:
         now,
     );
     queue.notify.notify_waiters();
+    serve_orphans(state, queue_url, now);
     Ok(SendOutput {
         message_id,
         sequence_number,
         md5_of_body: Some(md5_body),
         md5_of_message_attributes: md5_attributes,
     })
+}
+
+/// Hands messages to the long polls of `queue_url` whose clients aborted them, oldest first: such
+/// a poll takes what it can, like any receive, and returns to nobody. The broker has no timer, so
+/// every operation that looks at the queue catches up first: a poll takes what it could receive at
+/// the first moment during its wait time that it could receive anything (as of that moment), or
+/// nothing.
+fn serve_orphans(state: &mut State, queue_url: &str, now: Instant) {
+    loop {
+        let Some(queue) = state.queues.get_mut(queue_url) else { return };
+        let Some(orphan) = queue.orphans.first().cloned() else { return };
+        // The poll's wait time ends at `until`: a message visible from then on is not for it.
+        let ended = orphan.until <= now;
+        let last = if ended { orphan.until.checked_sub(Duration::from_millis(1)).unwrap_or(orphan.until) } else { now };
+        // The moments messages became (or become) visible while the poll waited, earliest first: a
+        // message it cannot receive (its FIFO group is busy) must not keep it from later ones.
+        let moments: BTreeSet<Instant> = queue
+            .messages
+            .iter()
+            .map(|message| message.available_at.max(orphan.since))
+            .filter(|at| *at <= last)
+            .collect();
+        let request = ReceiveRequest {
+            queue_url: queue_url.to_string(),
+            max_messages: orphan.max_messages,
+            wait_time: Duration::ZERO,
+            visibility_timeout: orphan.visibility_timeout,
+            attempt_id: None,
+        };
+        let took =
+            moments.into_iter().any(|at| try_receive(state, &request, at).is_ok_and(|received| !received.is_empty()));
+        if !took && !ended {
+            return; // still waiting
+        }
+        if let Some(queue) = state.queues.get_mut(queue_url) {
+            queue.orphans.remove(0);
+        }
+    }
+}
+
+/// A `ReceiveMessage` call of the broker while it waits: when its future is dropped (the client
+/// aborted the call), the poll goes on as an [`Orphan`] if the broker serves them.
+struct PollInFlight {
+    inner: Arc<Inner>,
+    queue_url: String,
+    until: Instant,
+    max_messages: u8,
+    visibility_timeout: Option<Duration>,
+    answered: bool,
+}
+
+impl Drop for PollInFlight {
+    fn drop(&mut self) {
+        let now = Instant::now();
+        if self.answered || !self.inner.options.orphaned_polls || now >= self.until {
+            return;
+        }
+        let mut state = self.inner.state.lock();
+        let Some(queue) = state.queues.get_mut(&self.queue_url) else { return };
+        queue.orphans.push(Orphan {
+            since: now,
+            until: self.until,
+            max_messages: self.max_messages,
+            visibility_timeout: self.visibility_timeout,
+        });
+        serve_orphans(&mut state, &self.queue_url, now);
+    }
 }
 
 /// The attributes with their `Number` values as SQS stores them (see [`normalized_number`]).
@@ -718,6 +824,8 @@ fn try_receive(state: &mut State, request: &ReceiveRequest, now: Instant) -> Res
     let sequences: Vec<u64> = queue
         .messages
         .visible()
+        // An aborted poll catching up receives as of an earlier moment (see `serve_orphans`).
+        .filter(|(_, message)| message.available_at <= now)
         .filter(|(_, message)| {
             !(fifo && message.group_id.as_deref().is_some_and(|g| queue.messages.group_in_flight(g)))
         })
@@ -806,6 +914,40 @@ impl Receipt {
     }
 }
 
+impl MemorySqs {
+    /// Waits until messages can be received from the queue, or `deadline` (a long poll).
+    async fn wait_for_messages(&self, request: &ReceiveRequest, deadline: Instant) -> Result<Vec<ReceivedMessage>> {
+        loop {
+            let notify = {
+                let state = self.0.state.lock();
+                state.queues.get(&request.queue_url).ok_or_else(|| queue_not_found("ReceiveMessage"))?.notify.clone()
+            };
+            let notified = notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let now = Instant::now();
+            let next_change = {
+                let mut state = self.0.state.lock();
+                // Polls aborted earlier wait longer: they take the messages first.
+                serve_orphans(&mut state, &request.queue_url, now);
+                let messages = try_receive(&mut state, request, now)?;
+                if !messages.is_empty() {
+                    return Ok(messages);
+                }
+                state.queues.get(&request.queue_url).and_then(|queue| queue.messages.next_change())
+            };
+            if now >= deadline {
+                return Ok(Vec::new());
+            }
+            let wake_at = next_change.map_or(deadline, |at| at.min(deadline));
+            tokio::select! {
+                () = &mut notified => {}
+                () = tokio::time::sleep_until(wake_at) => {}
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl SqsApi for MemorySqs {
     async fn send_message(&self, queue_url: &str, request: SendRequest) -> Result<SendOutput> {
@@ -873,32 +1015,17 @@ impl SqsApi for MemorySqs {
 
     async fn receive_messages(&self, request: ReceiveRequest) -> Result<Vec<ReceivedMessage>> {
         let deadline = Instant::now() + request.wait_time.min(Duration::from_secs(20));
-        loop {
-            let notify = {
-                let state = self.0.state.lock();
-                state.queues.get(&request.queue_url).ok_or_else(|| queue_not_found("ReceiveMessage"))?.notify.clone()
-            };
-            let notified = notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            let now = Instant::now();
-            let next_change = {
-                let mut state = self.0.state.lock();
-                let messages = try_receive(&mut state, &request, now)?;
-                if !messages.is_empty() {
-                    return Ok(messages);
-                }
-                state.queues.get(&request.queue_url).and_then(|queue| queue.messages.next_change())
-            };
-            if now >= deadline {
-                return Ok(Vec::new());
-            }
-            let wake_at = next_change.map_or(deadline, |at| at.min(deadline));
-            tokio::select! {
-                () = &mut notified => {}
-                () = tokio::time::sleep_until(wake_at) => {}
-            }
-        }
+        let mut poll = PollInFlight {
+            inner: self.0.clone(),
+            queue_url: request.queue_url.clone(),
+            until: deadline,
+            max_messages: request.max_messages,
+            visibility_timeout: request.visibility_timeout,
+            answered: false,
+        };
+        let received = self.wait_for_messages(&request, deadline).await;
+        poll.answered = true;
+        received
     }
 
     async fn delete_message_batch(&self, queue_url: &str, receipt_handles: Vec<String>) -> Result<BatchResult<()>> {
@@ -907,7 +1034,7 @@ impl SqsApi for MemorySqs {
         let queue = queues.get_mut(queue_url).ok_or_else(|| queue_not_found("DeleteMessageBatch"))?;
         // Deleting can unblock a FIFO message group: wake long polls like SQS would.
         queue.notify.notify_waiters();
-        Ok(receipt_handles
+        let results = receipt_handles
             .into_iter()
             .map(|handle| match Receipt::of(queue, retired_receipts, &handle) {
                 Receipt::Current(sequence) => {
@@ -924,7 +1051,9 @@ impl SqsApi for MemorySqs {
                 Receipt::Gone => Ok(()),
                 Receipt::Invalid => Err(invalid_receipt(&handle)),
             })
-            .collect())
+            .collect();
+        serve_orphans(&mut state, queue_url, Instant::now());
+        Ok(results)
     }
 
     async fn change_visibility_batch(
@@ -993,6 +1122,7 @@ impl SqsApi for MemorySqs {
         // wake them all, they compute their next wake-up again.
         if changed {
             queue.notify.notify_waiters();
+            serve_orphans(&mut state, queue_url, now);
         }
         Ok(results)
     }
@@ -1009,8 +1139,10 @@ impl SqsApi for MemorySqs {
 
     async fn get_queue_attributes(&self, queue_url: &str) -> Result<StringMap> {
         let mut state = self.0.state.lock();
+        let now = Instant::now();
+        serve_orphans(&mut state, queue_url, now);
         let queue = state.queues.get_mut(queue_url).ok_or_else(|| queue_not_found("GetQueueAttributes"))?;
-        queue.messages.promote(Instant::now());
+        queue.messages.promote(now);
         let mut attributes = queue.attributes.clone();
         let (visible, in_flight, delayed) = queue.messages.counts();
         attributes.insert("ApproximateNumberOfMessages".into(), visible.to_string());
@@ -1100,6 +1232,7 @@ impl SqsApi for MemorySqs {
                 dedup: Dedup::default(),
                 notify: Arc::new(Notify::new()),
                 purged_at: None,
+                orphans: Vec::new(),
             },
         );
         Ok(url)

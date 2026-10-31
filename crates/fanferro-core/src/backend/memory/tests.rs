@@ -1163,3 +1163,95 @@ async fn active_tracing_gives_deliveries_a_parent_of_sns() {
         assert!(parts[1].starts_with("Parent=") && parts[1].len() == "Parent=".len() + 16, "{received}");
     }
 }
+
+/// Starts a 20 second long poll and aborts it after a second, as a consumer that stops does.
+async fn abort_a_long_poll(backend: &Backend, url: &str) {
+    let poll = ReceiveRequest { wait_time: Duration::from_secs(20), ..receive(url, 10, None) };
+    let aborted = tokio::time::timeout(Duration::from_secs(1), backend.sqs.receive_messages(poll)).await;
+    assert!(aborted.is_err(), "the poll was still waiting");
+}
+
+#[tokio::test(start_paused = true)]
+async fn aborted_long_polls_take_messages_until_their_wait_time_ends() {
+    // docs/parity M10: SQS goes on serving a long poll whose client went away; a message sent
+    // meanwhile is received by nobody and comes back after its visibility timeout.
+    let broker = MemoryBroker::with_options("us-east-1", "000000000000", MemoryOptions { orphaned_polls: true });
+    let backend = broker.backend();
+    assert!(backend.orphaned_polls);
+    let url =
+        backend.sqs.create_queue("q", &attributes(&[("VisibilityTimeout", "5")]), &StringMap::new()).await.unwrap();
+    abort_a_long_poll(&backend, &url).await;
+    backend.sqs.send_message(&url, send("taken")).await.unwrap();
+    assert!(backend.sqs.receive_messages(receive(&url, 10, None)).await.unwrap().is_empty());
+    let stored = broker.queue_messages(&url).unwrap();
+    assert_eq!((stored[0].receive_count, stored[0].in_flight), (1, true));
+    tokio::time::advance(Duration::from_secs(5)).await;
+    let received = backend.sqs.receive_messages(receive(&url, 10, None)).await.unwrap();
+    assert_eq!(received[0].system.approximate_receive_count, 2);
+    // It took one batch; and once its wait time is over, nothing more.
+    backend.sqs.delete_message_batch(&url, vec![received[0].receipt_handle.clone()]).await.unwrap();
+    abort_a_long_poll(&backend, &url).await;
+    tokio::time::advance(Duration::from_secs(19)).await;
+    backend.sqs.send_message(&url, send("after")).await.unwrap();
+    assert_eq!(backend.sqs.receive_messages(receive(&url, 10, None)).await.unwrap().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn aborted_long_polls_end_with_the_connection_by_default() {
+    let (broker, backend) = broker();
+    assert!(!backend.orphaned_polls && broker.options() == MemoryOptions::default());
+    let url = backend.sqs.create_queue("q", &StringMap::new(), &StringMap::new()).await.unwrap();
+    abort_a_long_poll(&backend, &url).await;
+    backend.sqs.send_message(&url, send("free")).await.unwrap();
+    assert_eq!(backend.sqs.receive_messages(receive(&url, 10, None)).await.unwrap().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn aborted_long_polls_take_messages_that_become_visible_while_nobody_calls() {
+    // A message whose visibility timeout ended while an aborted poll waited went to the next live
+    // poll when nothing called the broker before the aborted poll's wait time was over.
+    let broker = MemoryBroker::with_options("us-east-1", "000000000000", MemoryOptions { orphaned_polls: true });
+    let backend = broker.backend();
+    let url =
+        backend.sqs.create_queue("q", &attributes(&[("VisibilityTimeout", "30")]), &StringMap::new()).await.unwrap();
+    backend.sqs.send_message(&url, send("returns")).await.unwrap();
+    assert_eq!(backend.sqs.receive_messages(receive(&url, 10, Some(2))).await.unwrap().len(), 1);
+    abort_a_long_poll(&backend, &url).await; // waits until second 20
+    tokio::time::advance(Duration::from_secs(25)).await; // visible again at second 2, unobserved
+    assert!(backend.sqs.receive_messages(receive(&url, 10, None)).await.unwrap().is_empty());
+    let stored = broker.queue_messages(&url).unwrap();
+    assert_eq!((stored[0].receive_count, stored[0].in_flight), (2, true), "the aborted poll took it");
+    tokio::time::advance(Duration::from_secs(10)).await; // 2 + 30 seconds after the start
+    let again = backend.sqs.receive_messages(receive(&url, 10, None)).await.unwrap();
+    assert_eq!(again[0].system.approximate_receive_count, 3);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_blocked_message_does_not_keep_an_aborted_poll_from_newer_ones() {
+    // Group a has a message in flight and one waiting behind it: the aborted poll looked only at the
+    // oldest stored message, could not take it, and missed a message of group b sent meanwhile.
+    let broker = MemoryBroker::with_options("us-east-1", "000000000000", MemoryOptions { orphaned_polls: true });
+    let backend = broker.backend();
+    let url =
+        backend.sqs.create_queue("q.fifo", &attributes(&[("FifoQueue", "true")]), &StringMap::new()).await.unwrap();
+    let in_group = |group: &str, id: &str| SendRequest {
+        group_id: Some(group.into()),
+        deduplication_id: Some(id.into()),
+        ..send(id)
+    };
+    backend.sqs.send_message(&url, in_group("a", "m1")).await.unwrap();
+    backend.sqs.send_message(&url, in_group("a", "m2")).await.unwrap();
+    assert_eq!(backend.sqs.receive_messages(receive(&url, 1, Some(60))).await.unwrap()[0].body, "m1");
+    abort_a_long_poll(&backend, &url).await;
+    tokio::time::advance(Duration::from_secs(2)).await;
+    backend.sqs.send_message(&url, in_group("b", "m3")).await.unwrap();
+    assert!(backend.sqs.receive_messages(receive(&url, 10, None)).await.unwrap().is_empty());
+    let taken: Vec<(String, u32)> = broker
+        .queue_messages(&url)
+        .unwrap()
+        .into_iter()
+        .filter(|message| message.in_flight)
+        .map(|message| (message.body, message.receive_count))
+        .collect();
+    assert_eq!(taken, [("m1".to_string(), 1), ("m3".to_string(), 1)], "the aborted poll took m3");
+}
