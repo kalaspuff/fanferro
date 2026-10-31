@@ -582,3 +582,118 @@ async fn visibility_timeouts_and_delays_are_whole_seconds() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(backend.sqs.receive_messages(receive(&url, 1, Some(5))).await.unwrap().len(), 1);
 }
+
+/// The code and message of an AWS error.
+fn code_and_message(error: &Error) -> (String, String) {
+    let aws = error.aws().unwrap_or_else(|| panic!("not an AWS error: {error}"));
+    (aws.code.clone().unwrap_or_default(), aws.message.clone().unwrap_or_default())
+}
+
+fn attributes(pairs: &[(&str, &str)]) -> StringMap {
+    pairs.iter().map(|(name, value)| ((*name).to_string(), (*value).to_string())).collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn queue_attributes_are_validated_like_sqs() {
+    // docs/parity Q1-Q3: the broker accepted values and attributes SQS refuses.
+    let (_, backend) = broker();
+    let standard = backend.sqs.create_queue("q", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let fifo =
+        backend.sqs.create_queue("f.fifo", &attributes(&[("FifoQueue", "true")]), &StringMap::new()).await.unwrap();
+    for (name, value) in [
+        ("VisibilityTimeout", "43201"),
+        ("MessageRetentionPeriod", "59"),
+        ("MaximumMessageSize", "1048577"),
+        ("MaximumMessageSize", "1023"),
+        ("DelaySeconds", "901"),
+        ("ReceiveMessageWaitTimeSeconds", "21"),
+        ("KmsDataKeyReusePeriodSeconds", "59"),
+        ("VisibilityTimeout", "ten"),
+        ("SqsManagedSseEnabled", "yes"),
+    ] {
+        let expected = ("InvalidAttributeValue".to_string(), format!("Invalid value for the parameter {name}."));
+        let err = backend.sqs.create_queue("bad", &attributes(&[(name, value)]), &StringMap::new()).await.unwrap_err();
+        assert_eq!(code_and_message(&err), expected);
+        let err = backend.sqs.set_queue_attributes(&standard, &attributes(&[(name, value)])).await.unwrap_err();
+        assert_eq!(code_and_message(&err), expected);
+    }
+    for (url, name) in [
+        (&standard, "NoSuchAttribute"),
+        (&standard, "ContentBasedDeduplication"),
+        (&standard, "FifoThroughputLimit"),
+        (&standard, "FifoQueue"),
+        (&fifo, "FifoQueue"),
+        (&standard, "QueueArn"),
+    ] {
+        let expected = ("InvalidAttributeName".to_string(), format!("Unknown Attribute {name}."));
+        let err = backend.sqs.set_queue_attributes(url, &attributes(&[(name, "true")])).await.unwrap_err();
+        assert_eq!(code_and_message(&err), expected);
+        if name != "FifoQueue" {
+            let err =
+                backend.sqs.create_queue("bad", &attributes(&[(name, "true")]), &StringMap::new()).await.unwrap_err();
+            assert_eq!(code_and_message(&err), expected);
+        }
+    }
+    let per_group = attributes(&[("FifoQueue", "true"), ("FifoThroughputLimit", "perMessageGroupId")]);
+    let err = backend.sqs.create_queue("g.fifo", &per_group, &StringMap::new()).await.unwrap_err();
+    assert_eq!(
+        code_and_message(&err),
+        (
+            "InvalidAttributeValue".to_string(),
+            "Invalid value for the parameter FifoThroughputLimit. Reason: To set FifoThroughputLimit to perMessageGroupId, the DeduplicationScope must be messageGroup.".to_string()
+        )
+    );
+    let err =
+        backend.sqs.set_queue_attributes(&fifo, &attributes(&[("FifoThroughputLimit", "perMessageGroupId")])).await;
+    assert!(err.is_err(), "the queue's DeduplicationScope is still queue");
+    let high_throughput =
+        attributes(&[("DeduplicationScope", "messageGroup"), ("FifoThroughputLimit", "perMessageGroupId")]);
+    backend.sqs.set_queue_attributes(&fifo, &high_throughput).await.unwrap();
+    // Nothing was changed by the refused calls.
+    let current = backend.sqs.get_queue_attributes(&standard).await.unwrap();
+    assert_eq!((current["VisibilityTimeout"].as_str(), current.get("FifoQueue")), ("30", None));
+}
+
+#[tokio::test(start_paused = true)]
+async fn queue_names_and_existing_queues_are_reported_like_sqs() {
+    // docs/parity Q5 and the attribute SQS names when a queue exists with other attributes.
+    let (_, backend) = broker();
+    let invalid_name = "Can only include alphanumeric characters, hyphens, or underscores. 1 to 80 in length";
+    let fifo_name = "The name of a FIFO queue can only include alphanumeric characters, hyphens, or underscores, must end with .fifo suffix and be 1 to 80 in length.";
+    let fifo = attributes(&[("FifoQueue", "true")]);
+    for (name, attributes, message) in [
+        ("bad name", StringMap::new(), invalid_name),
+        (&"x".repeat(81), StringMap::new(), invalid_name),
+        ("q.fifo", StringMap::new(), invalid_name),
+        ("q", fifo.clone(), fifo_name),
+        (".fifo", fifo.clone(), fifo_name),
+    ] {
+        let err = backend.sqs.create_queue(name, &attributes, &StringMap::new()).await.unwrap_err();
+        assert_eq!(code_and_message(&err), ("InvalidParameterValue".to_string(), message.to_string()), "{name}");
+    }
+    backend.sqs.create_queue(&"x".repeat(80), &StringMap::new(), &StringMap::new()).await.unwrap();
+    backend.sqs.create_queue("q", &attributes(&[("VisibilityTimeout", "30")]), &StringMap::new()).await.unwrap();
+    let other = attributes(&[("DelaySeconds", "0"), ("VisibilityTimeout", "40")]);
+    let err = backend.sqs.create_queue("q", &other, &StringMap::new()).await.unwrap_err();
+    assert_eq!(
+        code_and_message(&err),
+        (
+            "QueueAlreadyExists".to_string(),
+            "A queue already exists with the same name and a different value for attribute VisibilityTimeout"
+                .to_string()
+        )
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn queues_encrypted_with_kms_keys_are_not_encrypted_by_sqs() {
+    // docs/parity Q6: SQS reports SqsManagedSseEnabled=false for a queue with a KMS key.
+    let (_, backend) = broker();
+    let kms = attributes(&[("KmsMasterKeyId", "alias/aws/sqs")]);
+    let url = backend.sqs.create_queue("kms", &kms, &StringMap::new()).await.unwrap();
+    assert_eq!(backend.sqs.get_queue_attributes(&url).await.unwrap()["SqsManagedSseEnabled"], "false");
+    let url = backend.sqs.create_queue("later", &StringMap::new(), &StringMap::new()).await.unwrap();
+    assert_eq!(backend.sqs.get_queue_attributes(&url).await.unwrap()["SqsManagedSseEnabled"], "true");
+    backend.sqs.set_queue_attributes(&url, &kms).await.unwrap();
+    assert_eq!(backend.sqs.get_queue_attributes(&url).await.unwrap()["SqsManagedSseEnabled"], "false");
+}
