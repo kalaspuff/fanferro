@@ -70,6 +70,8 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   settings (#121)
 - **outbox:** Prepared message bodies with control characters such as NUL are stored as base64, so
   that a `jsonb` outbox column takes them (#122)
+- **events:** Awaitables returned by sync event hooks (a lambda calling an async function) are
+  awaited (#123)
 
 ## [0.5.0] - 2026-10-17
 

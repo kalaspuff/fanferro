@@ -42,7 +42,8 @@ unsubscribe = client.on(["resource.drift", "resource.missing"], lambda event: au
 client.on("*", metrics_bridge)        # glob patterns: "message.*", "*.failed", ...
 ```
 
-Hooks may be sync or async; async hooks run as tasks on the event loop. A failing hook emits
+Hooks may be sync or async; async hooks run as tasks on the event loop, and so does an awaitable
+that a sync hook returns (`lambda event: notify(event)` with an async `notify`). A failing hook emits
 `hook.failed` and never affects message processing. Core events reach hooks within milliseconds.
 
 ## OpenTelemetry

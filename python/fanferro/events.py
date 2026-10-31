@@ -444,23 +444,35 @@ class EventDispatcher:
 
     def _call(self, hook: EventHook, event: Event) -> None:
         if is_async_callable(hook):
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                _LOGGER.warning("async event hook %r skipped: no running event loop", hook)
-                return
-            task = loop.create_task(self._run_async(hook, event))
-            self._tasks.add(task)
-            task.add_done_callback(self._tasks.discard)
+            self._schedule(hook, event, None)
             return
         try:
-            hook(event)
+            result = hook(event)
         except Exception as error:  # noqa: BLE001 - deliberate catch-all; the error is reported, never swallowed silently
             self._hook_failed(hook, event, error)
+            return
+        if isinstance(result, Awaitable):
+            # A sync callable that returns an awaitable (a lambda calling an async function, an
+            # async hook behind a sync decorator) is awaited like an async hook.
+            self._schedule(hook, event, result)
 
-    async def _run_async(self, hook: EventHook, event: Event) -> None:
+    def _schedule(self, hook: EventHook, event: Event, awaitable: Awaitable[object] | None) -> None:
+        """Runs an async hook (or awaits what a sync one returned) in a task of the running loop."""
         try:
-            result = hook(event)
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            _LOGGER.warning("async event hook %r skipped: no running event loop", hook)
+            close = getattr(awaitable, "close", None)
+            if callable(close):  # a coroutine: closing it spares the "never awaited" warning
+                close()
+            return
+        task = loop.create_task(self._run_async(hook, event, awaitable))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _run_async(self, hook: EventHook, event: Event, awaitable: Awaitable[object] | None) -> None:
+        try:
+            result = hook(event) if awaitable is None else awaitable
             if isinstance(result, Awaitable):
                 await result
         except Exception as error:  # noqa: BLE001 - deliberate catch-all; the error is reported, never swallowed silently

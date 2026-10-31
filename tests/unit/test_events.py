@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
+import warnings
+from collections.abc import Awaitable
 
 import pytest
 
@@ -90,6 +93,52 @@ async def test_hooks_sync_async_and_failures() -> None:
     unsubscribe()
     dispatcher.emit(EventKind.MESSAGE_RECEIVED, "received")
     assert seen == ["sync:message.acked", "async:message.acked"]
+
+
+async def test_sync_hooks_returning_awaitables_are_awaited() -> None:
+    # A lambda calling an async function, or an async hook behind a sync decorator, is not an async
+    # function itself: what it returned was dropped (and Python warned it was never awaited).
+    dispatcher = EventDispatcher(LoggingConfig(enabled=False))
+    seen: list[str] = []
+    failures: list[Event] = []
+
+    async def notify(event: Event, by: str) -> None:
+        await asyncio.sleep(0)
+        seen.append(f"{by}:{event.kind}")
+
+    async def broken(event: Event) -> None:
+        raise ValueError("hook bug")
+
+    def decorated(event: Event) -> Awaitable[None]:
+        return notify(event, "decorated")
+
+    dispatcher.subscribe("message.acked", lambda event: notify(event, "lambda"))
+    dispatcher.subscribe("message.acked", decorated)
+    dispatcher.subscribe("message.acked", lambda event: broken(event))
+    dispatcher.subscribe(EventKind.HOOK_FAILED, failures.append)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        dispatcher.emit(EventKind.MESSAGE_ACKED, "acked")
+        await dispatcher.flush()
+        gc.collect()
+    assert sorted(seen) == ["decorated:message.acked", "lambda:message.acked"]
+    assert [failure.fields["event_kind"] for failure in failures] == ["message.acked"]
+
+
+def test_awaitables_of_sync_hooks_without_a_running_loop_are_skipped(caplog: pytest.LogCaptureFixture) -> None:
+    dispatcher = EventDispatcher(LoggingConfig(enabled=False))
+    seen: list[str] = []
+
+    async def notify(event: Event) -> None:
+        seen.append(event.kind)
+
+    dispatcher.subscribe("message.acked", lambda event: notify(event))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        dispatcher.emit(EventKind.MESSAGE_ACKED, "acked")
+        gc.collect()
+    assert seen == []
+    assert "skipped: no running event loop" in caplog.text
 
 
 def test_enablement_follows_hooks_and_logger_levels() -> None:
