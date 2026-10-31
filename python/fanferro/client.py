@@ -631,18 +631,24 @@ class Client:
         """Resolves resources according to their provisioning policies.
 
         Without arguments, provisions everything declared on the client (topics, queues with their
-        dead-letter queues, subscriptions, and the large payload bucket when ``create_bucket`` is
-        set). Errors are raised according to each resource's failure modes; resources configured
-        to only log failures are reported as exceptions in the returned list.
+        dead-letter queues, subscriptions, and the large payload buckets whose settings set
+        ``create_bucket``: the client's and those of topics and queues). Given resources, it
+        provisions those and the buckets of the given topics and queues. Errors are raised according
+        to each resource's failure modes; resources configured to only log failures are reported as
+        exceptions in the returned list.
         """
         targets: list[Topic | Queue | Subscription] = list(resources) or [
             *self._topics.values(),
             *self._queues.values(),
             *self._subscriptions,
         ]
-        if not resources and self.large_payloads is not None and self.large_payloads.create_bucket:
+        settings = [] if resources else [self.large_payloads]
+        settings += [target.large_payloads for target in targets if isinstance(target, Topic | Queue)]
+        # Each bucket once, in declaration order (several resources may share one).
+        buckets = dict.fromkeys(s.bucket for s in settings if s is not None and s.create_bucket)
+        for bucket in buckets:
             core = await self._core()
-            report = ProvisioningReport.from_core(await core.ensure_bucket(self.large_payloads.bucket, True))
+            report = ProvisioningReport.from_core(await core.ensure_bucket(bucket, True))
             await self._settle_report(report, Provisioning.create_missing())
         outcomes: list[ProvisioningReport | BaseException] = []
         for resource in targets:
