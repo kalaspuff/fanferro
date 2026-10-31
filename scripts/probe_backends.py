@@ -30,6 +30,7 @@ import argparse
 import asyncio
 import contextlib
 import dataclasses
+import io
 import json
 import os
 import platform
@@ -1915,7 +1916,8 @@ async def run_command(args: argparse.Namespace) -> int:
         detail = f"  {result['error']}" if result.get("error") else ""
         print(f"[{mark}] {item.name:42} {result.get('seconds', 0):6.1f}s{detail}", flush=True)
         record["scenarios"] = dict(sorted(record["scenarios"].items()))
-        await asyncio.to_thread(output.write_text, json.dumps(record, indent=2, ensure_ascii=False) + "\n")
+        text = json.dumps(record, indent=2, ensure_ascii=False) + "\n"
+        await asyncio.to_thread(output.write_text, text, encoding="utf-8")
 
     try:
         await asyncio.gather(*(one(item) for item in selected))
@@ -1972,7 +1974,7 @@ def render(value: Any) -> str:
 
 def compare_command(args: argparse.Namespace) -> int:
     """``compare``: prints the facts that differ from the first file."""
-    records = [json.loads(Path(path).read_text()) for path in args.files]
+    records = [json.loads(Path(path).read_text(encoding="utf-8")) for path in args.files]
     names = [f"{r['target']}" for r in records]
     if len(set(names)) != len(names):
         names = [f"{r['target']}#{i}" for i, r in enumerate(records)]
@@ -2112,6 +2114,8 @@ async def cleanup_command(args: argparse.Namespace) -> int:
 
 def main() -> int:
     """Command line entry point."""
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # facts are Unicode, consoles may not be
     parser = argparse.ArgumentParser(
         description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter
     )

@@ -82,15 +82,16 @@ def test_backend_probe_runs_and_compares(tmp_path: Path) -> None:
         command = [sys.executable, "-I", probe, "run", "--target", "memory", "--out", str(output), *only]
         result = subprocess.run(command, capture_output=True, text=True, timeout=120, check=False)
         assert result.returncode == 0, result.stdout + result.stderr
-    record = json.loads(outputs[0].read_text())
+    record = json.loads(outputs[0].read_text(encoding="utf-8"))
     assert sorted(record["scenarios"]) == sorted(scenarios)
     assert {result["status"] for result in record["scenarios"].values()} == {"ok"}
-    assert "000000000000" not in outputs[0].read_text(), "account ids are normalised"
-    assert "ffprobe-" not in outputs[0].read_text(), "resource names are normalised"
+    text = outputs[0].read_text(encoding="utf-8")
+    assert "000000000000" not in text, "account ids are normalised"
+    assert "ffprobe-" not in text, "resource names are normalised"
     compared = subprocess.run(
         [sys.executable, "-I", probe, "compare", *map(str, outputs)],
         capture_output=True,
-        text=True,
+        encoding="utf-8",
         timeout=60,
         check=False,
     )
