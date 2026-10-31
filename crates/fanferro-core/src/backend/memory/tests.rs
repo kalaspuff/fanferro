@@ -926,3 +926,62 @@ async fn sns_keeps_numbers_as_published_and_sqs_normalises_raw_deliveries() {
     let document: serde_json::Value = serde_json::from_str(&notification.body).unwrap();
     assert_eq!(document["MessageAttributes"]["n"]["Value"], "3.0");
 }
+
+#[tokio::test(start_paused = true)]
+async fn errors_carry_the_services_statuses_and_texts() {
+    // docs/parity Q9, M9, P2: statuses, batch entry texts and other texts as AWS sends them.
+    let (_, backend) = broker();
+    let err = backend.sqs.get_queue_url("missing", None).await.unwrap_err();
+    let aws = err.aws().unwrap();
+    assert_eq!(
+        (aws.code.as_deref(), aws.status, aws.message.as_deref()),
+        (Some("AWS.SimpleQueueService.NonExistentQueue"), Some(400), Some("The specified queue does not exist."))
+    );
+    let url =
+        backend.sqs.create_queue("q", &attributes(&[("MaximumMessageSize", "1024")]), &StringMap::new()).await.unwrap();
+    let results =
+        backend.sqs.send_message_batch(&url, vec![send("ok"), send(""), send(&"x".repeat(1025))]).await.unwrap();
+    assert!(results[0].is_ok());
+    let failures: Vec<(String, Option<String>, bool)> =
+        results.into_iter().skip(1).map(|r| r.unwrap_err()).map(|e| (e.code, e.message, e.sender_fault)).collect();
+    assert_eq!(
+        failures,
+        [
+            (
+                "EmptyValue".to_string(),
+                Some("No Value Found for SendMessageBatchRequestEntry.2.MessageBody.".to_string()),
+                true
+            ),
+            (
+                "InvalidParameterValue".to_string(),
+                Some(
+                    "One or more parameters are invalid. Reason: Message must be shorter than 1024 bytes.".to_string()
+                ),
+                true
+            ),
+        ]
+    );
+    let err = backend.sqs.send_message(&url, send("bad \u{fffe} char")).await.unwrap_err();
+    assert_eq!(
+        code_and_message(&err),
+        (
+            "InvalidMessageContents".to_string(),
+            "Invalid binary character '#xFFFE' was found in the message body, the set of allowed characters is #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF].".to_string()
+        )
+    );
+    let topic = backend.sns.create_topic("t", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let entries = vec![
+        PublishRequest { message: "ok".into(), ..PublishRequest::default() },
+        PublishRequest { message: String::new(), ..PublishRequest::default() },
+    ];
+    let failure = backend.sns.publish_batch(&topic, entries).await.unwrap().remove(1).unwrap_err();
+    assert_eq!(
+        (failure.code.as_str(), failure.message.as_deref(), failure.sender_fault),
+        ("InvalidParameter", Some("Invalid parameter: Empty message"), true)
+    );
+    let err = backend.http.get("memory://s3/missing-bucket/key", 1024).await.unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "payload error: payload URL is not accessible (HTTP 404 Not Found); it may have expired"
+    );
+}

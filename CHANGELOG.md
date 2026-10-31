@@ -26,6 +26,9 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   like SQS (#148)
 - **memory:** `Number` attributes come back from the in-memory broker without leading and trailing
   zeros (`1.50` as `1.5`), with the attributes' MD5 of the values as returned, as from SQS (#149)
+- **memory:** Errors of the in-memory broker carry what AWS sends: status 400 for a missing queue,
+  the service's own text in failed batch entries (`EmptyValue` for an empty body), and AWS's texts
+  for too large messages, invalid characters and a missing payload behind a presigned URL (#150)
 
 ## [0.6.0] - 2026-10-31
 
