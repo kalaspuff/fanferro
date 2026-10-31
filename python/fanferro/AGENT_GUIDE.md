@@ -250,6 +250,10 @@ client = fanferro.Client(
 async def alert(event: fanferro.Event) -> None: ...
 ```
 
+Async hooks are bounded: at most `client.events.max_pending_hooks` (1,000) run at once (later
+events skip them and are reported as `events.dropped`), and `client.close()` cancels hooks still
+running after `client.events.flush_timeout` (5 s); still give network calls in hooks a timeout.
+
 Event kinds: `fanferro events`. Trace context carriers: message attributes (default), CloudEvents
 envelope, AWS X-Ray trace header (`fanferro.Propagation(inject=..., extract=...)`).
 
