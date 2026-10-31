@@ -90,7 +90,7 @@ quoted as the services return them; `<v>` stands for a value from the request.
 
 | ID | Real AWS | Differences | Status |
 | --- | --- | --- | --- |
-| P1 | `HeadBucket` with credentials AWS does not know answers 403 without a body, like for a bucket of another account | emulators do not check credentials | Open. Plan: fanferro asks again with a request that has an error body, so that provisioning does not report the bucket as found (it does now) |
+| P1 | `HeadBucket` with credentials AWS does not know answers 403 without a body, like for a bucket of another account | emulators do not check credentials | **Fixed** (#154): after a 403 fanferro asks `GetBucketLocation`, whose error names unknown credentials, so provisioning no longer reports the bucket as found |
 | P2 | A presigned URL of a missing object: 404 "Not Found" (`NoSuchKey`); an expired one: 403 `AccessDenied` | memory's text says "HTTP 404" instead of "HTTP 404 Not Found"; LocalStack does not expire URLs | **Fixed** (#150): memory uses the AWS status text |
 | P3 | `CreateBucket` for an owned bucket outside `us-east-1`: 409 `BucketAlreadyOwnedByYou` | emulators succeed | No change (fanferro treats both as success) |
 
