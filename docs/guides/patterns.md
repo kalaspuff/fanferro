@@ -120,6 +120,8 @@ lets one class accept old names.
 ## Per-entity ordering
 
 Use FIFO topics/queues with the entity id as group id (`group_id=lambda m: m.body.account_id`).
+SNS delivers to FIFO queues from FIFO topics only, so subscribing a FIFO queue to a standard topic
+raises `ConfigurationError` when it is declared (a FIFO topic can deliver to standard queues too).
 Ordering is per group; throughput scales with the number of groups (enable high throughput with
 `QueueAttributes(deduplication_scope="messageGroup", fifo_throughput_limit="perMessageGroupId")`).
 
