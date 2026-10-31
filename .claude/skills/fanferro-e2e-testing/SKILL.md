@@ -1,6 +1,6 @@
 ---
 name: fanferro-e2e-testing
-description: Run and write fanferro end-to-end tests against MiniStack (AWS emulator, no Docker) - starting the emulator, parametrized integration tests, Rust emulator tests, and debugging protocol-level differences. Use when tests involve real SQS/SNS/S3 behaviour or when a test fails only on MiniStack.
+description: Run and write fanferro end-to-end tests against MiniStack (AWS emulator, no Docker) - starting the emulator, parametrized integration tests, Rust emulator tests, debugging protocol-level differences, and comparing fanferro on real AWS, MiniStack, LocalStack and the memory broker (scripts/probe_backends.py). Use when tests involve real SQS/SNS/S3 behaviour, when a test fails only on MiniStack, or when checking parity with real AWS.
 ---
 
 # End-to-end testing with MiniStack
@@ -21,3 +21,34 @@ description: Run and write fanferro end-to-end tests against MiniStack (AWS emul
 * A test that only fails on MiniStack usually means real AWS behaves the same way: check the AWS
   docs and model it in the memory broker too (example: orphaned long polls, ADR 0007).
 * For interop, boto3 is a test dependency: produce/consume with boto3 to verify wire formats.
+
+## Parity with real AWS (`scripts/probe_backends.py`)
+
+MiniStack, LocalStack and the in-memory broker model AWS; the probe checks how closely. Each of its
+scenarios drives fanferro's public API and records facts (outcomes, exception classes, error kinds,
+codes, statuses and messages, what was delivered where and in which order), normalised so that runs
+on different targets compare:
+
+```bash
+uv run python scripts/probe_backends.py list                          # the scenarios
+uv run python scripts/probe_backends.py run --target memory           # writes probe-memory.json
+uv run python scripts/probe_backends.py run --target ministack        # starts MiniStack itself
+uv run python scripts/probe_backends.py run --target localstack --endpoint http://localhost:4566
+uv run python scripts/probe_backends.py compare probe-aws.json probe-memory.json probe-ministack.json
+```
+
+* Real AWS needs a person with credentials of a test account: `iam-policy --account <id>` prints
+  the least privilege a run needs, `run --target aws --region <region>` (with `AWS_PROFILE` or
+  `--profile`) writes `probe-aws.json`, and `cleanup --target aws --region <region>` deletes what an
+  interrupted run left (every `ffprobe-*` queue, topic and bucket). Result files contain no
+  credentials or account ids, so they can be shared and committed to an issue.
+* LocalStack needs Docker and, since 2026.03, an auth token:
+  `docker run --rm -p 4566:4566 -e LOCALSTACK_AUTH_TOKEN localstack/localstack`.
+* `compare` takes real AWS as the reference (first file). A difference is a finding: fix the memory
+  broker (`backend/memory`) or the error classification (`backend/aws/errors.rs`) to match AWS, or
+  note why fanferro must behave differently. Facts named `info.*` (timings, URLs, request ids) are
+  never counted as differences.
+* Add a scenario with `@scenario("area.name")`: record facts with `probe.fact(...)` and
+  `await probe.outcome(key, awaitable)`, name resources with `probe.name(...)`, and wait for
+  deliveries with `collect(...)`/`Collector` (on real AWS, `warm_up` waits until a new subscription
+  delivers).
