@@ -302,3 +302,24 @@ async def test_provisioning_a_queue_creates_its_payload_bucket(client_factory: C
         await client.provision(queue)
         assert (await queue.send({"n": 1})).offloaded is not None
         assert [message.json() for message in await drain_queue(client, queue)] == [{"n": 1}]
+
+
+async def test_queues_are_created_again_and_purged_again_only_after_a_minute(
+    memory_client: fanferro.Client, name: Any
+) -> None:
+    # docs/parity Q7, Q8: SQS refuses both for 60 seconds, and retrying later succeeds. MiniStack
+    # does neither, so this runs on the in-memory broker only.
+    queue = memory_client.queue(name("phoenix"), provisioning=fanferro.Provisioning.ensure())
+    await queue.purge()
+    with pytest.raises(fanferro.ThrottledError) as purged:
+        await queue.purge()
+    assert purged.value.code == "AWS.SimpleQueueService.PurgeQueueInProgress"
+    assert purged.value.status == 403
+    assert purged.value.retryable
+    await queue.delete()
+    with pytest.raises(fanferro.ProvisioningError) as created:
+        await queue.send({"n": 1})
+    error = created.value.report.error
+    assert isinstance(error, fanferro.ThrottledError)
+    assert error.code == "AWS.SimpleQueueService.QueueDeletedRecently"
+    assert created.value.retryable

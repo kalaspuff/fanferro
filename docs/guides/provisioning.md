@@ -71,7 +71,10 @@ orders = client.topic("orders", provisioning=fanferro.Provisioning(on_missing=fa
 Reports: `await client.provision()` returns a `ProvisioningReport` per resource (status `found`,
 `created`, `updated`, `assumed`, `missing`, `failed`; `drift`; `actions`) or the error;
 `resource.last_report` keeps the latest. Teardown helpers: `topic.delete()`, `queue.delete()`,
-`queue.purge()`, `subscription.delete()`.
+`queue.purge()`, `subscription.delete()`. SQS refuses to create a queue of the same name for 60
+seconds after deleting it, and allows one purge of a queue every 60 seconds: both fail with a
+retryable `ThrottledError` (in a `ProvisioningError` when provisioning creates the queue), on the
+in-memory broker too.
 
 ## Attributes
 

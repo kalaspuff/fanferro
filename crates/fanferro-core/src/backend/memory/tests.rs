@@ -290,11 +290,14 @@ async fn redrive_policies_are_validated_like_sqs() {
         let err = backend.sqs.set_queue_attributes(&url, &policy).await.unwrap_err();
         assert!(err.to_string().contains(reason), "{err}");
         backend.sqs.delete_queue(&url).await.unwrap();
+        // SQS refuses to create a queue of the same name for 60 seconds.
+        tokio::time::advance(Duration::from_secs(60)).await;
     }
     for count in ["1", r#""1000""#] {
         backend.sqs.create_queue("valid", &redrive_policy(&dlq_arn, count), &StringMap::new()).await.unwrap();
         let url = backend.sqs.get_queue_url("valid", None).await.unwrap();
         backend.sqs.delete_queue(&url).await.unwrap();
+        tokio::time::advance(Duration::from_secs(60)).await;
     }
 }
 
@@ -810,4 +813,45 @@ async fn queues_encrypted_with_kms_keys_are_not_encrypted_by_sqs() {
     assert_eq!(backend.sqs.get_queue_attributes(&url).await.unwrap()["SqsManagedSseEnabled"], "true");
     backend.sqs.set_queue_attributes(&url, &kms).await.unwrap();
     assert_eq!(backend.sqs.get_queue_attributes(&url).await.unwrap()["SqsManagedSseEnabled"], "false");
+}
+
+#[tokio::test(start_paused = true)]
+async fn queues_are_created_again_and_purged_again_only_after_60_seconds() {
+    // docs/parity Q7, Q8: the broker created a deleted queue again, and purged a queue again, at once.
+    let (_, backend) = broker();
+    let url = backend.sqs.create_queue("q", &StringMap::new(), &StringMap::new()).await.unwrap();
+    backend.sqs.purge_queue(&url).await.unwrap();
+    tokio::time::advance(Duration::from_secs(59)).await;
+    let err = backend.sqs.purge_queue(&url).await.unwrap_err();
+    let aws = err.aws().unwrap();
+    assert_eq!(
+        (aws.code.as_deref(), aws.status, aws.message.as_deref(), aws.kind),
+        (
+            Some("AWS.SimpleQueueService.PurgeQueueInProgress"),
+            Some(403),
+            Some("Only one PurgeQueue operation on q is allowed every 60 seconds."),
+            AwsErrorKind::Throttling
+        )
+    );
+    assert!(err.is_retryable());
+    tokio::time::advance(Duration::from_secs(1)).await;
+    backend.sqs.purge_queue(&url).await.unwrap();
+
+    backend.sqs.delete_queue(&url).await.unwrap();
+    tokio::time::advance(Duration::from_secs(59)).await;
+    let err = backend.sqs.create_queue("q", &StringMap::new(), &StringMap::new()).await.unwrap_err();
+    let aws = err.aws().unwrap();
+    assert_eq!(
+        (aws.code.as_deref(), aws.status, aws.message.as_deref(), aws.kind),
+        (
+            Some("AWS.SimpleQueueService.QueueDeletedRecently"),
+            Some(400),
+            Some("You must wait 60 seconds after deleting a queue before you can create another with the same name."),
+            AwsErrorKind::Throttling
+        )
+    );
+    // Other names are not affected; the name is free again after 60 seconds.
+    backend.sqs.create_queue("other", &StringMap::new(), &StringMap::new()).await.unwrap();
+    tokio::time::advance(Duration::from_secs(1)).await;
+    backend.sqs.create_queue("q", &StringMap::new(), &StringMap::new()).await.unwrap();
 }
