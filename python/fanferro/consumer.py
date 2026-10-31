@@ -1402,12 +1402,12 @@ class Consumer:
         return f"Consumer({self.name!r}, queue={self.queue.name!r}, state={self._state!r})"
 
 
-@functools.lru_cache(maxsize=256)
 def _retrieve_error(task: asyncio.Task[None]) -> None:
     if not task.cancelled():
         task.exception()
 
 
+@functools.lru_cache(maxsize=256)
 def _is_json(content_type: str) -> bool:
     """:func:`is_json_content_type`, memoized for the few content types a consumer sees."""
     return is_json_content_type(content_type)
