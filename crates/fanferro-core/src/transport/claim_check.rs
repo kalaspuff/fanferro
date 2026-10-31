@@ -8,7 +8,9 @@
 //! * `aws_extended`: the format of the AWS SQS/SNS extended client libraries (Java,
 //!   Python): body `["software.amazon.payloadoffloading.PayloadS3Pointer",
 //!   {"s3BucketName":..,"s3Key":..}]` plus the `ExtendedPayloadSize` attribute. Use it to
-//!   interoperate with services built on those libraries. Receivers accept both formats.
+//!   interoperate with services built on those libraries. Receivers accept both formats, and
+//!   the legacy variant of the extended clients (`SQSLargePayloadSize` and a
+//!   `com.amazon.sqs.javamessaging.MessageS3Pointer` body) too.
 //!
 //! Fetching by URL is restricted to an allow-list of hosts (AWS endpoints and the
 //! configured custom endpoint by default) to prevent server-side request forgery through
@@ -31,6 +33,10 @@ use crate::util::duration_from_secs;
 pub const FANFERRO_POINTER_MARKER: &str = "claim-check/v1";
 /// Class name used by the AWS extended client libraries.
 pub const AWS_POINTER_CLASS: &str = "software.amazon.payloadoffloading.PayloadS3Pointer";
+/// Class name of the pointers that the extended clients write with the legacy
+/// `SQSLargePayloadSize` attribute (the Java library before 2.0, the Python ones with
+/// `use_legacy_attribute=True`). Read only.
+pub const LEGACY_AWS_POINTER_CLASS: &str = "com.amazon.sqs.javamessaging.MessageS3Pointer";
 
 /// What the pointer contains.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -285,7 +291,7 @@ impl PayloadPointer {
     pub fn parse_aws(body: &str, size: Option<u64>) -> Result<Self> {
         let (class, json): (String, AwsPointerJson) = serde_json::from_str(body)
             .map_err(|err| Error::Payload(format!("invalid extended client payload pointer: {err}")))?;
-        if class != AWS_POINTER_CLASS {
+        if class != AWS_POINTER_CLASS && class != LEGACY_AWS_POINTER_CLASS {
             return Err(Error::Payload(format!("unsupported extended client pointer class {class:?}")));
         }
         Ok(Self {
@@ -478,6 +484,12 @@ mod tests {
         let body = aws.to_body().unwrap();
         assert_eq!(body, r#"["software.amazon.payloadoffloading.PayloadS3Pointer",{"s3BucketName":"b","s3Key":"k"}]"#);
         assert_eq!(PayloadPointer::parse_aws(&body, Some(3)).unwrap(), aws);
+        // The legacy class (written with SQSLargePayloadSize) was refused as unsupported.
+        let legacy = r#"["com.amazon.sqs.javamessaging.MessageS3Pointer",{"s3BucketName":"b","s3Key":"k"}]"#;
+        assert_eq!(PayloadPointer::parse_aws(legacy, Some(3)).unwrap(), aws);
+        assert!(
+            PayloadPointer::parse_aws(r#"["com.example.Pointer",{"s3BucketName":"b","s3Key":"k"}]"#, None).is_err()
+        );
         assert!(PayloadPointer::parse_fanferro(r#"{"fanferro":"claim-check/v9","url":"x"}"#).is_err());
         assert!(PayloadPointer::parse_fanferro(r#"{"fanferro":"claim-check/v1"}"#).is_err());
     }

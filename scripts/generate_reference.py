@@ -44,7 +44,10 @@ ATTRIBUTE_DESCRIPTIONS = {
         "AWS Extended Client Library pointer marker (read always, written with `format='aws_extended'`).",
         "transport",
     ),
-    "SQSLargePayloadSize": ("Legacy AWS Extended Client Library pointer marker (read only).", "transport"),
+    "SQSLargePayloadSize": (
+        "Legacy AWS Extended Client Library pointer marker, with a `MessageS3Pointer` body (read only).",
+        "transport",
+    ),
     "traceparent": ("W3C trace context (message-attribute propagation).", "telemetry"),
     "tracestate": ("W3C trace state (message-attribute propagation, when non-empty).", "telemetry"),
     "baggage": ("W3C baggage (only when added to `Propagation.attribute_keys`).", "telemetry"),

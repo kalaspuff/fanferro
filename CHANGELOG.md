@@ -80,6 +80,8 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 - **provisioning:** `create_bucket` of a topic's or queue's own `LargePayloads` creates its bucket (#127)
 - **envelopes:** CloudEvents JSON keeps a JSON `null` payload instead of turning it into an empty
   body (#128)
+- **payloads:** Legacy AWS extended client pointers (`SQSLargePayloadSize`, `MessageS3Pointer`) are read,
+  and `SQSLargePayloadSize` is reserved when publishing (#129)
 
 ## [0.5.0] - 2026-10-17
 

@@ -94,7 +94,12 @@ impl Transport {
     /// Encodes `wire` for a destination whose size limit is `limit` bytes.
     pub async fn encode(&self, wire: &WireMessage, message_id: &str, limit: usize) -> Result<OutgoingBody> {
         let mut attributes = wire.attributes.clone();
-        for name in [reserved::ENCODING, reserved::CLAIM_CHECK, reserved::EXTENDED_PAYLOAD_SIZE] {
+        for name in [
+            reserved::ENCODING,
+            reserved::CLAIM_CHECK,
+            reserved::EXTENDED_PAYLOAD_SIZE,
+            reserved::LEGACY_EXTENDED_PAYLOAD_SIZE,
+        ] {
             if attributes.contains_key(name) {
                 return Err(Error::validation(format!("attribute {name:?} is reserved for the transport layer")));
             }
@@ -214,6 +219,7 @@ mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
 
+    use crate::backend::PutOptions;
     use crate::backend::memory::MemoryBroker;
     use crate::transport::claim_check::{EncryptionSettings, ReferenceMode};
 
@@ -356,10 +362,35 @@ mod tests {
     #[tokio::test]
     async fn reserved_attributes_are_rejected() {
         let (transport, _) = transport(None);
+        // SQSLargePayloadSize was accepted, and every consumer then parsed the body as a pointer.
+        for name in [
+            reserved::ENCODING,
+            reserved::CLAIM_CHECK,
+            reserved::EXTENDED_PAYLOAD_SIZE,
+            reserved::LEGACY_EXTENDED_PAYLOAD_SIZE,
+        ] {
+            let mut attributes = MessageAttributes::new();
+            attributes.insert(name.into(), AttributeValue::string("1"));
+            let wire = WireMessage::new(Bytes::from_static(b"x"), attributes);
+            let err = transport.encode(&wire, "id", 100).await.unwrap_err();
+            assert!(err.to_string().contains("reserved for the transport layer"), "{name}: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_extended_client_pointers_are_resolved() {
+        let (transport, backend) = transport(None);
+        backend.objects.create_bucket("payloads").await.unwrap();
+        let options = PutOptions::default();
+        backend.objects.put_object("payloads", "legacy", Bytes::from_static(b"{\"n\":1}"), &options).await.unwrap();
         let mut attributes = MessageAttributes::new();
-        attributes.insert(reserved::ENCODING.into(), AttributeValue::string("base64"));
-        let wire = WireMessage::new(Bytes::from_static(b"x"), attributes);
-        assert!(transport.encode(&wire, "id", 100).await.is_err());
+        attributes.insert(reserved::LEGACY_EXTENDED_PAYLOAD_SIZE.into(), AttributeValue::number("7"));
+        attributes.insert("tenant".into(), AttributeValue::string("acme"));
+        let body = r#"["com.amazon.sqs.javamessaging.MessageS3Pointer",{"s3BucketName":"payloads","s3Key":"legacy"}]"#;
+        let decoded = transport.decode(body, attributes).await.unwrap();
+        assert_eq!(&decoded.wire.body[..], b"{\"n\":1}");
+        assert_eq!(decoded.wire.attributes.keys().collect::<Vec<_>>(), ["tenant"]);
+        assert_eq!(decoded.pointer.unwrap().size, Some(7));
     }
 
     #[tokio::test]
