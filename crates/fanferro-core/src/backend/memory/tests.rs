@@ -1027,13 +1027,24 @@ async fn fifo_topics_refuse_invalid_ids_instead_of_dropping_the_deliveries() {
             deduplication_id: Some(deduplication.into()),
             ..PublishRequest::default()
         };
-        let err = backend.sns.publish(&topic, request).await.unwrap_err();
-        let (code, message) = code_and_message(&err);
-        assert_eq!(code, "InvalidParameter");
-        assert!(
-            message.ends_with("can only include alphanumeric and punctuation characters. 1 to 128 in length."),
-            "{message}"
+        let parameter = if group == "g" { "MessageDeduplicationId" } else { "MessageGroupId" };
+        let expected = (
+            "InvalidParameter".to_string(),
+            format!(
+                "Invalid parameter: The {parameter} parameter can only include alphanumeric and punctuation characters. 1 to 128 in length"
+            ),
         );
+        let err = backend.sns.publish(&topic, request.clone()).await.unwrap_err();
+        assert_eq!(code_and_message(&err), expected, "SNS's text (docs/parity S11)");
+        // A batch with such an entry fails as a whole, as on SNS.
+        let valid = PublishRequest {
+            message: "ok".into(),
+            group_id: Some("g".into()),
+            deduplication_id: Some("ok".into()),
+            ..PublishRequest::default()
+        };
+        let err = backend.sns.publish_batch(&topic, vec![valid, request]).await.unwrap_err();
+        assert_eq!(code_and_message(&err), expected);
     }
 }
 
@@ -1099,8 +1110,13 @@ async fn topics_and_subscriptions_are_validated_and_reported_like_sns() {
     let err = backend.sns.set_topic_attribute(&topic, "FifoTopic", "true").await.unwrap_err();
     assert_eq!(invalid(err), parameter("Invalid parameter: AttributeName"));
     let reported = backend.sns.get_topic_attributes(&topic).await.unwrap();
-    let policy: serde_json::Value = serde_json::from_str(&reported["Policy"]).unwrap();
-    assert_eq!(policy["Statement"][0]["Resource"], topic.as_str());
+    // SNS's text (docs/parity S2, second run), keys in its order.
+    assert_eq!(
+        reported["Policy"],
+        format!(
+            r#"{{"Version":"2008-10-17","Id":"__default_policy_ID","Statement":[{{"Sid":"__default_statement_ID","Effect":"Allow","Principal":{{"AWS":"*"}},"Action":["SNS:GetTopicAttributes","SNS:SetTopicAttributes","SNS:AddPermission","SNS:RemovePermission","SNS:DeleteTopic","SNS:Subscribe","SNS:ListSubscriptionsByTopic","SNS:Publish"],"Resource":"{topic}","Condition":{{"StringEquals":{{"AWS:SourceOwner":"000000000000"}}}}}}]}}"#
+        )
+    );
     assert!(reported["EffectiveDeliveryPolicy"].contains("defaultHealthyRetryPolicy"));
 
     let fifo_queue =
@@ -1134,6 +1150,17 @@ async fn topics_and_subscriptions_are_validated_and_reported_like_sns() {
     assert_eq!(invalid(err), parameter("Invalid parameter: TopicArn"));
     let err = backend.sns.publish_batch(&elsewhere, vec![request]).await.unwrap_err();
     assert_eq!(invalid(err), parameter("Invalid parameter: TopicArn"));
+    // Every other topic operation too (second run).
+    let other_region = [
+        backend.sns.get_topic_attributes(&elsewhere).await.map(drop),
+        backend.sns.set_topic_attribute(&elsewhere, "DisplayName", "x").await,
+        backend.sns.subscribe(&elsewhere, "sqs", &queue_arn, &StringMap::new()).await.map(drop),
+        backend.sns.list_subscriptions_by_topic(&elsewhere).await.map(drop),
+        backend.sns.delete_topic(&elsewhere).await,
+    ];
+    for result in other_region {
+        assert_eq!(invalid(result.unwrap_err()), parameter("Invalid parameter: TopicArn"));
+    }
 }
 
 #[tokio::test(start_paused = true)]

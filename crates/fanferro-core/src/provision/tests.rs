@@ -253,14 +253,16 @@ async fn topics_lookup_create_update() {
 #[tokio::test]
 async fn topics_of_other_accounts_and_regions_are_not_created_here() {
     let client = client();
-    for arn in
-        ["arn:aws:sns:us-east-1:222222222222:partner-orders", "arn:aws:sns:eu-west-1:000000000000:partner-orders"]
-    {
+    // SNS refuses a topic ARN of another region before it looks for the topic (docs/parity S3).
+    for (arn, expected) in [
+        ("arn:aws:sns:us-east-1:222222222222:partner-orders", "cannot be created"),
+        ("arn:aws:sns:eu-west-1:000000000000:partner-orders", "Invalid parameter: TopicArn"),
+    ] {
         let spec = TopicSpec { arn: Some(arn.into()), policy: ensure(), ..TopicSpec::default() };
         let report = client.ensure_topic(&spec).await.unwrap();
         assert_eq!(report.status, ProvisionStatus::Failed, "{arn}");
         let error = report.error.unwrap().to_string();
-        assert!(error.contains("cannot be created"), "{error}");
+        assert!(error.contains(expected), "{error}");
         assert!(report.resource.is_none());
     }
     let own = TopicSpec {
