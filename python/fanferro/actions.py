@@ -14,7 +14,7 @@ Example::
 
 from __future__ import annotations
 
-from fanferro._utils import optional_seconds
+from fanferro._utils import Duration, optional_seconds
 
 __all__ = ["Discard", "HandlerAction", "Reject", "Requeue", "Retry"]
 
@@ -29,7 +29,7 @@ class Retry(HandlerAction):
     Counts as an attempt: once ``max_attempts`` is reached the message is dead-lettered.
     """
 
-    def __init__(self, reason: str = "retry requested", *, delay: float | None = None) -> None:
+    def __init__(self, reason: str = "retry requested", *, delay: Duration | None = None) -> None:
         super().__init__(reason)
         self.delay = optional_seconds(delay, "delay")
 
@@ -37,7 +37,7 @@ class Retry(HandlerAction):
 class Requeue(HandlerAction):
     """Send a copy of the message back to the queue (attempt counter + 1) and delete this one."""
 
-    def __init__(self, reason: str = "requeue requested", *, delay: float | None = None) -> None:
+    def __init__(self, reason: str = "requeue requested", *, delay: Duration | None = None) -> None:
         super().__init__(reason)
         self.delay = optional_seconds(delay, "delay")
 

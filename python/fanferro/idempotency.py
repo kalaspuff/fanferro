@@ -22,6 +22,7 @@ import time
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol
 
+from fanferro._utils import Duration, seconds
 from fanferro.actions import Retry
 from fanferro.consumer import Duplicate
 
@@ -120,7 +121,9 @@ class IdempotencyMiddleware:
         key: Derives the key from a message (default: ``"<queue>:<message id>"``).
         ttl: How long completed keys are remembered (seconds; cover your maximum redelivery window).
         lock_ttl: How long an in-progress claim is held (should exceed the handler's run time).
-        retry_delay: Delay before retrying a message that is in progress elsewhere.
+        retry_delay: Delay before retrying a message that is in progress elsewhere (seconds).
+
+    The durations are given in seconds or as a ``timedelta`` and kept as float seconds.
     """
 
     def __init__(
@@ -128,15 +131,15 @@ class IdempotencyMiddleware:
         store: IdempotencyStore,
         *,
         key: Callable[[Message[Any]], str] = _default_key,
-        ttl: float = 7 * 24 * 3600,
-        lock_ttl: float = 15 * 60,
-        retry_delay: float = 30.0,
+        ttl: Duration = 7 * 24 * 3600,
+        lock_ttl: Duration = 15 * 60,
+        retry_delay: Duration = 30.0,
     ) -> None:
         self.store = store
         self.key = key
-        self.ttl = ttl
-        self.lock_ttl = lock_ttl
-        self.retry_delay = retry_delay
+        self.ttl = seconds(ttl, "ttl")
+        self.lock_ttl = seconds(lock_ttl, "lock_ttl")
+        self.retry_delay = seconds(retry_delay, "retry_delay")
 
     async def __call__(self, message: Message[Any], call_next: HandlerNext) -> None:
         """Runs the handler unless the message was already processed."""

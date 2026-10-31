@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -304,12 +305,13 @@ async def test_unroutable_and_undecodable(client_factory: ClientFactory, name: A
     assert reasons == ["decode failed", "decode failed", "no route matched"]
 
 
-async def test_handler_timeout_retries(client_factory: ClientFactory, name: Any) -> None:
+@pytest.mark.parametrize("timeout", [0.2, timedelta(milliseconds=200)], ids=["float", "timedelta"])
+async def test_handler_timeout_retries(client_factory: ClientFactory, name: Any, timeout: float | timedelta) -> None:
     client = client_factory()
     queue = client.queue(name("slow"))
     attempts: list[int] = []
     consumer = client.consumer(
-        queue, wait_time=1, handler_timeout=0.2, retry=fanferro.RetryPolicy(max_attempts=3, backoff=FAST_RETRY)
+        queue, wait_time=1, handler_timeout=timeout, retry=fanferro.RetryPolicy(max_attempts=3, backoff=FAST_RETRY)
     )
 
     @consumer.route(OrderCreated)

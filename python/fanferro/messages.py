@@ -16,7 +16,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from fanferro._core import AttributeValue, Delivery, Payload, WireMessage, is_sqs_safe_text, new_message_id
-from fanferro._utils import optional_seconds
+from fanferro._utils import Duration, optional_seconds, seconds
 from fanferro.codecs._base import loads_json
 from fanferro.errors import DecodeError
 
@@ -430,8 +430,8 @@ class Message[T]:
         if settler is not None:
             await settler.ack(self)
 
-    async def retry(self, *, delay: float | None = None, error: BaseException | None = None) -> None:
-        """Retries later (after ``delay`` seconds, or the retry policy's backoff).
+    async def retry(self, *, delay: Duration | None = None, error: BaseException | None = None) -> None:
+        """Retries later (after ``delay`` seconds or ``timedelta``, or the retry policy's backoff).
 
         Raises:
             ValueError: If ``delay`` is negative or NaN (the message stays unsettled).
@@ -441,7 +441,7 @@ class Message[T]:
         if settler is not None:
             await settler.retry(self, delay, error)
 
-    async def requeue(self, *, delay: float | None = None, error: BaseException | None = None) -> None:
+    async def requeue(self, *, delay: Duration | None = None, error: BaseException | None = None) -> None:
         """Re-enqueues a copy (attempt counter + 1) and deletes this one.
 
         Raises:
@@ -472,8 +472,13 @@ class Message[T]:
         if settler is not None:
             await settler.discard(self, reason)
 
-    async def extend(self, timeout: float) -> None:
-        """Keeps the message invisible for ``timeout`` more seconds (heartbeats do this automatically)."""
+    async def extend(self, timeout: Duration) -> None:
+        """Keeps the message invisible for ``timeout`` more seconds (heartbeats do this automatically).
+
+        Raises:
+            ValueError: If ``timeout`` is negative or NaN.
+        """
+        timeout = seconds(timeout, "timeout")
         if self._settled:
             raise RuntimeError(f"message {self.id} was already settled ({self.outcome})")
         if self._settler is not None:
@@ -506,7 +511,8 @@ class OutgoingMessage:
         content_type: Overrides the codec's content type (for ``bytes``/``str`` bodies).
         group_id: Message group id (required for FIFO destinations).
         deduplication_id: FIFO deduplication id (defaults to ``id``).
-        delay: Delivery delay in seconds (standard queues only, at most 900).
+        delay: Delivery delay in seconds or as a ``timedelta`` (standard queues only, at most 900
+            seconds; kept as float seconds).
         sns_subject: SNS ``Subject`` (topics only; shown in email notifications).
         codec: Codec (or codec name) to use instead of automatic selection.
         envelope: Envelope to use instead of the destination's.
@@ -525,7 +531,7 @@ class OutgoingMessage:
     content_type: str | None = None
     group_id: str | None = None
     deduplication_id: str | None = None
-    delay: float | None = None
+    delay: Duration | None = None
     sns_subject: str | None = None
     codec: Codec | str | None = None
     envelope: Envelope | None = None
@@ -537,6 +543,7 @@ class OutgoingMessage:
         # None (an optional argument passed through) means none.
         self.attributes = dict(self.attributes) if self.attributes is not None else {}
         self.headers = dict(self.headers) if self.headers is not None else {}
+        self.delay = optional_seconds(self.delay, "delay")
 
 
 @dataclass(frozen=True, slots=True)

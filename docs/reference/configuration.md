@@ -82,6 +82,10 @@ each parameter and field listed here exists in the code and that every one in th
 
 ## `client.consumer(queue, handler_or_router, ...)`
 
+Every option in seconds (`receive_batch_wait`, `wait_time`, `visibility_timeout`, `handler_timeout`,
+`settle_linger`) also takes a `timedelta`; out-of-range values raise `ValueError` when the consumer is
+created.
+
 | Parameter | Default | Description |
 | --- | --- | --- |
 | `name` | queue name | Name used in events and metrics |
@@ -93,12 +97,12 @@ each parameter and field listed here exists in the code and that every one in th
 | `wait_time` | `20` | Long polling wait in seconds (0-20; fractions round up; `0` short-polls, pausing a second while the queue is empty) |
 | `pollers` | `1` | Concurrent receive loops |
 | `rate_limit` | `None` | `RateLimit(per_second, burst)` or messages per second |
-| `visibility_timeout` | queue attribute | Visibility timeout applied on receive |
+| `visibility_timeout` | queue attribute | Visibility timeout in seconds applied on receive (0-43200) |
 | `heartbeat` | `True` | `Heartbeat(...)`, `True` (defaults) or `False` |
 | `retry` | `RetryPolicy()` | Retry policy |
 | `dead_letter` | `DeadLetterPolicy()` | Dead-letter policy |
 | `shutdown` | `ShutdownPolicy()` | Shutdown policy |
-| `handler_timeout` | `None` | Cancel handlers after N seconds |
+| `handler_timeout` | `None` | Cancel handlers after N seconds (positive) |
 | `ordering` | `"auto"` | `"fifo"` (per-group sequencing), `"none"`, or auto (FIFO queues) |
 | `strict_ordering` | `True` | A group's next message waits until the automatic ack of the previous one is confirmed (`False`: background acks; a failed delete can reorder the group) |
 | `envelopes` | client default | Envelopes to try |
@@ -133,6 +137,11 @@ retention), `tags` (`{}`), `provisioning` (the queue's), `prefixed` (`True`: the
 at most 12 hours).
 
 `RateLimit`: `per_second`, `burst`.
+
+Durations in the policies (`Backoff`'s delays, `ShutdownPolicy`'s timeouts, `Heartbeat`), in
+`Retry(delay=...)`, `Requeue(delay=...)`, `message.retry()`, `message.requeue()`,
+`message.extend()`, `IdempotencyMiddleware` and a publish's `delay` are seconds or a `timedelta`;
+the policies and `OutgoingMessage` keep them as float seconds.
 
 `Provisioning`: `lookup` (`True`), `verify` (`True`), `create` (`False`), `update` (`False`),
 `on_missing` (`"raise"`), `on_drift` (`"log"`), `on_error` (`"raise"`); presets `existing()`,

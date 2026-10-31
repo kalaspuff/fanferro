@@ -116,6 +116,9 @@ slot to the next message right away; the automatic ack completes in the backgrou
 | `handler_timeout` | `None` | cancel handlers after N seconds (`HandlerTimeoutError`, retried) |
 | `settle_linger` | 0.005 | seconds a batch of acks or retries waits for more before it is sent |
 
+Options in seconds also take a `timedelta` (`handler_timeout=timedelta(minutes=5)`); values out of
+range raise `ValueError` when the consumer is created.
+
 Acks and retries are sent in batch calls (`DeleteMessageBatch`, `ChangeMessageVisibilityBatch`)
 of up to ten messages: a batch goes out as soon as it is full, also while earlier calls are still in
 flight, or `settle_linger` after its first settlement. When every running handler awaits an
