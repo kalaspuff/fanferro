@@ -123,7 +123,7 @@ quoted as the services return them; `<v>` stands for a value from the request.
   `SubscriptionPrincipal` is the subscriber's IAM ARN; SNS refuses invalid FIFO ids with its own
   text (S2, S11).
 
-None of the first run's questions is still open; the findings they led to are in the tables above, some of them open.
+None of the first run's questions is still open; the findings they led to are in the tables above.
 
 ## Emulator differences fanferro's tests must not rely on
 

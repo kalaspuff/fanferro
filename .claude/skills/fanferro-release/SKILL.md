@@ -35,8 +35,9 @@ While 0.x, breaking changes bump the minor version (`scripts/release.py major` d
      fail without blocking the release), and the sdist (also built and smoke-tested from source);
    - smoke-tests every wheel natively with `scripts/smoke_test.py` on Python 3.12 and 3.15
      (musl wheels in Alpine containers, Python 3.12 and 3.14);
-   - creates the GitHub release (pre-release while 0.x) with build provenance attestations and
-     notes from `scripts/release_notes.py`;
+   - creates the GitHub release, a full release (0.x ones too; an older tag released again does not
+     become the latest one), with build provenance attestations and notes from
+     `scripts/release_notes.py`;
    - publishes to PyPI with trusted publishing when the variable `PUBLISH_TO_PYPI` is `true`.
 
 To rebuild or retry a release for an existing tag: Actions → Release → Run workflow → tag `v0.2.0`

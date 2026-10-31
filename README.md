@@ -74,6 +74,25 @@ uv add "fanferro[all]"            # + pydantic, protobuf, msgspec, opentelemetry
 
 Benchmarks and how to run them: [Performance](docs/performance.md).
 
+## Real AWS, emulators and the in-memory broker
+
+fanferro runs on real AWS, on the AWS emulators MiniStack and LocalStack, and on its in-memory
+broker. Real AWS is the reference: probes run the same scenarios and raw API calls on each target,
+and the in-memory broker follows AWS wherever they found a difference, with AWS's error codes and
+texts.
+
+| Target | Use it for | How it differs from AWS |
+| --- | --- | --- |
+| Real AWS | Production | It is the reference |
+| In-memory broker (`fanferro.testing.memory_client()`) | Tests without AWS or Docker | No credentials, and other accounts' queues and topics are just missing; filter policy errors leave out the parser position SNS appends; long polls that a stopping consumer aborts end at once (`MemoryBroker(orphaned_polls=True)` serves them as SQS does) |
+| MiniStack | End-to-end tests without Docker | Accepts many queue and SNS attributes, names and FIFO ids that AWS refuses; differs in receipt handles of earlier receives, `Number` values, numeric filters on `String` attributes, and X-Ray headers and `Binary` values through SNS |
+| LocalStack | End-to-end tests with Docker | Accepts out-of-range queue attributes and a dead-letter queue of the other type; differs in FIFO receipt handles and duplicates, `Number` values, `wildcard` filters and presigned URL expiry |
+
+Neither emulator enforces SQS's 60 seconds between deleting a queue and creating it again or
+between two purges, drops SNS deliveries to queues encrypted with `alias/aws/sqs` as AWS does, or
+refuses unknown credentials. Every finding, the recorded runs and how to probe an account of your
+own: [Parity with AWS](docs/parity/README.md).
+
 ## Learn more
 
 | | |

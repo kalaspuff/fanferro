@@ -253,7 +253,8 @@ jobs:
           tag_name: ${{ env.TAG }}
           name: fanferro ${{ needs.verify.outputs.version }}
           body_path: RELEASE_NOTES.md
-          prerelease: ${{ startsWith(needs.verify.outputs.version, '0.') }}
+          # GitHub picks the latest release by date and version: an older tag released again does not take over.
+          make_latest: legacy
           files: dist/*
 
   pypi:
