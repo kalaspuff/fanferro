@@ -29,6 +29,9 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 - **memory:** Errors of the in-memory broker carry what AWS sends: status 400 for a missing queue,
   the service's own text in failed batch entries (`EmptyValue` for an empty body), and AWS's texts
   for too large messages, invalid characters and a missing payload behind a presigned URL (#150)
+- FIFO group ids, deduplication ids and message ids used as deduplication ids must be 1-128 ASCII
+  letters, digits and punctuation, as SQS and SNS require: others raise `ValidationError` before
+  sending instead of failing at AWS (and passing on the in-memory broker) (#151)
 
 ## [0.6.0] - 2026-10-31
 

@@ -413,3 +413,73 @@ async fn batches_upload_a_bounded_number_of_payloads_at_once() {
     assert_eq!(uploads.puts.take_peak(), MAX_CONCURRENT_UPLOADS);
     assert_eq!(broker.queue_messages(&url).unwrap().len(), 100);
 }
+
+#[tokio::test]
+async fn fifo_ids_are_validated_before_sending() {
+    // docs/parity M8: SQS and SNS refuse group and deduplication ids that are not 1-128 ASCII
+    // letters, digits and punctuation; fanferro sent them and failed at the service.
+    let (_, client) = setup(ClientConfig::default()).await;
+    let fifo_queue =
+        Destination::Queue { url: "u".into(), fifo: true, content_based_deduplication: false, max_message_size: None };
+    let fifo_topic =
+        Destination::Topic { arn: "a".into(), fifo: true, content_based_deduplication: false, max_message_size: None };
+    let content_based =
+        Destination::Topic { arn: "a".into(), fifo: true, content_based_deduplication: true, max_message_size: None };
+    for destination in [&fifo_queue, &fifo_topic] {
+        for (group, deduplication, id, expected) in [
+            (
+                "a b",
+                None,
+                "m",
+                "group_id must be 1-128 ASCII letters, digits and punctuation characters (no spaces), got \"a b\"",
+            ),
+            (&*"g".repeat(129), None, "m", "group_id must be"),
+            ("gr\u{fc}n", None, "m", "group_id must be"),
+            (
+                "g",
+                Some("d d"),
+                "m",
+                "deduplication_id must be 1-128 ASCII letters, digits and punctuation characters (no spaces), got \"d d\"",
+            ),
+            ("g", Some(""), "m", "deduplication_id must be"),
+            (
+                "g",
+                None,
+                "order 1",
+                "the message id is the FIFO deduplication id unless deduplication_id is set: it must be 1-128 ASCII letters",
+            ),
+        ] {
+            let mut outgoing = message(id, "x");
+            outgoing.group_id = Some(group.into());
+            outgoing.deduplication_id = deduplication.map(str::to_string);
+            let err = client.publish(destination, outgoing).await.unwrap_err();
+            assert!(matches!(err, Error::Validation(_)), "{err}");
+            assert!(err.to_string().contains(expected), "{err}");
+        }
+    }
+    // Content-based deduplication does not use the message id; a group id on a standard queue is
+    // checked too (fair queueing).
+    let mut outgoing = message("order 1", "x");
+    outgoing.group_id = Some("g".into());
+    let err = client.publish(&content_based, outgoing).await.unwrap_err();
+    assert!(!err.to_string().contains("message id"), "{err}");
+    let mut grouped = message("m", "x");
+    grouped.group_id = Some("tenant a".into());
+    let err = client.publish(&queue("u"), grouped).await.unwrap_err();
+    assert!(err.to_string().contains("group_id must be"), "{err}");
+}
+
+#[tokio::test]
+async fn fifo_ids_of_letters_digits_and_punctuation_are_sent() {
+    let (broker, client) = setup(ClientConfig::default()).await;
+    let fifo = StringMap::from([("FifoQueue".to_string(), "true".to_string())]);
+    let url = client.backend().sqs.create_queue("q.fifo", &fifo, &StringMap::new()).await.unwrap();
+    let destination =
+        Destination::Queue { url: url.clone(), fifo: true, content_based_deduplication: false, max_message_size: None };
+    let punctuation = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
+    let mut outgoing = message(&"m".repeat(128), "x");
+    outgoing.group_id = Some(format!("Group-1{punctuation}"));
+    client.publish(&destination, outgoing).await.unwrap();
+    let stored = broker.queue_messages(&url).unwrap();
+    assert_eq!(stored[0].group_id.as_deref(), Some(format!("Group-1{punctuation}").as_str()));
+}

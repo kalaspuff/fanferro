@@ -277,6 +277,24 @@ async def test_fifo_order_and_deduplication(client_factory: ClientFactory, name:
     assert len(seen) == 12, "the duplicate send was deduplicated"
 
 
+async def test_fifo_ids_are_validated_before_sending(client_factory: ClientFactory, name: Any) -> None:
+    # docs/parity M8: SQS refuses group and deduplication ids that are not 1-128 ASCII letters,
+    # digits and punctuation; the message id is the deduplication id unless one is given.
+    client = client_factory()
+    queue = client.queue(f"{name('fifo-ids')}.fifo")
+    async with client:
+        for options, field in [
+            ({"group_id": "tenant a"}, "group_id"),
+            ({"group_id": "g" * 129}, "group_id"),
+            ({"group_id": "g", "deduplication_id": "order 1"}, "deduplication_id"),
+            ({"group_id": "g", "id": "order 1"}, "message id"),
+        ]:
+            with pytest.raises(fanferro.ValidationError, match=field):
+                await queue.send({"x": 1}, **options)
+        await queue.send({"x": 1}, group_id="tenant-a/eu:1", id="order#1")
+        assert [m.group_id for m in await drain_queue(client, queue)] == ["tenant-a/eu:1"]
+
+
 @pytest.mark.parametrize(("scope", "delivered"), [("messageGroup", ["a", "b"]), ("queue", ["a"])])
 async def test_fifo_deduplication_scope(
     client_factory: ClientFactory, name: Any, scope: Literal["queue", "messageGroup"], delivered: list[str]

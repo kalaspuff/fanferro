@@ -200,7 +200,9 @@ Use FIFO resources (`"name.fifo"`) and a group id per entity:
 `client.topic("ledger.fifo", group_id=lambda m: m.body.account_id)`. Same-group messages are
 processed sequentially, each after the previous one's delete is confirmed (`strict_ordering=False`
 acks in the background: faster, but a failed delete reorders the group); publishing the same `id`
-twice within 5 minutes is deduplicated.
+twice within 5 minutes is deduplicated. Group ids, deduplication ids and the message `id` (the
+deduplication id by default) must be 1-128 ASCII letters, digits and punctuation (no spaces);
+others raise `ValidationError` before sending.
 
 ## Large messages
 

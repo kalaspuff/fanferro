@@ -492,6 +492,21 @@ fn enqueue(state: &mut State, queue_url: &str, operation: &'static str, request:
             ),
         ));
     }
+    for (parameter, id) in
+        [("MessageGroupId", &request.group_id), ("MessageDeduplicationId", &request.deduplication_id)]
+    {
+        if let Some(id) = id
+            && !crate::publish::is_fifo_id(id)
+        {
+            return Err(invalid(
+                "sqs",
+                operation,
+                format!(
+                    "Value {id} for parameter {parameter} is invalid. Reason: {parameter} can only include alphanumeric and punctuation characters. 1 to 128 in length."
+                ),
+            ));
+        }
+    }
     let now = Instant::now();
     let mut deduplication_id = request.deduplication_id;
     // SQS moves messages to a dead-letter queue without deduplicating them.
@@ -1261,6 +1276,24 @@ fn publish_locked(inner: &Inner, state: &mut State, topic_arn: &str, request: Pu
                 "InvalidParameter",
                 "Invalid parameter: The MessageGroupId parameter is required for FIFO topics",
             ));
+        }
+        // SNS refuses the ids SQS refuses (docs/parity M8; its text is open question O7).
+        for (parameter, id) in
+            [("MessageGroupId", &request.group_id), ("MessageDeduplicationId", &request.deduplication_id)]
+        {
+            if let Some(id) = id
+                && !crate::publish::is_fifo_id(id)
+            {
+                return Err(aws_error(
+                    "sns",
+                    "Publish",
+                    AwsErrorKind::InvalidRequest,
+                    "InvalidParameter",
+                    format!(
+                        "Invalid parameter: {parameter} Reason: {parameter} can only include alphanumeric and punctuation characters. 1 to 128 in length."
+                    ),
+                ));
+            }
         }
         if deduplication_id.is_none() {
             if topic.attributes.get("ContentBasedDeduplication").map(String::as_str) == Some("true") {
