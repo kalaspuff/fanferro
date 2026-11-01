@@ -83,8 +83,8 @@ import fanferro
 from fanferro import aws
 
 client = fanferro.Client()
-# The queue is assumed to be subscribed to the topics S3 and SES send to by your
-# infrastructure as code (Terraform, say).
+# In this example, the queue is assumed to be subscribed to the topics S3 and SES send
+# to by your infrastructure as code (Terraform, say).
 consumer = client.consumer(client.queue("aws-events"))
 
 
