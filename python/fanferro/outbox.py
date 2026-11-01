@@ -28,13 +28,13 @@ import itertools
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from fanferro._utils import Duration, seconds
 from fanferro.messages import BatchFailure, PreparedMessage, PublishResult
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Coroutine, Sequence
 
     from fanferro.client import Client
 
@@ -105,6 +105,9 @@ class OutboxStore(Protocol):
 _MAX_FAILING_RECORDS = 10_000
 """Records whose failures a relay counts (the oldest are forgotten first)."""
 
+_MAX_CONCURRENT_GROUPS = 8
+"""FIFO message groups a relay round publishes at once (each group's records one after another)."""
+
 
 class _HeldBack(Exception):  # noqa: N818 - not an error of the record itself
     """A FIFO record not attempted because an earlier record of its group failed this round."""
@@ -116,6 +119,38 @@ class _NotAttempted(Exception):  # noqa: N818 - not an error of the record itsel
     """Passed to ``mark_failed`` for a record the round did not attempt (stores without ``release``)."""
 
     retryable = True
+
+
+async def _together(coroutines: list[Coroutine[Any, Any, None]]) -> None:
+    """Runs coroutines at once, raising the first error as it is.
+
+    When one raises, the others are cancelled and waited for first. ``KeyboardInterrupt`` is
+    raised here too, rather than handed to the event loop as a task would.
+    """
+    tasks: list[asyncio.Future[BaseException | None]] = []
+
+    async def guarded(coroutine: Coroutine[Any, Any, None]) -> BaseException | None:
+        try:
+            await coroutine
+        except asyncio.CancelledError:
+            raise
+        except BaseException as error:  # noqa: BLE001 - raised by the caller
+            for task in tasks:
+                if task is not asyncio.current_task():
+                    task.cancel()
+            return error
+        return None
+
+    tasks.extend(asyncio.ensure_future(guarded(coroutine)) for coroutine in coroutines)
+    try:
+        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    for outcome in outcomes:
+        if isinstance(outcome, BaseException) and not isinstance(outcome, asyncio.CancelledError):
+            raise outcome
 
 
 class _Round:
@@ -132,38 +167,52 @@ class _Round:
         self._unsettled = dict(self._records)
         """Claimed records whose claims the store has not released yet."""
         self.failed: list[tuple[OutboxRecord, BaseException]] = []
+        self._store_turn = asyncio.Lock()
+        """Held around calls to the store: groups publish at once, but the store sees one call at a time."""
 
     async def run(self) -> None:
-        relay = self.relay
         standard = [r for r in self.records if not r.message.destination.get("fifo")]
-        fifo = [r for r in self.records if r.message.destination.get("fifo")]
-        if standard:
-            failures: list[tuple[OutboxRecord, BaseException]] = []
+        groups: dict[str | None, list[OutboxRecord]] = {}
+        for record in self.records:
+            if record.message.destination.get("fifo"):
+                groups.setdefault(record.message.fifo_group, []).append(record)
+        limit = asyncio.Semaphore(_MAX_CONCURRENT_GROUPS)
+
+        async def in_order(records: list[OutboxRecord]) -> None:
+            async with limit:
+                await self._publish_group(records)
+
+        await _together([self._publish_standard(standard), *map(in_order, groups.values())])
+
+    async def _publish_standard(self, records: list[OutboxRecord]) -> None:
+        """Publishes records of standard destinations in batches (the destinations at once)."""
+        if not records:
+            return
+        failures: list[tuple[OutboxRecord, BaseException]] = []
+        try:
+            batch = await self.relay.client.publish_prepared_batch([r.message for r in records])
+        except Exception as error:  # noqa: BLE001 - every record of the batch failed
+            failures = [(record, error) for record in records]
+        else:
+            for record, result in zip(records, batch.results, strict=True):
+                if isinstance(result, PublishResult):
+                    self._published(record)
+                elif isinstance(result, BatchFailure):
+                    failures.append((record, result.error))
+        await self.mark_published()
+        for record, error in failures:
+            await self.failed_attempt(record, error)
+
+    async def _publish_group(self, records: list[OutboxRecord]) -> None:
+        """Publishes one FIFO group's records one by one in order, holding back the rest after a failure."""
+        for position, record in enumerate(records):
             try:
-                batch = await relay.client.publish_prepared_batch([r.message for r in standard])
-            except Exception as error:  # noqa: BLE001 - every record of the batch failed
-                failures = [(record, error) for record in standard]
-            else:
-                for record, result in zip(standard, batch.results, strict=True):
-                    if isinstance(result, PublishResult):
-                        self._published(record)
-                    elif isinstance(result, BatchFailure):
-                        failures.append((record, result.error))
-            await self.mark_published()
-            for record, error in failures:
+                await self.relay.client.publish_prepared(record.message)
+            except Exception as error:  # noqa: BLE001 - record and hold back the rest of the group
                 await self.failed_attempt(record, error)
-        blocked: set[str | None] = set()
-        for record in fifo:
-            group = record.message.fifo_group
-            if group in blocked:
-                await self.failed_attempt(record, _HeldBack("an earlier message of the group failed"))
-                continue
-            try:
-                await relay.client.publish_prepared(record.message)
-            except Exception as error:  # noqa: BLE001 - record and continue with other groups
-                blocked.add(group)
-                await self.failed_attempt(record, error)
-                continue
+                for held_back in records[position + 1 :]:
+                    await self.failed_attempt(held_back, _HeldBack("an earlier message of the group failed"))
+                return
             self._published(record)
 
     def _published(self, record: OutboxRecord) -> None:
@@ -174,7 +223,8 @@ class _Round:
         """Tells the store (an error of the store is logged: the round goes on)."""
         self.failed.append((record, error))
         try:
-            await self.relay._failed(record, error)
+            async with self._store_turn:
+                await self.relay._failed(record, error)
         except Exception:
             # The claim may still be held: settle() releases it with the records not attempted.
             _LOGGER.exception("outbox store failed to record the failed attempt of record %s", record.id)
@@ -184,6 +234,10 @@ class _Round:
 
     async def mark_published(self) -> None:
         """Marks the records published since the last call."""
+        async with self._store_turn:
+            await self._mark_published()
+
+    async def _mark_published(self) -> None:
         ids = self.published[self._marked :]
         if not ids:
             return
@@ -305,9 +359,11 @@ class InMemoryOutbox:
 class OutboxRelay:
     """Publishes pending outbox records.
 
-    Records for standard destinations are sent in batches. Records for FIFO destinations are sent
-    one by one in order, and a failure stops the rest of that message group for the round, so the
-    group's order is preserved. Several relays keep that order only if the store claims the
+    Records for standard destinations are sent in batches, one batch per destination, all at once.
+    Records for FIFO destinations are sent one by one in order within their message group, and a
+    failure stops the rest of that group for the round, so the group's order is preserved; up to
+    eight groups are sent at once, alongside the batches. The relay calls the store one call at a
+    time. Several relays keep that order only if the store claims the
     records of a FIFO group exclusively (see :meth:`OutboxStore.claim_batch`); otherwise run a
     single relay for FIFO destinations.
 
