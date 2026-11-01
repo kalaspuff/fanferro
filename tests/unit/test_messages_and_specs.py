@@ -382,7 +382,7 @@ def test_consumer_options() -> None:
     assert client.consumer(queue, _noop, concurrency=4)._extra_poller_slots == 4
     assert client.consumer(queue, _noop, prefetch=10)._extra_poller_slots == 0, "an explicit prefetch is a bound"
     assert client.consumer(queue, _noop, pollers=2, max_pollers=2).max_pollers == 2
-    for options, error in (
+    invalid: list[tuple[fanferro.ConsumerOptions, str]] = [
         ({"min_receive_batch": 0}, "min_receive_batch"),
         ({"batch_size": 5, "min_receive_batch": 6}, "min_receive_batch"),
         ({"receive_batch_wait": -1}, "receive_batch_wait"),
@@ -391,7 +391,8 @@ def test_consumer_options() -> None:
         ({"pollers": 4, "max_pollers": 3}, "max_pollers"),
         ({"max_pollers": 65}, "max_pollers"),
         ({"prefetch": -1}, "prefetch"),
-    ):
+    ]
+    for options, error in invalid:
         with pytest.raises(ValueError, match=error):
             client.consumer(queue, _noop, **options)
 

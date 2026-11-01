@@ -229,7 +229,20 @@ class IdempotencyMiddleware:
             _report_error(message, f"could not mark message {message.id} as processed", error)
 
 
-def idempotent(store: IdempotencyStore | None = None, **options: Any) -> IdempotencyMiddleware:
-    """Creates an :class:`IdempotencyMiddleware` (in-memory store by default)."""
+def idempotent(
+    store: IdempotencyStore | None = None,
+    *,
+    key: Callable[[Message[Any]], str] = _default_key,
+    ttl: Duration = 7 * 24 * 3600,
+    lock_ttl: Duration = 15 * 60,
+    retry_delay: Duration = 30.0,
+) -> IdempotencyMiddleware:
+    """Creates an :class:`IdempotencyMiddleware` (in-memory store by default; see it for the options)."""
     # Not `store or ...`: an empty InMemoryIdempotencyStore is falsy (it has a length).
-    return IdempotencyMiddleware(store if store is not None else InMemoryIdempotencyStore(), **options)
+    return IdempotencyMiddleware(
+        store if store is not None else InMemoryIdempotencyStore(),
+        key=key,
+        ttl=ttl,
+        lock_ttl=lock_ttl,
+        retry_delay=retry_delay,
+    )

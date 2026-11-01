@@ -33,7 +33,7 @@ Example::
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Unpack
 
 from fanferro._core import MemoryBroker, Payload, new_message_id
 from fanferro._utils import Duration, optional_seconds, seconds
@@ -45,6 +45,7 @@ from fanferro.provisioning import Provisioning
 
 if TYPE_CHECKING:
     from fanferro.aws_lambda import LambdaContext, SqsEventHandler
+    from fanferro.options import ClientOptions
     from fanferro.resources import Queue
 
 __all__ = [
@@ -57,17 +58,18 @@ __all__ = [
 ]
 
 
-def memory_client(*, broker: MemoryBroker | None = None, **options: Any) -> Client:
+def memory_client(**options: Unpack[ClientOptions]) -> Client:
     """A client backed by an in-memory broker; resources are created on demand by default.
 
     Args:
-        broker: Share a broker between clients (default: a new one).
-        **options: Any :class:`fanferro.Client` option (``provisioning`` defaults to
-            :meth:`Provisioning.ensure`).
+        **options: Any :class:`fanferro.Client` option (:class:`fanferro.ClientOptions`):
+            ``broker`` shares a broker between clients (default: a new one), ``provisioning``
+            defaults to :meth:`Provisioning.ensure` and ``region`` to ``"us-east-1"``.
     """
     options.setdefault("provisioning", Provisioning.ensure())
     options.setdefault("region", "us-east-1")
-    return Client(broker=broker or MemoryBroker(), **options)
+    broker = options.pop("broker", None)
+    return Client(broker=broker if broker is not None else MemoryBroker(), **options)
 
 
 @dataclass

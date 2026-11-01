@@ -3,6 +3,16 @@
 Every option of the public configuration surface. `scripts/check_consistency.py` verifies that
 each parameter and field listed here exists in the code and that every one in the code is listed.
 
+Methods that pass keyword options on take them typed as `**options: Unpack[...]`, with the
+TypedDicts of `fanferro.options`, so type checkers report a misspelt or mistyped option:
+`ClientOptions` (`fanferro.testing.memory_client`), `ConsumerOptions` (`client.consumer`,
+`queue.consumer`), `SubscriptionOptions` (`topic.subscribe`, `queue.subscribe_to`),
+`ProvisioningOverrides` (`Provisioning.existing/create_missing/ensure/assume`), and
+`TopicPublishOptions`/`QueuePublishOptions` (`publish`, `send`, `prepare`, `publish_batch`,
+`send_batch`; see the [publishing guide](../guides/publishing.md#options)). A TypedDict also holds
+options shared by several calls: `options: fanferro.ConsumerOptions = {"concurrency": 20}`.
+`scripts/check_consistency.py` checks that each one matches the parameters it stands for.
+
 ## `Client(...)`
 
 | Parameter | Default | Description |
