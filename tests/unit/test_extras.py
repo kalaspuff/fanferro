@@ -6,7 +6,7 @@ import ast
 import asyncio
 import re
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Awaitable, Sequence
 from pathlib import Path
 
 import pytest
@@ -341,7 +341,7 @@ async def test_an_outbox_store_error_on_a_failed_record_does_not_end_the_round(m
         await gone.delete()
         relay = OutboxRelay(memory_client, outbox)
         assert await relay.run_once() == 3
-        assert outbox.published == [*sent, ordered]
+        assert sorted(outbox.published) == sorted([*sent, ordered]), "FIFO groups and batches go out at once"
         assert outbox.claimed == [], "the record whose failure was not recorded is released"
         assert [(r.id, r.attempts) for r in outbox.pending] == [(lost, 0)]
         assert await relay.run_once() == 0
@@ -413,6 +413,8 @@ async def test_a_cancelled_outbox_round_marks_what_it_published(
             patched.setattr(memory_client, "publish_prepared", hang)
             task = asyncio.create_task(relay.run())
             await asyncio.wait_for(sending.wait(), 5)
+            # The standard records' batch goes out alongside the FIFO group.
+            await wait_for(lambda: len(outbox.published) == 2)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
@@ -501,6 +503,77 @@ async def test_several_outbox_relays_keep_each_fifo_group_in_order(memory_client
         received = [message.json() for message in await drain_queue(memory_client, fifo)]
     for group in ("a", "b", "c"):
         assert [body["n"] for body in received if body["group"] == group] == list(range(6))
+
+
+class _Overlap:
+    """Counts calls in progress at once (the highest count in ``peak``)."""
+
+    def __init__(self) -> None:
+        self.running = 0
+        self.peak = 0
+
+    async def around[T](self, call: Awaitable[T]) -> T:
+        self.running += 1
+        self.peak = max(self.peak, self.running)
+        try:
+            await asyncio.sleep(0.05)
+            return await call
+        finally:
+            self.running -= 1
+
+
+async def test_an_outbox_round_publishes_fifo_groups_at_once(
+    memory_client: fanferro.Client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # FIFO records went out one at a time across every group: a round cost a round trip per record.
+    outbox = InMemoryOutbox()
+    fifo = memory_client.queue("outbox-lanes.fifo")
+    overlap = _Overlap()
+    publish = memory_client.publish_prepared
+    poisoned: set[str] = set()
+
+    async def slow(prepared: fanferro.PreparedMessage) -> fanferro.PublishResult:
+        if prepared.message_id in poisoned:
+            raise fanferro.ValidationError("refused")
+        return await overlap.around(publish(prepared))
+
+    async with memory_client:
+        records: dict[str, list[str]] = {}
+        for n in range(3):
+            for group in ("a", "b", "c", "d"):
+                prepared = await fifo.prepare({"group": group, "n": n}, group_id=group)
+                records.setdefault(group, []).append(outbox.add(prepared, record_id=prepared.message_id))
+        poisoned.add(records["c"][1])
+        relay = OutboxRelay(memory_client, outbox)
+        monkeypatch.setattr(memory_client, "publish_prepared", slow)
+        assert await relay.run_once() == 10
+        assert overlap.peak == 4, "the groups were not published at once"
+        assert [r.id for r in outbox.pending] == records["c"][1:], "the failure held back only its own group"
+        assert [r.attempts for r in outbox.pending] == [1, 1]
+        received = [message.json() for message in await drain_queue(memory_client, fifo)]
+    for group in ("a", "b", "d"):
+        assert [body["n"] for body in received if body["group"] == group] == [0, 1, 2]
+    assert [body["n"] for body in received if body["group"] == "c"] == [0]
+
+
+async def test_prepared_batches_send_their_destinations_at_once(
+    memory_client: fanferro.Client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    overlap = _Overlap()
+    transport_for = memory_client._transport_for_destination
+
+    async def slow(prepared: fanferro.PreparedMessage) -> object:
+        return await overlap.around(transport_for(prepared))
+
+    queues = [memory_client.queue(f"prepared-lanes-{i}") for i in range(3)]
+    async with memory_client:
+        messages = [await queues[n % 3].prepare({"n": n}) for n in range(9)]
+        monkeypatch.setattr(memory_client, "_transport_for_destination", slow)
+        batch = await memory_client.publish_prepared_batch(messages, raise_on_failure=True)
+        assert overlap.peak == 3
+        assert [result.message_id for result in batch.successful] == [m.message_id for m in messages]
+        for queue in queues:
+            assert len(await drain_queue(memory_client, queue)) == 3
 
 
 async def test_prepared_batches_report_events(memory_client: fanferro.Client) -> None:
