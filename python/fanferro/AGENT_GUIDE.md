@@ -92,7 +92,7 @@ result = await events.publish(InvoicePaid(invoice_id="inv-1", amount_cents=1299)
 | Consume | `consumer = client.consumer(queue, ...)`, `@consumer.route(Type)`, `await consumer.run()` |
 | Route | `fanferro.Router()`, `router.route(Type, when=matchers..., priority=...)`, `router.default` |
 | Settle manually | `await message.ack() / retry(delay=) / requeue() / dead_letter(reason) / release() / discard(reason)` (settles when called; await the returned `Settlement` for SQS's confirmation) |
-| Observe | `client.on("message.*", hook)`, `LoggingConfig(...)`, `Telemetry(...)`, `client.metrics()` |
+| Observe | `client.on("message.*", hook)`, `LoggingConfig(...)`, `Telemetry(...)`, `client.metrics().consumers[name].engine.messages_acked`, `consumer.stats().processed`, `(await queue.approximate_count()).visible` (typed objects; `.as_dict()` for a dict) |
 | Test | `fanferro.testing.memory_client()`, `fanferro.testing.build_message(obj)`, `consumer.run_until_idle()` |
 | Consume in AWS Lambda | `handler = fanferro.aws_lambda.sqs_handler(client, router, queue=queue)` (SQS event source mapping with `ReportBatchItemFailures`); test with `fanferro.testing.invoke_sqs_handler(handler, queue)` |
 

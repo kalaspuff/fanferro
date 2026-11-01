@@ -30,10 +30,10 @@ async def test_heartbeats_protect_slow_handlers(client_factory: ClientFactory, n
 
     async with client:
         await queue.send(OrderCreated(order_id=1))
-        await consume_until(consumer, lambda: consumer.stats()["processed"] == 1, timeout=30)
+        await consume_until(consumer, lambda: consumer.stats().processed == 1, timeout=30)
     assert receive_counts == [1], "the message must not be redelivered while it is being processed"
     assert len(extended) >= 3
-    assert consumer.stats()["engine"]["lease_extensions"] >= 3
+    assert consumer.stats().engine.lease_extensions >= 3
 
 
 async def test_sub_second_visibility_timeouts_round_up(client_factory: ClientFactory, name: Any) -> None:
@@ -82,7 +82,7 @@ async def test_graceful_shutdown_waits_for_in_flight(client_factory: ClientFacto
         assert finished == [1]
         assert consumer.state == "stopped"
         assert draining, "progress events are emitted while draining"
-        assert (await queue.approximate_count()) == {"visible": 0, "in_flight": 0, "delayed": 0}
+        assert (await queue.approximate_count()) == fanferro.QueueCounts(visible=0, in_flight=0, delayed=0)
 
 
 async def test_drain_timeout_cancels_and_releases(client_factory: ClientFactory, name: Any) -> None:
@@ -143,9 +143,9 @@ async def test_unfinished_messages_are_left_when_not_released(client_factory: Cl
         await wait_for(lambda: len(started) == 3)
         await consumer.stop()
         counts = await queue.approximate_count()
-    assert counts["visible"] == 0, counts
-    assert counts["in_flight"] == 3, counts
-    assert consumer.stats()["engine"]["messages_released"] == 0
+    assert counts.visible == 0, counts
+    assert counts.in_flight == 3, counts
+    assert consumer.stats().engine.messages_released == 0
 
 
 async def test_a_busy_consumer_releases_unfinished_messages_at_once(client_factory: ClientFactory, name: Any) -> None:
@@ -171,7 +171,7 @@ async def test_a_busy_consumer_releases_unfinished_messages_at_once(client_facto
         await consumer.stop()
         await asyncio.sleep(2)
         counts = await queue.approximate_count()
-    assert counts["visible"] == 1, counts
+    assert counts.visible == 1, counts
 
 
 # Stopping wakes the dispatcher's and the event pump's waits and aborts the long poll in flight: it
@@ -198,7 +198,7 @@ async def test_stop_returns_immediately_when_idle(client_factory: ClientFactory,
 
     async with client:
         await consumer.start()
-        await wait_for(lambda: consumer.stats()["engine"].get("receive_requests", 0) >= 1)
+        await wait_for(lambda: consumer.stats().engine.receive_requests >= 1)
         await asyncio.sleep(0.2)  # a long poll is in flight
         began = time.monotonic()
         await consumer.stop()
@@ -250,8 +250,8 @@ async def test_stop_waits_for_running_handlers(client_factory: ClientFactory, na
         elapsed = time.monotonic() - began
         assert finished == [1]
         assert 0.5 < elapsed < 2.5, f"stop() took {elapsed:.3f} s"
-        assert consumer.stats()["engine"]["messages_acked"] == 1
-        assert (await queue.approximate_count()) == {"visible": 0, "in_flight": 0, "delayed": 0}
+        assert consumer.stats().engine.messages_acked == 1
+        assert (await queue.approximate_count()) == fanferro.QueueCounts(visible=0, in_flight=0, delayed=0)
 
 
 async def test_stop_mid_stream_loses_nothing(client_factory: ClientFactory, name: Any) -> None:
@@ -294,7 +294,7 @@ async def test_stop_can_wait_for_the_last_long_poll(client_factory: ClientFactor
 
     async with client:
         await first.start()
-        await wait_for(lambda: first.stats()["engine"].get("receive_requests", 0) >= 1)
+        await wait_for(lambda: first.stats().engine.receive_requests >= 1)
         await first.stop()  # waits up to wait_time for the long poll in flight
         # No abandoned long poll can hide this message: the next consumer gets it right away.
         await queue.send(OrderCreated(order_id=1))
@@ -342,10 +342,10 @@ async def test_acks_are_batched(client_factory: ClientFactory, name: Any) -> Non
 
     async with client:
         await queue.send_batch([OrderCreated(order_id=i) for i in range(50)])
-        await consume_until(consumer, lambda: consumer.stats()["engine"].get("messages_acked", 0) == 50, timeout=30)
-    engine = consumer.stats()["engine"]
+        await consume_until(consumer, lambda: consumer.stats().engine.messages_acked == 50, timeout=30)
+    engine = consumer.stats().engine
     assert sorted(done) == list(range(50))
-    assert engine["delete_requests"] <= 10, engine
+    assert engine.delete_requests <= 10, engine
 
 
 async def test_handlers_do_not_wait_for_automatic_acks(client_factory: ClientFactory, name: Any) -> None:
@@ -364,10 +364,10 @@ async def test_handlers_do_not_wait_for_automatic_acks(client_factory: ClientFac
         began = time.monotonic()
         await wait_for(lambda: len(done) == 10)
         handled = time.monotonic() - began
-        await wait_for(lambda: consumer.stats()["engine"].get("messages_acked", 0) == 10)
+        await wait_for(lambda: consumer.stats().engine.messages_acked == 10)
         await consumer.stop()
     assert handled < 0.9, f"handlers waited for lingering acks ({handled:.2f} s)"
-    assert consumer.stats()["engine"]["delete_requests"] == 1
+    assert consumer.stats().engine.delete_requests == 1
 
 
 async def test_stop_completes_automatic_acks(client_factory: ClientFactory, name: Any) -> None:
@@ -384,10 +384,10 @@ async def test_stop_completes_automatic_acks(client_factory: ClientFactory, name
         await queue.send_batch([OrderCreated(order_id=i) for i in range(3)])
         await consumer.start()
         await wait_for(lambda: len(done) == 3)
-        assert consumer.stats()["engine"]["messages_acked"] == 0, "the deletes linger"
+        assert consumer.stats().engine.messages_acked == 0, "the deletes linger"
         await consumer.stop()  # waits for the deletes handlers no longer wait for
-        assert consumer.stats()["engine"]["messages_acked"] == 3
-        assert (await queue.approximate_count()) == {"visible": 0, "in_flight": 0, "delayed": 0}
+        assert consumer.stats().engine.messages_acked == 3
+        assert (await queue.approximate_count()) == fanferro.QueueCounts(visible=0, in_flight=0, delayed=0)
 
 
 async def test_explicit_acks_are_not_delayed_by_the_linger(client_factory: ClientFactory, name: Any) -> None:
@@ -423,12 +423,12 @@ async def test_receives_are_full_batches(client_factory: ClientFactory, name: An
 
     async with client:
         await queue.send_batch([{"n": i} for i in range(2000)])
-        await consume_until(consumer, lambda: consumer.stats()["engine"].get("messages_acked", 0) == 2000, timeout=120)
-    engine = consumer.stats()["engine"]
+        await consume_until(consumer, lambda: consumer.stats().engine.messages_acked == 2000, timeout=120)
+    engine = consumer.stats().engine
     assert handled == 2000
-    per_receive = engine["messages_received"] / (engine["receive_requests"] - engine["empty_receives"])
+    per_receive = engine.messages_received / (engine.receive_requests - engine.empty_receives)
     assert per_receive >= 9.5, engine
-    assert engine["delete_requests"] <= 240, engine
+    assert engine.delete_requests <= 240, engine
 
 
 async def test_a_backlog_is_received_by_extra_receive_loops(client_factory: ClientFactory, name: Any) -> None:
@@ -441,7 +441,7 @@ async def test_a_backlog_is_received_by_extra_receive_loops(client_factory: Clie
     @consumer.default
     async def handle(message: fanferro.Message[bytes]) -> None:
         nonlocal handled
-        pollers.append(consumer.stats()["engine"]["pollers"])
+        pollers.append(consumer.stats().engine.pollers)
         await asyncio.sleep(0.05)
         handled += 1
 
@@ -451,10 +451,10 @@ async def test_a_backlog_is_received_by_extra_receive_loops(client_factory: Clie
         await wait_for(lambda: handled == 1000, timeout=120)
         assert max(pollers) > 1, "a single receive loop drained the backlog"
         # Extra loops end at their first receive that is not full: one long poll is left.
-        await wait_for(lambda: consumer.stats()["engine"]["pollers"] == 1, timeout=10)
-        before = consumer.stats()["engine"]["receive_requests"]
+        await wait_for(lambda: consumer.stats().engine.pollers == 1, timeout=10)
+        before = consumer.stats().engine.receive_requests
         await asyncio.sleep(2)
-        assert consumer.stats()["engine"]["receive_requests"] - before <= 3
+        assert consumer.stats().engine.receive_requests - before <= 3
         await consumer.stop()
 
 
@@ -677,7 +677,7 @@ async def test_concurrent_stops_wait_for_the_stop_in_progress(memory_client: fan
         finish.set()
         await asyncio.wait_for(asyncio.gather(first, second), 10)
         assert consumer.state == "stopped"
-        assert consumer.stats()["processed"] == 1
+        assert consumer.stats().processed == 1
 
         # A shorter drain timeout cuts a stop in progress short.
         finish.clear()
@@ -736,13 +736,13 @@ async def test_prefetched_messages_are_released_when_stopping(client_factory: Cl
         await queue.send_batch([OrderCreated(order_id=index) for index in range(6)])
         await consumer.start()
         await asyncio.wait_for(started.wait(), 15)
-        await wait_for(lambda: consumer.stats()["engine"].get("in_flight", 0) == 6)
+        await wait_for(lambda: consumer.stats().engine.in_flight == 6)
         stopping = asyncio.create_task(consumer.stop())
         # The slow handler drains for 5 s; the prefetched messages must not wait for it.
         await asyncio.sleep(2)
         counts = await queue.approximate_count()
         assert not stopping.done()
-        assert counts["visible"] == 5, counts
+        assert counts.visible == 5, counts
         await stopping
 
 
@@ -785,7 +785,7 @@ async def test_events_and_metrics(client_factory: ClientFactory, name: Any) -> N
 
     async with client:
         await queue.send(OrderCreated(order_id=1))
-        await consume_until(consumer, lambda: consumer.stats()["processed"] == 1)
+        await consume_until(consumer, lambda: consumer.stats().processed == 1)
         await asyncio.sleep(1.2)
     for expected in (
         "resource.created",
@@ -800,11 +800,11 @@ async def test_events_and_metrics(client_factory: ClientFactory, name: Any) -> N
     ):
         assert expected in kinds, expected
     metrics = client.metrics()
-    assert metrics["client"]["messages_published"] == 1
-    stats = metrics["consumers"][consumer.name]
-    assert stats["processed"] == 1
-    assert stats["engine"]["messages_acked"] == 1
-    assert stats["engine"]["in_flight"] == 0
+    assert metrics.client.messages_published == 1
+    stats = metrics.consumers[consumer.name]
+    assert stats.processed == 1
+    assert stats.engine.messages_acked == 1
+    assert stats.engine.in_flight == 0
 
 
 async def test_consumer_state_errors(memory_client: fanferro.Client, name: Any) -> None:
@@ -845,7 +845,7 @@ async def test_tasks_cancelled_before_they_ran_are_forgotten(memory_client: fanf
         began = time.monotonic()
         await consumer.stop()
         assert time.monotonic() - began < 2
-        assert consumer.stats()["active"] == 0
+        assert consumer.stats().active == 0
         await queue.send(OrderCreated(order_id=1))
         await consumer.run_until_idle(idle_for=0.2, timeout=15)
         # Cancelled from outside before it ran: still forgotten.

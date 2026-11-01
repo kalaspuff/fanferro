@@ -26,11 +26,11 @@ fmt:  ## Format and auto-fix
 typecheck:  ## Python type checking
 	uv run pyrefly check
 
-test:  ## Python tests (unit, integration on memory + MiniStack, e2e)
-	uv run pytest
+test:  ## Python tests (unit, integration on memory + MiniStack, e2e), one worker per CPU
+	uv run pytest -n auto --dist worksteal
 
 test-fast:  ## Python tests without the emulator
-	uv run pytest -m "not e2e"
+	uv run pytest -n auto --dist worksteal -m "not e2e"
 
 test-rust:  ## Rust unit tests
 	cargo test --workspace

@@ -202,14 +202,14 @@ class TelemetryRuntime:
                         stats = consumer.stats()
                     except Exception:  # noqa: BLE001, S112 - never break metric collection
                         continue
-                    value = stats.get("engine", {}).get(metric)
-                    if value is not None:
-                        observations.append(
-                            observation(
-                                value,
-                                {"messaging.destination.name": consumer.queue_name, "messaging.system": "aws_sqs"},
-                            )
+                    if stats.engine.state == "created":
+                        continue  # not started yet: nothing to report
+                    observations.append(
+                        observation(
+                            getattr(stats.engine, metric),
+                            {"messaging.destination.name": consumer.queue_name, "messaging.system": "aws_sqs"},
                         )
+                    )
                 return observations
 
             return callback

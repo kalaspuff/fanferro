@@ -42,4 +42,4 @@ handlers: more receives alone reached about 1,450 messages per second in that be
   then stay close to one at a time.
 * While a backlog drains, each extra loop ends with one receive that is not full: a few more
   requests per backlog, not per `wait_time`.
-* `consumer.stats()["engine"]["pollers"]` shows the receive loops running.
+* `consumer.stats().engine.pollers` shows the receive loops running.

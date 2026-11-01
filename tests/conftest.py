@@ -2,7 +2,8 @@
 
 * ``memory_client``: a client on the in-memory broker (fast, no network).
 * ``ministack_endpoint``: URL of an AWS-compatible emulator. Uses ``FANFERRO_TEST_ENDPOINT_URL``
-  when set; otherwise starts a MiniStack process for the session (installed with the test group).
+  when set; otherwise starts a MiniStack process for the session (installed with the test group),
+  one per worker when the tests run in parallel (``-n auto``, pytest-xdist).
 * ``backend_client``: parametrized over ``memory`` and ``ministack`` so integration scenarios run
   against both the in-memory broker and a real AWS protocol implementation.
 
@@ -116,11 +117,14 @@ def ministack_endpoint(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str
         _wait_healthy(url, process)
         yield url
     finally:
+        # MiniStack finishes open requests before it exits, and a long poll a test aborted can
+        # keep it for up to 20 seconds: its state is not needed any more, so it is not waited for.
         process.terminate()
         try:
-            process.wait(timeout=10)
+            process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             process.kill()
+            process.wait()
 
 
 def emulator_client(endpoint: str, **options: object) -> fanferro.Client:

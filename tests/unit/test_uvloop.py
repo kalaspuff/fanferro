@@ -64,7 +64,7 @@ def test_settlements_start_eagerly() -> None:
         async with client:
             await queue.send_batch([{"n": n} for n in range(3)])
             await consumer.run_until_idle(idle_for=0.2, timeout=15)
-            assert (await queue.approximate_count())["visible"] == 0
+            assert (await queue.approximate_count()).visible == 0
         assert len(settlements) == 3
         assert all(settlement.done() for settlement in settlements)
 

@@ -140,7 +140,7 @@ async def test_a_cancelled_resolution_is_not_a_failure(memory_client: fanferro.C
     with pytest.raises(asyncio.CancelledError):
         await sending
     await queue.send({"n": 2})
-    assert (await queue.approximate_count())["visible"] == 1
+    assert (await queue.approximate_count()).visible == 1
 
 
 async def test_assume_mode(client_factory: ClientFactory, name: Any, backend: str) -> None:
@@ -342,8 +342,8 @@ async def test_subscribing_a_queue_encrypted_with_the_aws_managed_key_warns(
     memory_client.subscription(topic, plain)
     async with memory_client:
         await topic.publish({"n": 1})
-        assert (await managed.approximate_count())["visible"] == 0
-        assert (await plain.approximate_count())["visible"] == 1
+        assert (await managed.approximate_count()).visible == 0
+        assert (await plain.approximate_count()).visible == 1
     assert [event.fields["queue"] for event in warnings] == [managed.arn]
     assert "SNS cannot deliver" in warnings[0].message
 
@@ -411,7 +411,7 @@ async def test_provisioning_resolves_resources_concurrently(memory_client: fanfe
     again = await memory_client.provision()
     assert all(o.status == "found" for o in again if isinstance(o, fanferro.ProvisioningReport))
     await topics[1].publish({"n": 1})
-    assert [(await queue.approximate_count())["visible"] for queue in queues] == [1, 1, 1, 1]
+    assert [(await queue.approximate_count()).visible for queue in queues] == [1, 1, 1, 1]
 
 
 async def test_provisioning_bounds_how_many_resolutions_overlap(memory_client: fanferro.Client, name: Any) -> None:
@@ -555,9 +555,9 @@ async def test_late_subscriptions_of_one_queue_rewrite_its_policy_in_turn(
                 shared = {q.name for q in (mine.queue, mine.dead_letter_queue) if q is not None}
                 shared &= {q.name for q in (theirs.queue, theirs.dead_letter_queue) if q is not None}
                 assert not shared, f"{subscription_name} and {other_name} wrote the policy of {shared} at once"
-        assert (await queue.approximate_count())["visible"] == 2
-        assert (await other.approximate_count())["visible"] == 1
-        assert (await dead_letter.approximate_count())["visible"] == 1
+        assert (await queue.approximate_count()).visible == 2
+        assert (await other.approximate_count()).visible == 1
+        assert (await dead_letter.approximate_count()).visible == 1
 
 
 async def test_resolving_subscriptions_of_one_queue_at_once_keeps_every_topic_allowed(
@@ -574,4 +574,4 @@ async def test_resolving_subscriptions_of_one_queue_at_once_keeps_every_topic_al
     assert slow.max_running == 1
     for topic in topics:
         await topic.publish({"n": 1})
-    assert (await queue.approximate_count())["visible"] == len(topics)
+    assert (await queue.approximate_count()).visible == len(topics)

@@ -33,9 +33,9 @@ async def test_retry_then_succeed(client_factory: ClientFactory, name: Any) -> N
 
     async with client:
         await queue.send(OrderCreated(order_id=1))
-        await consume_until(consumer, lambda: consumer.stats()["processed"] == 1)
+        await consume_until(consumer, lambda: consumer.stats().processed == 1)
     assert attempts == [1, 2, 3]
-    assert consumer.stats()["failed"] == 2
+    assert consumer.stats().failed == 2
 
 
 async def test_on_exhausted_retry_runs_the_handler_again(client_factory: ClientFactory, name: Any) -> None:
@@ -59,10 +59,10 @@ async def test_on_exhausted_retry_runs_the_handler_again(client_factory: ClientF
 
     async with client:
         await queue.send(OrderCreated(order_id=1))
-        await consume_until(consumer, lambda: consumer.stats()["processed"] == 1)
+        await consume_until(consumer, lambda: consumer.stats().processed == 1)
     assert attempts == [1, 2, 3, 4]
-    assert consumer.stats()["failed"] == 3
-    assert consumer.stats()["engine"].get("messages_dead_lettered", 0) == 0
+    assert consumer.stats().failed == 3
+    assert consumer.stats().engine.messages_dead_lettered == 0
 
 
 async def test_exhausted_retries_dead_letter_with_metadata(client_factory: ClientFactory, name: Any) -> None:
@@ -86,11 +86,12 @@ async def test_exhausted_retries_dead_letter_with_metadata(client_factory: Clien
     assert message.json() == {"order_id": 9, "total": 0.0}
     info = message.dead_letter_info
     assert info is not None
-    assert info["reason"] == "retries exhausted"
-    assert info["error_type"].endswith("ValueError")
-    assert info["error_message"] == "cannot process 9"
-    assert info["attempt"] == "2"
-    assert info["message_type"] == "test.order_created.v1"
+    assert info.reason == "retries exhausted"
+    assert info.error_type is not None
+    assert info.error_type.endswith("ValueError")
+    assert info.error_message == "cannot process 9"
+    assert info.attempt == 2
+    assert info.message_type == "test.order_created.v1"
 
 
 @pytest.mark.parametrize(("source", "target"), [("", ".fifo"), (".fifo", "")])
@@ -153,8 +154,8 @@ async def test_handler_actions(client_factory: ClientFactory, name: Any) -> None
     assert outcomes[3] == [1, 2], "requeue increments the attempt counter"
     assert outcomes[4] == [1, 2]
     assert [message.json()["order_id"] for message in dead] == [1]
-    assert dead[0].dead_letter_info["reason"] == "invalid order"  # type: ignore[index]
-    assert (await queue.approximate_count())["visible"] == 0
+    assert dead[0].dead_letter_info.reason == "invalid order"  # type: ignore[union-attr]
+    assert (await queue.approximate_count()).visible == 0
 
 
 async def test_explicit_settlement(client_factory: ClientFactory, name: Any) -> None:
@@ -177,7 +178,7 @@ async def test_explicit_settlement(client_factory: ClientFactory, name: Any) -> 
         await consume_until(consumer, lambda: len(seen) == 2)
         await asyncio.sleep(0.2)
     assert seen == [1, 2]
-    assert (await queue.approximate_count())["visible"] == 0
+    assert (await queue.approximate_count()).visible == 0
 
 
 async def test_an_invalid_retry_delay_leaves_the_message_unsettled(client_factory: ClientFactory, name: Any) -> None:
@@ -201,7 +202,7 @@ async def test_an_invalid_retry_delay_leaves_the_message_unsettled(client_factor
         await queue.send(OrderCreated(order_id=1))
         await consume_until(consumer, lambda: len(outcomes) == 1)
         await consumer.stop()
-        assert await queue.approximate_count() == {"visible": 0, "in_flight": 0, "delayed": 0}
+        assert await queue.approximate_count() == fanferro.QueueCounts(visible=0, in_flight=0, delayed=0)
     assert outcomes == ["acked"]
     assert errors == []
 
@@ -256,9 +257,9 @@ async def test_unsettled_messages_are_left_to_time_out(client_factory: ClientFac
     async with client:
         await queue.send(OrderCreated(order_id=1))
         await consume_until(consumer, lambda: len(received) == 2, timeout=20)
-        assert (await queue.approximate_count())["visible"] == 0
+        assert (await queue.approximate_count()).visible == 0
     assert received[1] - received[0] >= 2.5, received
-    assert consumer.stats()["engine"]["messages_released"] == 0
+    assert consumer.stats().engine.messages_released == 0
 
 
 async def test_unsettled_messages_can_be_settled_after_the_handler(client_factory: ClientFactory, name: Any) -> None:
@@ -274,11 +275,11 @@ async def test_unsettled_messages_can_be_settled_after_the_handler(client_factor
     async with client:
         await queue.send(OrderCreated(order_id=1))
         await consumer.start()
-        await wait_for(lambda: len(kept) == 1 and consumer.stats()["processed"] == 1)
+        await wait_for(lambda: len(kept) == 1 and consumer.stats().processed == 1)
         await kept[0].ack()
         await consumer.stop()
-        assert await queue.approximate_count() == {"visible": 0, "in_flight": 0, "delayed": 0}
-    assert consumer.stats()["engine"]["messages_acked"] == 1
+        assert await queue.approximate_count() == fanferro.QueueCounts(visible=0, in_flight=0, delayed=0)
+    assert consumer.stats().engine.messages_acked == 1
 
 
 async def test_unroutable_and_undecodable(client_factory: ClientFactory, name: Any) -> None:
@@ -301,7 +302,7 @@ async def test_unroutable_and_undecodable(client_factory: ClientFactory, name: A
         dead = await drain_queue(client, queue.dead_letter_queue)
     kinds = sorted(event.kind.value for event in events)
     assert kinds == ["message.decode_failed", "message.decode_failed", "message.unroutable"]
-    reasons = sorted(message.dead_letter_info["reason"] for message in dead)  # type: ignore[index]
+    reasons = sorted(message.dead_letter_info.reason for message in dead)  # type: ignore[union-attr]
     assert reasons == ["decode failed", "decode failed", "no route matched"]
 
 
@@ -322,7 +323,7 @@ async def test_handler_timeout_retries(client_factory: ClientFactory, name: Any,
 
     async with client:
         await queue.send(OrderCreated(order_id=1))
-        await consume_until(consumer, lambda: consumer.stats()["processed"] == 1)
+        await consume_until(consumer, lambda: consumer.stats().processed == 1)
     assert attempts == [1, 2]
 
 
@@ -344,7 +345,7 @@ async def test_idempotent_consumer(client_factory: ClientFactory, name: Any) -> 
         await consume_until(consumer, lambda: len(processed) + len(duplicates) == 3)
     assert processed == ["order-1-created"]
     assert len(duplicates) == 2
-    assert consumer.stats()["duplicates"] == 2
+    assert consumer.stats().duplicates == 2
 
 
 async def test_idempotent_consumer_runs_explicit_retries_again(client_factory: ClientFactory, name: Any) -> None:
@@ -410,10 +411,10 @@ async def test_messages_claimed_elsewhere_wait_without_using_up_attempts(
         await wait_for(lambda: len(postponements) >= 3 or bool(attempts))  # more than max_attempts
         assert attempts == []
         now[0] = 61.0  # the claim expires
-        await consume_until(consumer, lambda: consumer.stats()["processed"] == 1)
+        await consume_until(consumer, lambda: consumer.stats().processed == 1)
     assert attempts == [1]
     assert failures == []
-    assert consumer.stats()["failed"] == 0
+    assert consumer.stats().failed == 0
     assert await store.claim("order-1", lock_ttl=60) is Claim.COMPLETED
 
 
@@ -439,17 +440,17 @@ async def test_a_failed_completion_acks_the_message(client_factory: ClientFactor
     async with client:
         await queue.send(OrderCreated(order_id=1), id="order-1")
         await consume_until(consumer, lambda: bool(errors))
-        await wait_for(lambda: consumer.stats()["processed"] == 1)
-        counts: list[dict[str, int]] = []
+        await wait_for(lambda: consumer.stats().processed == 1)
+        counts: list[fanferro.QueueCounts] = []
 
         async def gone() -> None:
-            while (count := await queue.approximate_count()) != {"visible": 0, "in_flight": 0, "delayed": 0}:
+            while (count := await queue.approximate_count()) != fanferro.QueueCounts(visible=0, in_flight=0, delayed=0):
                 counts.append(count)
                 await asyncio.sleep(0.1)
 
         await asyncio.wait_for(gone(), 10)  # acked, not retried
     assert processed == ["order-1"]
-    assert consumer.stats()["failed"] == 0
+    assert consumer.stats().failed == 0
     assert [event.kind.value for event in errors] == ["consumer.error"]
     assert "could not mark message order-1 as processed" in errors[0].message
 
@@ -469,7 +470,7 @@ async def test_out_of_range_extensions_are_validation_errors(client_factory: Cli
 
     async with client:
         await queue.send(OrderCreated(order_id=1))
-        await consume_until(consumer, lambda: consumer.stats()["processed"] == 1)
+        await consume_until(consumer, lambda: consumer.stats().processed == 1)
     assert len(raised) == 1
     assert isinstance(raised[0], fanferro.ValidationError), repr(raised[0])
 
@@ -509,7 +510,7 @@ async def test_an_immediate_fifo_retry_hands_the_group_back_once(client_factory:
         )
         await consume_until(consumer, lambda: len(seen) == 4)
     assert seen == [(0, 1), (0, 2), (1, 2), (2, 2)]
-    assert consumer.stats()["engine"]["messages_released"] == 2
+    assert consumer.stats().engine.messages_released == 2
 
 
 async def test_fifo_hand_backs_do_not_use_up_retries(client_factory: ClientFactory, name: Any) -> None:
@@ -535,7 +536,7 @@ async def test_fifo_hand_backs_do_not_use_up_retries(client_factory: ClientFacto
         await queue.send_batch(
             [fanferro.OutgoingMessage(body=OrderCreated(order_id=i), group_id="g") for i in range(3)]
         )
-        await consume_until(consumer, lambda: consumer.stats()["processed"] == 2)
+        await consume_until(consumer, lambda: consumer.stats().processed == 2)
     # Message 0 uses its three attempts; 1 and 2, handed back meanwhile, still get theirs.
     assert attempts == [(0, 1), (0, 2), (0, 3), (1, 1), (1, 2), (2, 1)]
     assert len(dead) == 1
@@ -623,9 +624,9 @@ async def test_attempts_beyond_limit_skip_the_handler(client_factory: ClientFact
 
         assert queue.dead_letter_queue is not None
         dlq = queue.dead_letter_queue
-        await consume_until(strict, lambda: strict.stats()["engine"].get("messages_dead_lettered", 0) == 1)
+        await consume_until(strict, lambda: strict.stats().engine.messages_dead_lettered == 1)
         dead_messages = await drain_queue(client, dlq)
-    assert dead_messages[0].dead_letter_info["reason"] == "maximum attempts exceeded"  # type: ignore[index]
+    assert dead_messages[0].dead_letter_info.reason == "maximum attempts exceeded"  # type: ignore[union-attr]
 
 
 class _BrokenCloudEvent:
@@ -734,9 +735,9 @@ async def test_a_message_whose_task_fails_unexpectedly_is_retried(
     async with client:
         await queue.send(OrderCreated(order_id=1), group_id="g" if fifo else None)
         started = time.monotonic()
-        await consume_until(consumer, lambda: consumer.stats()["processed"] == 1, timeout=15)
+        await consume_until(consumer, lambda: consumer.stats().processed == 1, timeout=15)
         elapsed = time.monotonic() - started
-        await wait_for(lambda: consumer.stats()["engine"].get("in_flight", 0) == 0)
+        await wait_for(lambda: consumer.stats().engine.in_flight == 0)
     assert attempts == [1, 2]
     assert elapsed >= 0.9, "retried after the backoff, not at once"
     assert [event.error.category for event in errors if event.error] == ["RuntimeError"]
@@ -775,13 +776,13 @@ async def test_settlements_that_are_not_awaited_still_happen(
 
     async with client:
         await queue.send(OrderCreated(order_id=1))
-        await consume_until(consumer, lambda: consumer.stats()["processed"] == (2 if comes_back else 1))
+        await consume_until(consumer, lambda: consumer.stats().processed == (2 if comes_back else 1))
         dead = await drain_queue(client, queue.dead_letter_queue)
-        assert await queue.approximate_count() == {"visible": 0, "in_flight": 0, "delayed": 0}
+        assert await queue.approximate_count() == fanferro.QueueCounts(visible=0, in_flight=0, delayed=0)
     assert len(attempts) == (2 if comes_back else 1)
     if operation == "requeue":
         assert attempts == [1, 2]
-    assert [message.dead_letter_info["reason"] for message in dead] == (  # type: ignore[index]
+    assert [message.dead_letter_info.reason for message in dead] == (  # type: ignore[union-attr]
         ["invalid order"] if operation == "dead_letter" else []
     )
     assert [event.message for event in warnings if "operation" in event.fields] == [
@@ -810,7 +811,7 @@ async def test_a_failed_settlement_that_is_not_awaited_is_reported(client_factor
 
     async with client:
         await queue.send(OrderCreated(order_id=1))
-        await consume_until(consumer, lambda: len(seen) == 2 and consumer.stats()["processed"] == 2)
+        await consume_until(consumer, lambda: len(seen) == 2 and consumer.stats().processed == 2)
     assert [event.message for event in failures] == ["could not settle message (ack); it will be redelivered"]
     assert isinstance(failures[0].exception, fanferro.FanferroError)
     assert errors == []
@@ -833,5 +834,5 @@ async def test_an_unawaited_fifo_retry_keeps_the_group_in_order(client_factory: 
             [fanferro.OutgoingMessage(body=OrderCreated(order_id=i), group_id="g") for i in range(3)]
         )
         await consume_until(consumer, lambda: len(seen) == 4)
-        assert await queue.approximate_count() == {"visible": 0, "in_flight": 0, "delayed": 0}
+        assert await queue.approximate_count() == fanferro.QueueCounts(visible=0, in_flight=0, delayed=0)
     assert seen == [0, 0, 1, 2]

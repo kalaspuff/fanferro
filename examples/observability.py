@@ -56,7 +56,7 @@ async def main() -> list[str]:
             await queue.send({"hello": "world"})
             await queue.send({"fail": "yes"})
         await consumer.run_until_idle(timeout=30)
-        print("metrics:", client.metrics()["consumers"][consumer.name])
+        print("metrics:", client.metrics().consumers[consumer.name])
 
     spans = sorted(span.name for span in exporter.get_finished_spans())
     print("spans:", spans)

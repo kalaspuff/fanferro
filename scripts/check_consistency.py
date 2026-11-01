@@ -19,7 +19,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import fanferro
-from fanferro import _core, errors
+from fanferro import _core, errors, stats
 from fanferro.client import Client
 from fanferro.consumer import Consumer
 from fanferro.events import EventKind
@@ -87,6 +87,39 @@ def stub_matches_native_module() -> Iterator[str]:
             yield f"python/fanferro/_core.pyi: `{class_name}.{member}` is missing"
         for member in sorted(stub_members - runtime_members - {"__init__", "__eq__", "__hash__"}):
             yield f"python/fanferro/_core.pyi: `{class_name}.{member}` does not exist at runtime"
+
+
+def rust_metric_sets() -> dict[str, list[str]]:
+    """The fields of each ``metric_set!`` in crates/fanferro-core/src/metrics.rs, in order."""
+    source = read("crates/fanferro-core/src/metrics.rs")
+    sets: dict[str, list[str]] = {}
+    for name, body in re.findall(r"metric_set!\s*\{.*?\b(\w+)\s*\{(.*?)\}\s*\}", source, re.DOTALL):
+        sets[name] = re.findall(r"^\s*(\w+)\s*:\s*(?:Counter|Gauge)\s*,", body, re.MULTILINE)
+    return sets
+
+
+@check
+def metrics_typed() -> Iterator[str]:
+    # client.metrics() and consumer.stats() return typed snapshots of the core's counters: each
+    # counter needs a field (or it is dropped) and every field a counter (or it is always 0).
+    sets = rust_metric_sets()
+    engine_only = {"state", "paused", "leases", "available_permits"}
+    for rust, python, extra in (
+        ("ClientMetrics", stats.ClientCounters, set()),
+        ("ConsumerMetrics", stats.EngineStats, engine_only),
+    ):
+        if not sets.get(rust):
+            yield f"crates/fanferro-core/src/metrics.rs: no `metric_set!` named {rust} found"
+            continue
+        fields = [field.name for field in dataclasses.fields(python) if field.name not in extra]
+        if fields != sets[rust]:
+            missing = [name for name in sets[rust] if name not in fields]
+            unknown = [name for name in fields if name not in sets[rust]]
+            yield (
+                f"python/fanferro/stats.py: {python.__name__} must have the fields of {rust} in "
+                f"crates/fanferro-core/src/metrics.rs, in order (missing {missing}, not in Rust {unknown}); "
+                "document them in its docstring"
+            )
 
 
 def sections(markdown: str) -> dict[str, str]:
