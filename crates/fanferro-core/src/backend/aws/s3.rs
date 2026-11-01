@@ -7,10 +7,10 @@ use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{BucketLocationConstraint, CreateBucketConfiguration, ServerSideEncryption, StorageClass};
 use aws_smithy_types::error::display::DisplayErrorContext;
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 
 use super::errors::map_sdk_error;
-use super::upload_timeouts;
+use super::{PayloadBuffer, upload_timeouts};
 use crate::backend::{ObjectEncryption, ObjectStoreApi, PutOptions};
 use crate::error::{AwsError, AwsErrorKind, Error, Result};
 
@@ -94,13 +94,9 @@ impl ObjectStoreApi for AwsObjectStore {
             .send()
             .await
             .map_err(|err| map_sdk_error("s3", "GetObject", err))?;
-        if let Some(length) = output.content_length()
-            && u64::try_from(length).unwrap_or(0) > max_bytes as u64
-        {
-            return Err(Error::Payload(format!("payload of {length} bytes exceeds the limit of {max_bytes} bytes")));
-        }
+        let length = output.content_length().and_then(|length| u64::try_from(length).ok());
+        let mut buffer = PayloadBuffer::new(length, max_bytes)?;
         let mut body = output.body;
-        let mut buffer = BytesMut::new();
         while let Some(chunk) = body.try_next().await.map_err(|err| {
             // The connection broke off (or the SDK cut off a stalled transfer): like a request
             // that failed, retrying may succeed.
@@ -111,12 +107,9 @@ impl ObjectStoreApi for AwsObjectStore {
                 format!("failed to read the payload object: {}", DisplayErrorContext(&err)),
             ))
         })? {
-            if buffer.len() + chunk.len() > max_bytes {
-                return Err(Error::Payload(format!("payload exceeds the limit of {max_bytes} bytes")));
-            }
-            buffer.extend_from_slice(&chunk);
+            buffer.push(&chunk)?;
         }
-        Ok(buffer.freeze())
+        Ok(buffer.finish())
     }
 
     async fn delete_object(&self, bucket: &str, key: &str) -> Result<()> {

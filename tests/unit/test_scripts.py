@@ -225,6 +225,48 @@ def test_release_merges_hand_written_entries_with_generated_ones(
     )
 
 
+def test_release_gives_git_cliff_a_github_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Unauthenticated, git-cliff's GitHub API requests share runners' rate limit of 60 an hour
+    # and git-cliff panics once it runs out (exit status 101 in the Prepare release workflow).
+    release = load("release")
+    calls: list[tuple[list[str], dict[str, str] | None]] = []
+
+    def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        env = kwargs.get("env")
+        calls.append((args, env if isinstance(env, dict) else None))
+        if args[:2] == ["gh", "auth"]:
+            return subprocess.CompletedProcess(args, 0, stdout="gh-token\n", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="## [0.3.0]\n", stderr="")
+
+    monkeypatch.setattr(release.subprocess, "run", run)
+    monkeypatch.setenv("GITHUB_TOKEN", "workflow-token")
+    assert release.generated_section("0.3.0") == "## [0.3.0]"
+    assert [args[0] for args, _ in calls] == ["uvx"]
+    assert calls[-1][1] is not None
+    assert calls[-1][1]["GITHUB_TOKEN"] == "workflow-token"
+
+    calls.clear()
+    monkeypatch.delenv("GITHUB_TOKEN")
+    release.generated_section("0.3.0")
+    assert [args[0] for args, _ in calls] == ["gh", "uvx"]
+    assert calls[-1][1] is not None
+    assert calls[-1][1]["GITHUB_TOKEN"] == "gh-token"
+
+
+def test_release_reports_why_git_cliff_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    release = load("release")
+
+    def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if args[:2] == ["gh", "auth"]:
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="not logged in")
+        return subprocess.CompletedProcess(args, 101, stdout="", stderr="panicked: Could not get github metadata")
+
+    monkeypatch.setattr(release.subprocess, "run", run)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    with pytest.raises(SystemExit, match=r"(?s)exit status 101 \(set GITHUB_TOKEN.*Could not get github metadata"):
+        release.generated_section("0.3.0")
+
+
 def _cliff_commit(message: str, group: str, pr_number: int | None) -> dict[str, object]:
     remote = {
         "username": None,

@@ -189,10 +189,13 @@ impl Transport {
     }
 
     /// Decodes a received body (already unwrapped from an SNS notification, if any).
-    pub async fn decode(&self, body: &str, mut attributes: MessageAttributes) -> Result<DecodedBody> {
+    ///
+    /// `body` is the received text; a body sent inline becomes the wire message's body without
+    /// a copy (pass it as `Bytes` over the received message, see `Bytes::from_owner`).
+    pub async fn decode(&self, body: Bytes, mut attributes: MessageAttributes) -> Result<DecodedBody> {
         let pointer = if attributes.contains_key(reserved::CLAIM_CHECK) {
             attributes.remove(reserved::CLAIM_CHECK);
-            Some(PayloadPointer::parse_fanferro(body)?)
+            Some(PayloadPointer::parse_fanferro(pointer_text(&body)?)?)
         } else if let Some(size) = attributes
             .get(reserved::EXTENDED_PAYLOAD_SIZE)
             .or_else(|| attributes.get(reserved::LEGACY_EXTENDED_PAYLOAD_SIZE))
@@ -200,7 +203,7 @@ impl Transport {
             let size = size.as_text().and_then(|text| text.parse::<u64>().ok());
             attributes.remove(reserved::EXTENDED_PAYLOAD_SIZE);
             attributes.remove(reserved::LEGACY_EXTENDED_PAYLOAD_SIZE);
-            Some(PayloadPointer::parse_aws(body, size)?)
+            Some(PayloadPointer::parse_aws(pointer_text(&body)?, size)?)
         } else {
             None
         };
@@ -213,11 +216,11 @@ impl Transport {
         let body = match encoding.as_ref().and_then(AttributeValue::as_text) {
             Some("base64") => Bytes::from(
                 BASE64
-                    .decode(body.trim())
+                    .decode(body.trim_ascii())
                     .map_err(|err| Error::Envelope(format!("invalid base64 message body: {err}")))?,
             ),
             Some(other) => return Err(Error::Envelope(format!("unsupported body encoding {other:?}"))),
-            None => Bytes::copy_from_slice(body.as_bytes()),
+            None => body,
         };
         Ok(DecodedBody { wire: WireMessage { body, attributes }, pointer: None })
     }
@@ -234,6 +237,11 @@ impl Transport {
             _ => Ok(()),
         }
     }
+}
+
+/// A pointer body as text (SQS and SNS deliver only text; a pointer that is not is invalid).
+fn pointer_text(body: &[u8]) -> Result<&str> {
+    std::str::from_utf8(body).map_err(|_| Error::Payload("invalid payload pointer: the body is not UTF-8".into()))
 }
 
 fn base64_len(len: usize) -> usize {
@@ -275,7 +283,7 @@ mod tests {
         let out = transport.encode(&wire, "id", 1000).await.unwrap();
         assert_eq!(out.body, "hello");
         assert!(out.attributes.is_empty());
-        let decoded = transport.decode(&out.body, out.attributes).await.unwrap();
+        let decoded = transport.decode(out.body.into(), out.attributes).await.unwrap();
         assert_eq!(decoded.wire, wire);
     }
 
@@ -286,7 +294,7 @@ mod tests {
         let out = transport.encode(&wire, "id", 1000).await.unwrap();
         assert_eq!(out.body, "AAEC/w==");
         assert_eq!(out.attributes.get(reserved::ENCODING), Some(&AttributeValue::string("base64")));
-        let decoded = transport.decode(&out.body, out.attributes).await.unwrap();
+        let decoded = transport.decode(out.body.into(), out.attributes).await.unwrap();
         assert_eq!(decoded.wire, wire);
     }
 
@@ -334,7 +342,7 @@ mod tests {
             let out = transport.encode(&wire, "msg-1", 1000).await.unwrap();
             assert!(out.offloaded.is_some());
             assert!(!out.attributes.contains_key(reserved::ENCODING));
-            let decoded = transport.decode(&out.body, out.attributes).await.unwrap();
+            let decoded = transport.decode(out.body.into(), out.attributes).await.unwrap();
             assert_eq!(decoded.wire, wire, "{format:?}");
             let key = decoded.pointer.unwrap().key.unwrap();
             assert_eq!(key, format!("x/msg-1/{}", hex::encode(Sha256::digest(&wire.body))), "{format:?}");
@@ -351,7 +359,7 @@ mod tests {
         let out = transport.encode(&wire, "over-limit", 500).await.unwrap();
         assert!(out.offloaded.is_some());
         assert!(out.encoded_len() <= 500);
-        assert_eq!(transport.decode(&out.body, out.attributes).await.unwrap().wire, wire);
+        assert_eq!(transport.decode(out.body.into(), out.attributes).await.unwrap().wire, wire);
         let inline = transport.encode(&wire, "under-limit", 800).await.unwrap();
         assert!(inline.offloaded.is_none(), "under both the limit and the threshold");
     }
@@ -366,8 +374,8 @@ mod tests {
         let second = WireMessage::new(Bytes::from(vec![b'b'; 64]), MessageAttributes::new());
         let first_out = transport.encode(&first, "same-id", 1000).await.unwrap();
         let second_out = transport.encode(&second, "same-id", 1000).await.unwrap();
-        assert_eq!(transport.decode(&first_out.body, first_out.attributes).await.unwrap().wire, first);
-        assert_eq!(transport.decode(&second_out.body, second_out.attributes).await.unwrap().wire, second);
+        assert_eq!(transport.decode(first_out.body.into(), first_out.attributes).await.unwrap().wire, first);
+        assert_eq!(transport.decode(second_out.body.into(), second_out.attributes).await.unwrap().wire, second);
         // The same bytes again share the object (retries do not pile up objects).
         let again = transport.encode(&first, "same-id", 1000).await.unwrap();
         assert_eq!(again.offloaded.unwrap().key, first_out.offloaded.unwrap().key);
@@ -407,7 +415,7 @@ mod tests {
             .unwrap();
         let out = always.encode(&wire, "b", 5000).await.unwrap();
         assert!(out.offloaded.is_some());
-        assert_eq!(always.decode(&out.body, out.attributes).await.unwrap().wire, wire);
+        assert_eq!(always.decode(out.body.into(), out.attributes).await.unwrap().wire, wire);
     }
 
     #[tokio::test]
@@ -438,7 +446,7 @@ mod tests {
         attributes.insert(reserved::LEGACY_EXTENDED_PAYLOAD_SIZE.into(), AttributeValue::number("7"));
         attributes.insert("tenant".into(), AttributeValue::string("acme"));
         let body = r#"["com.amazon.sqs.javamessaging.MessageS3Pointer",{"s3BucketName":"payloads","s3Key":"legacy"}]"#;
-        let decoded = transport.decode(body, attributes).await.unwrap();
+        let decoded = transport.decode(Bytes::from_static(body.as_bytes()), attributes).await.unwrap();
         assert_eq!(&decoded.wire.body[..], b"{\"n\":1}");
         assert_eq!(decoded.wire.attributes.keys().collect::<Vec<_>>(), ["tenant"]);
         assert_eq!(decoded.pointer.unwrap().size, Some(7));
@@ -449,10 +457,10 @@ mod tests {
         let (transport, _) = transport(None);
         let mut attributes = MessageAttributes::new();
         attributes.insert(reserved::ENCODING.into(), AttributeValue::string("rot13"));
-        assert!(transport.decode("x", attributes).await.is_err());
+        assert!(transport.decode(Bytes::from_static(b"x"), attributes).await.is_err());
         let mut attributes = MessageAttributes::new();
         attributes.insert(reserved::ENCODING.into(), AttributeValue::string("base64"));
-        assert!(transport.decode("!!!", attributes).await.is_err());
+        assert!(transport.decode(Bytes::from_static(b"!!!"), attributes).await.is_err());
     }
 
     #[tokio::test]
