@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib
+import os
 import time
 import weakref
 from dataclasses import dataclass, field
@@ -110,10 +111,46 @@ def _import_otel() -> dict[str, Any] | None:
             "trace": importlib.import_module("opentelemetry.trace"),
             "propagate": importlib.import_module("opentelemetry.propagate"),
             "metrics": importlib.import_module("opentelemetry.metrics"),
+            "metrics_internal": importlib.import_module("opentelemetry.metrics._internal"),
             "context": importlib.import_module("opentelemetry.context"),
         }
     except ImportError:
         return None
+
+
+_UNKNOWN = object()
+
+
+class _GlobalProvider:
+    """Tells cheaply whether OpenTelemetry's global tracer or meter provider is still the API's proxy.
+
+    The public ``get_tracer_provider()``/``get_meter_provider()`` read ``os.environ`` on every call
+    while no provider is set (about 2 µs, on every message). The API keeps the provider it set in
+    a module global and sets it once, so this reads that global, and calls the public function only
+    while it is unset and an environment variable named a provider to load when the client was
+    created (the public function then loads and sets it), or when the global is missing from the
+    installed version.
+    """
+
+    __slots__ = ("_from_environment", "_get", "_module", "_name", "_proxy")
+
+    def __init__(self, module: Any, name: str, environment: str, get: Callable[[], Any], proxy: type | None) -> None:
+        self._module = module
+        self._name = name
+        self._from_environment = environment in os.environ
+        self._get = get
+        self._proxy = proxy
+
+    def is_proxy(self) -> bool:
+        """Whether the global provider is the API's proxy (no SDK configured yet)."""
+        if self._proxy is None:
+            return False
+        provider = getattr(self._module, self._name, _UNKNOWN)
+        if provider is None and not self._from_environment:
+            return True
+        if provider is None or provider is _UNKNOWN:
+            provider = self._get()
+        return isinstance(provider, self._proxy)
 
 
 def _system(kind: str) -> str:
@@ -138,12 +175,30 @@ class TelemetryRuntime:
         self._attributes: dict[tuple[str, str], dict[str, str]] = {}
         self._consumers: weakref.WeakSet[Any] = weakref.WeakSet()
         self._client_metrics: Callable[[], Mapping[str, int]] | None = None
-        self._proxy_provider: type | None = None
+        self._tracer_provider: _GlobalProvider | None = None
+        self._meter_provider: _GlobalProvider | None = None
         if self._otel is None:
             return
         trace = self._otel["trace"]
-        # The API's provider until an SDK is configured: its spans record nothing (see _noop_tracing).
-        self._proxy_provider = getattr(trace, "ProxyTracerProvider", None)
+        # The API's providers until an SDK is configured: their spans and instruments record
+        # nothing (see _noop_tracing and _noop_metrics).
+        if self.config.tracer_provider is None:
+            self._tracer_provider = _GlobalProvider(
+                trace,
+                "_TRACER_PROVIDER",
+                "OTEL_PYTHON_TRACER_PROVIDER",
+                trace.get_tracer_provider,
+                getattr(trace, "ProxyTracerProvider", None),
+            )
+        if self.config.meter_provider is None:
+            metrics = self._otel["metrics"]
+            self._meter_provider = _GlobalProvider(
+                self._otel["metrics_internal"],
+                "_METER_PROVIDER",
+                "OTEL_PYTHON_METER_PROVIDER",
+                metrics.get_meter_provider,
+                getattr(self._otel["metrics_internal"], "_ProxyMeterProvider", None),
+            )
         if self.config.tracing:
             self._tracer = trace.get_tracer(INSTRUMENTATION_NAME, version, tracer_provider=self.config.tracer_provider)
         if self.config.metrics:
@@ -160,10 +215,17 @@ class TelemetryRuntime:
         The API then creates non-recording spans that only re-activate the span of their parent
         context, which :meth:`process_span` and :meth:`publish_span` do directly.
         """
-        if self.config.tracer_provider is not None or self._proxy_provider is None:
-            return False
-        assert self._otel is not None
-        return isinstance(self._otel["trace"].get_tracer_provider(), self._proxy_provider)
+        provider = self._tracer_provider
+        return provider is not None and provider.is_proxy()
+
+    def _noop_metrics(self) -> bool:
+        """Whether instruments record nothing: no meter provider was given and no SDK is configured (yet).
+
+        Instruments created from the API's proxy meter forward to the SDK's once one is configured,
+        so they are kept and only not called meanwhile.
+        """
+        provider = self._meter_provider
+        return provider is not None and provider.is_proxy()
 
     def _propagator(self) -> Any:
         if self.config.propagation.propagator is not None:
@@ -271,7 +333,7 @@ class TelemetryRuntime:
         self, destination: str, kind: str, duration: float, count: int, error: BaseException | None
     ) -> None:
         """Records a publish operation."""
-        if not self._instruments:
+        if not self._instruments or self._noop_metrics():
             return
         attributes = self._attributes.get((kind, destination)) if error is None else None
         if attributes is None:
@@ -289,7 +351,7 @@ class TelemetryRuntime:
 
     def record_consumed(self, queue: str, count: int) -> None:
         """Records received messages."""
-        if self._instruments:
+        if self._instruments and not self._noop_metrics():
             attributes = self._attributes.get(("consumed", queue))
             if attributes is None:
                 attributes = {"messaging.system": "aws_sqs", "messaging.destination.name": queue}
@@ -298,7 +360,7 @@ class TelemetryRuntime:
 
     def record_process(self, queue: str, duration: float, error: BaseException | None) -> None:
         """Records message processing."""
-        if not self._instruments:
+        if not self._instruments or self._noop_metrics():
             return
         attributes = self._attributes.get(("process", queue)) if error is None else None
         if attributes is None:
@@ -361,6 +423,10 @@ class TelemetryRuntime:
         ``attribute_keys``), for the caller to add as far as the attribute limit allows.
         """
         if self._otel is None or not self.config.propagation.inject:
+            return None
+        if not self._otel["trace"].get_current_span().get_span_context().is_valid:
+            # Nothing to propagate: every carrier needs a traceparent, written only for a valid
+            # span context (baggage alone is never propagated).
             return None
         carrier: dict[str, str] = {}
         self._propagator().inject(carrier)

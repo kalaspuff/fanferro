@@ -11,12 +11,17 @@ whose handlers wait 50 ms (I/O-bound, ``concurrency=100``: at most 2,000 message
 ``--latency`` puts a proxy in front of the endpoint that delays every call, like the round trip
 to SQS from inside its region (about 15 ms), which local endpoints do not have. Results vary
 between runs: compare the best of a few (``--repeat``), on the same machine.
+
+Each scenario runs with the default telemetry (``Telemetry()``: with ``opentelemetry-api``
+installed, as with ``fanferro[all]``, and no SDK configured) and with ``Telemetry.disabled()``
+(``--telemetry`` picks one), so that the cost of the default configuration stays visible.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import http.client
 import http.server
 import json
@@ -52,10 +57,12 @@ class Result:
     messages: int
     wall: float
     cpu: float
+    telemetry: str = "default"
 
     def row(self) -> dict[str, Any]:
         return {
             "scenario": self.scenario,
+            "telemetry": self.telemetry,
             "messages": self.messages,
             "messages_per_second": round(self.messages / self.wall),
             "wall_us_per_message": round(self.wall / self.messages * 1e6, 1),
@@ -212,10 +219,30 @@ SCENARIOS = (
 )
 
 
-async def run(scenario: str, messages: int, endpoint: str | None, options: dict[str, Any] | None = None) -> Result:
+TELEMETRY = {"default": fanferro.Telemetry, "disabled": fanferro.Telemetry.disabled}
+
+
+async def run(
+    scenario: str,
+    messages: int,
+    endpoint: str | None,
+    options: dict[str, Any] | None = None,
+    telemetry: str = "default",
+) -> Result:
+    result = await _run(scenario, messages, endpoint, options, TELEMETRY[telemetry]())
+    return dataclasses.replace(result, telemetry=telemetry)
+
+
+async def _run(
+    scenario: str,
+    messages: int,
+    endpoint: str | None,
+    options: dict[str, Any] | None,
+    telemetry: fanferro.Telemetry,
+) -> Result:
     quiet = fanferro.LoggingConfig(enabled=False)  # e.g. warnings about the missing dead-letter queue
     if endpoint is None:
-        client = testing.memory_client(logging=quiet)
+        client = testing.memory_client(logging=quiet, telemetry=telemetry)
     else:
         client = fanferro.Client(
             region="us-east-1",
@@ -224,6 +251,7 @@ async def run(scenario: str, messages: int, endpoint: str | None, options: dict[
             account_id="000000000000",
             provisioning=fanferro.Provisioning.ensure(),
             logging=quiet,
+            telemetry=telemetry,
         )
     async with client:
         queue = client.queue(f"benchmark-{scenario}-{uuid.uuid4().hex[:8]}")
@@ -268,6 +296,13 @@ async def main() -> None:
         metavar="NAME=JSON",
         help="a consumer option for the consume scenarios, e.g. -o pollers=4 (repeatable)",
     )
+    parser.add_argument(
+        "--telemetry",
+        choices=("both", *TELEMETRY),
+        default="both",
+        help="Telemetry() ('default': opentelemetry-api without an SDK, if installed), Telemetry.disabled() "
+        "('disabled') or both (default)",
+    )
     parser.add_argument("--json", action="store_true", help="print one JSON object per scenario")
     args = parser.parse_args()
     try:
@@ -281,19 +316,23 @@ async def main() -> None:
     unknown = sorted(set(scenarios) - set(SCENARIOS))
     if unknown:
         parser.error(f"unknown scenarios: {', '.join(unknown)}")
+    telemetries = list(TELEMETRY) if args.telemetry == "both" else [args.telemetry]
     if not args.json:
-        print(f"{'scenario':20} {'messages/s':>11} {'wall µs/msg':>12} {'CPU µs/msg':>11}")
+        print(f"{'scenario':20} {'telemetry':10} {'messages/s':>11} {'wall µs/msg':>12} {'CPU µs/msg':>11}")
     for scenario in scenarios:
-        runs = [await run(scenario, args.messages, endpoint, options) for _ in range(max(1, args.repeat))]
-        row = min(runs, key=lambda result: result.wall).row()
-        if args.json:
-            print(json.dumps(row), flush=True)
-        else:
-            print(
-                f"{row['scenario']:20} {row['messages_per_second']:>11} {row['wall_us_per_message']:>12} "
-                f"{row['cpu_us_per_message']:>11}",
-                flush=True,
-            )
+        for telemetry in telemetries:
+            runs = [
+                await run(scenario, args.messages, endpoint, options, telemetry) for _ in range(max(1, args.repeat))
+            ]
+            row = min(runs, key=lambda result: result.wall).row()
+            if args.json:
+                print(json.dumps(row), flush=True)
+            else:
+                print(
+                    f"{row['scenario']:20} {row['telemetry']:10} {row['messages_per_second']:>11} "
+                    f"{row['wall_us_per_message']:>12} {row['cpu_us_per_message']:>11}",
+                    flush=True,
+                )
 
 
 if __name__ == "__main__":

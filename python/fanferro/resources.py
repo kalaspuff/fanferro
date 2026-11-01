@@ -42,6 +42,7 @@ from fanferro.stats import QueueCounts
 from fanferro.telemetry import monotonic
 
 if TYPE_CHECKING:
+    from fanferro._core import WireMessage
     from fanferro.client import Client
     from fanferro.codecs import Codec
     from fanferro.consumer import Consumer
@@ -247,6 +248,23 @@ class _Destination(_Resource):
         return self._encode_now(context.message, info)
 
     def _encode_now(self, message: OutgoingMessage, info: Any) -> PreparedMessage:
+        wire, message_type = self._encode_wire(message)
+        return PreparedMessage(
+            destination=self._destination_for(info),
+            destination_name=self.name,
+            wire=wire,
+            message_id=message.id,
+            message_type=message_type,
+            group_id=message.group_id,
+            deduplication_id=message.deduplication_id,
+            # Middleware may have set a timedelta after the message was created.
+            delay=optional_seconds(message.delay, "delay"),
+            sns_subject=message.sns_subject,
+            trace_header=message.trace_header,
+        )
+
+    def _encode_wire(self, message: OutgoingMessage) -> tuple[WireMessage, str | None]:
+        """Encodes and wraps ``message`` (setting its group id and trace header): its wire message and type."""
         client = self._client
         if message.group_id is None and self._group_id is not None:
             message.group_id = self._group_id(message) if callable(self._group_id) else self._group_id
@@ -282,19 +300,7 @@ class _Destination(_Resource):
             if trace_attributes:
                 self._add_trace_attributes(attributes, trace_attributes, wire.body, message)
             wire = wire.replace(attributes=attributes)
-        return PreparedMessage(
-            destination=self._destination_for(info),
-            destination_name=self.name,
-            wire=wire,
-            message_id=message.id,
-            message_type=message_type,
-            group_id=message.group_id,
-            deduplication_id=message.deduplication_id,
-            # Middleware may have set a timedelta after the message was created.
-            delay=optional_seconds(message.delay, "delay"),
-            sns_subject=message.sns_subject,
-            trace_header=message.trace_header,
-        )
+        return wire, message_type
 
     def _add_trace_attributes(
         self,
@@ -389,17 +395,26 @@ class _Destination(_Resource):
             try:
                 if client.publish_middleware:
                     prepared = await self._prepare_message(message, info)
+                    destination = prepared.destination
+                    wire, message_id, message_type = prepared.wire, prepared.message_id, prepared.message_type
+                    group_id, deduplication_id = prepared.group_id, prepared.deduplication_id
+                    delay, sns_subject, trace_header = prepared.delay, prepared.sns_subject, prepared.trace_header
                 else:
-                    prepared = self._encode_now(message, info)
+                    # Without middleware nothing reads a PreparedMessage: pass the fields directly.
+                    wire, message_type = self._encode_wire(message)
+                    destination = self._destination_for(info)
+                    message_id, group_id, deduplication_id = message.id, message.group_id, message.deduplication_id
+                    delay = optional_seconds(message.delay, "delay")  # may have been changed after creation
+                    sns_subject, trace_header = message.sns_subject, message.trace_header
                 receipt = await core.publish(
-                    self._native_destination(core, prepared.destination),
-                    prepared.wire,
-                    prepared.message_id,
-                    group_id=prepared.group_id,
-                    deduplication_id=prepared.deduplication_id,
-                    delay=prepared.delay,
-                    subject=prepared.sns_subject,
-                    trace_header=prepared.trace_header,
+                    self._native_destination(core, destination),
+                    wire,
+                    message_id,
+                    group_id=group_id,
+                    deduplication_id=deduplication_id,
+                    delay=delay,
+                    subject=sns_subject,
+                    trace_header=trace_header,
                     transport=transport,
                 )
             except Exception as error:
@@ -428,7 +443,7 @@ class _Destination(_Resource):
                 kind=self.kind,
                 message_id=result.message_id,
                 transport_message_id=result.transport_message_id,
-                message_type=prepared.message_type,
+                message_type=message_type,
                 size=result.size,
                 offloaded=result.offloaded is not None,
                 duration=round(duration, 6),

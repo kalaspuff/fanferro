@@ -43,10 +43,14 @@ to every call in front of MiniStack (`--latency 0.015`), `consume-io` (handlers 
 * **Little Python per message.** Built-in envelopes are unwrapped in Rust while a batch is decoded,
   dataclass converters are compiled once per type, and a trivial awaitable costs about 14 µs of CPU
   instead of 75 µs with `pyo3-async-runtimes`
-  ([ADR 0009](adr/0009-results-reach-asyncio-in-batches.md)).
+  ([ADR 0009](adr/0009-results-reach-asyncio-in-batches.md)). Publishing one message runs about
+  7 µs of fanferro's Python (encoding with the codec, the envelope, telemetry checks and the
+  result): most of a sequential `send()`'s CPU is the awaitable's round trip to the Rust runtime,
+  which `send_batch()` and concurrent sends share between messages.
 * **Lean defaults.** Raw bodies with few attributes, no MD5 digests on top of TLS, events built only
-  for kinds that something logs or hooks, and no span work without an OpenTelemetry SDK
-  ([ADR 0008](adr/0008-lean-defaults.md)).
+  for kinds that something logs or hooks, no span or metric work without an OpenTelemetry SDK, and
+  no propagation work without an active span: `opentelemetry-api` installed without an SDK costs
+  well under a microsecond per message ([ADR 0008](adr/0008-lean-defaults.md)).
 
 ## Run it yourself
 
@@ -56,6 +60,9 @@ uv run python scripts/benchmark.py --endpoint http://localhost:4566 -n 2000 --re
 uv run python scripts/benchmark.py --endpoint http://localhost:4566 --latency 0.015 -n 3000 --scenarios consume-io
 ```
 
-`-o NAME=JSON` passes a consumer option to the consume scenarios (`-o max_pollers=1`).
+`-o NAME=JSON` passes a consumer option to the consume scenarios (`-o max_pollers=1`). Each
+scenario runs with the default `Telemetry()` (with `opentelemetry-api` installed, as with
+`fanferro[all]`, and no SDK configured) and with `Telemetry.disabled()`, so that the cost of the
+default configuration stays visible; `--telemetry default` or `--telemetry disabled` runs one.
 
 Start MiniStack with `uv run ministack` first.
