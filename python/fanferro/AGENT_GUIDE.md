@@ -33,7 +33,10 @@ compact reference for writing applications with it. Print it with `fanferro guid
    encodes from models like any payload. S3 event and SES email notifications (from SNS or
    straight to SQS) are recognised and typed by default: annotate handlers with
    `fanferro.aws.S3Event`, `SesBounceNotification`, `SesComplaintNotification` or
-   `SesDeliveryNotification` (types `aws.s3.event`, `aws.ses.bounce`...).
+   `SesDeliveryNotification` (types `aws.s3.event`, `aws.ses.bounce`...). EventBridge events
+   delivered by a rule are unwrapped: annotate handlers with the model of their `detail` (type
+   `aws.<service>.<event>` for AWS services, the `detail-type` otherwise);
+   `fanferro.aws.EventBridgeMetadata.of(message)` has the account, region and resources.
 10. **Test with `fanferro.testing.memory_client()`**, end to end with MiniStack.
 
 ## Minimal service

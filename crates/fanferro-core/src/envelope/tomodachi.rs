@@ -39,7 +39,7 @@ use time::macros::format_description;
 
 use super::{
     Envelope, default_type_attribute, header_attributes, insert_envelope_attributes, is_json_content_type,
-    is_text_content_type, text_attribute,
+    is_text_content_type, share, text_attribute,
 };
 use crate::error::{Error, Result};
 use crate::types::{Headers, MessageAttributes, Payload, WireMessage, new_message_id};
@@ -276,16 +276,6 @@ fn zlib_decompress(data: &[u8], format: &str) -> Result<Bytes> {
             status => Error::Envelope(format!("invalid compressed data in a {format} message ({status:?})")),
         },
     )
-}
-
-/// `text` as bytes: a slice of `source` when `text` lies in it (no copy), a copy otherwise.
-fn share(source: &Bytes, text: &str) -> Bytes {
-    let start = (text.as_ptr() as usize).wrapping_sub(source.as_ptr() as usize);
-    if start <= source.len() && text.len() <= source.len() - start {
-        source.slice(start..start + text.len())
-    } else {
-        Bytes::copy_from_slice(text.as_bytes())
-    }
 }
 
 /// The fields of an incoming message besides its data.
