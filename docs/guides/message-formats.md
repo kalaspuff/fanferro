@@ -312,7 +312,7 @@ notifications and parsing the tomodachi envelope in Rust, off the event loop, an
 in batches, where tomodachi makes a call through botocore for each message; the envelope itself
 barely matters on either side.
 
-Measured on 2026-11-01 with fanferro 0.9.0 and tomodachi 0.29.0, both on Python 3.13 and asyncio,
+Measured on 2026-11-01 with fanferro 0.10.0 and tomodachi 0.29.0, both on Python 3.13 and asyncio,
 against MiniStack on the same machine (Linux aarch64, 4 CPUs): 2,000 messages of about 400 bytes
 (JSON) or 174 bytes (protobuf) after 50 to warm up, medians of three runs, which differed by less
 than 3%. The CPU is that of the publishing or consuming process (its event loop and its threads),
