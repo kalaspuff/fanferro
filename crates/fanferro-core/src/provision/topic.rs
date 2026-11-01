@@ -36,6 +36,10 @@ impl TopicInfo {
 impl Client {
     /// Provisions a topic according to its spec and policy.
     pub async fn ensure_topic(&self, spec: &TopicSpec) -> Result<Report<TopicInfo>> {
+        self.with_provisioning_retries(|| self.ensure_topic_once(spec)).await
+    }
+
+    async fn ensure_topic_once(&self, spec: &TopicSpec) -> Result<Report<TopicInfo>> {
         let name = match (&spec.name, &spec.arn) {
             (Some(name), _) => name.clone(),
             (None, Some(topic_arn)) => Arn::parse(topic_arn)?.resource_name().to_string(),

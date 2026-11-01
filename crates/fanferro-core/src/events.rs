@@ -85,6 +85,7 @@ event_kinds! {
     ResourceDrift => ("resource.drift", Warning, "Resource attributes differ from the spec and were not updated."),
     ResourceMissing => ("resource.missing", Warning, "A resource does not exist and was not created."),
     ResourceFailed => ("resource.failed", Error, "Provisioning a resource failed."),
+    ResourceRetried => ("resource.retried", Warning, "Provisioning a resource failed transiently and is tried again shortly."),
     ResourceFallback => ("resource.fallback", Warning, "A provisioning fallback handler supplied the resource."),
     ResourcePolicyUpdated => ("resource.policy_updated", Info, "A queue policy was updated to allow an SNS topic to send messages."),
     ResourceDeleted => ("resource.deleted", Info, "A resource was deleted (teardown)."),

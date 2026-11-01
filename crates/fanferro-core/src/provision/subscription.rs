@@ -24,6 +24,10 @@ pub struct SubscriptionInfo {
 impl Client {
     /// Provisions a subscription according to its spec and policy.
     pub async fn ensure_subscription(&self, spec: &SubscriptionSpec) -> Result<Report<SubscriptionInfo>> {
+        self.with_provisioning_retries(|| self.ensure_subscription_once(spec)).await
+    }
+
+    async fn ensure_subscription_once(&self, spec: &SubscriptionSpec) -> Result<Report<SubscriptionInfo>> {
         let name = format!("{} -> {}", spec.topic_arn, spec.queue_arn);
         if spec.queue_arn.ends_with(".fifo") && !spec.topic_arn.ends_with(".fifo") {
             return Err(Error::validation(format!(

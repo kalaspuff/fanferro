@@ -59,7 +59,7 @@ fn queue_url_for(client: &Client, account: &str, name: &str) -> String {
 impl Client {
     /// Provisions a queue according to its spec and policy.
     pub fn ensure_queue<'a>(&'a self, spec: &'a QueueSpec) -> BoxFuture<'a, Result<Report<QueueInfo>>> {
-        Box::pin(async move { self.ensure_queue_inner(spec).await })
+        Box::pin(async move { self.with_provisioning_retries(|| self.ensure_queue_inner(spec)).await })
     }
 
     async fn ensure_queue_inner(&self, spec: &QueueSpec) -> Result<Report<QueueInfo>> {

@@ -492,3 +492,154 @@ async fn subscribing_a_queue_encrypted_with_the_aws_managed_key_warns() {
     assert!(is_aws_managed_sqs_key("arn:aws:kms:eu-north-1:123456789012:alias/aws/sqs"));
     assert!(!is_aws_managed_sqs_key("alias/aws/sqs-other"));
 }
+
+mod retries {
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    use super::*;
+    use crate::backend::Backend;
+    use crate::backend::memory::MemoryBroker;
+    use crate::backend::testing::{FailingQueueAttributes, ThrottledSubscriptionLookups};
+    use crate::client::ClientConfig;
+    use crate::error::AwsErrorKind;
+
+    fn client_with(backend: Backend) -> Client {
+        let client = Client::with_backend(backend, ClientConfig::default()).unwrap();
+        client.events().set_enabled(&[EventKind::ResourceRetried]);
+        client
+    }
+
+    fn retried(client: &Client) -> Vec<(String, String)> {
+        client
+            .events()
+            .drain(100)
+            .into_iter()
+            .filter(|event| event.kind == EventKind::ResourceRetried)
+            .map(|event| {
+                let error = event.error.map(|error| error.code.unwrap_or_default()).unwrap_or_default();
+                let resource = match &event.fields["resource"] {
+                    crate::events::FieldValue::Str(resource) => resource.clone(),
+                    other => panic!("{other:?}"),
+                };
+                (resource, error)
+            })
+            .collect()
+    }
+
+    // docs/parity R1: SQS asks to wait a second after CreateQueue before using a queue.
+    #[tokio::test(start_paused = true)]
+    async fn a_queue_not_yet_visible_after_creating_it_is_tried_again() {
+        let mut backend = MemoryBroker::new("us-east-1", "000000000000").backend();
+        let sqs = Arc::new(FailingQueueAttributes::new(backend.sqs.clone(), 2));
+        backend.sqs = sqs.clone();
+        let client = client_with(backend);
+        let spec = QueueSpec { name: Some("fresh".into()), policy: ensure(), ..QueueSpec::default() };
+        let started = tokio::time::Instant::now();
+        let report = client.ensure_queue(&spec).await.unwrap();
+        assert_eq!(report.status, ProvisionStatus::Created, "{:?}", report.error);
+        assert_eq!(report.actions, ["created queue"]);
+        assert_eq!(report.resource.unwrap().arn, "arn:aws:sqs:us-east-1:000000000000:fresh");
+        let retries = retried(&client);
+        assert_eq!(retries.len(), 2);
+        assert!(retries.iter().all(|(_, code)| code == "AWS.SimpleQueueService.NonExistentQueue"), "{retries:?}");
+        // At least half of 0.5 and 1 second.
+        assert!(started.elapsed() >= Duration::from_millis(750));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_subscription_whose_queue_policy_cannot_be_written_yet_is_tried_again() {
+        let broker = MemoryBroker::new("us-east-1", "000000000000");
+        let setup = Client::with_backend(broker.backend(), ClientConfig::default()).unwrap();
+        let topic = setup
+            .ensure_topic(&TopicSpec { name: Some("t".into()), policy: create(), ..TopicSpec::default() })
+            .await
+            .unwrap()
+            .resource
+            .unwrap();
+        let queue = setup
+            .ensure_queue(&QueueSpec { name: Some("q".into()), policy: create(), ..QueueSpec::default() })
+            .await
+            .unwrap()
+            .resource
+            .unwrap();
+        let mut backend = broker.backend();
+        backend.sqs = Arc::new(FailingQueueAttributes::new(backend.sqs.clone(), 1));
+        backend.sns = Arc::new(ThrottledSubscriptionLookups::new(backend.sns.clone(), 1));
+        let client = client_with(backend);
+        let spec = SubscriptionSpec {
+            topic_arn: topic.arn.clone(),
+            queue_arn: queue.arn.clone(),
+            queue_url: queue.url.clone(),
+            attributes: attrs(&[("RawMessageDelivery", "true")]),
+            manage_queue_policy: true,
+            dead_letter_queue_url: None,
+            dead_letter_queue_arn: None,
+            policy: ensure(),
+        };
+        let report = client.ensure_subscription(&spec).await.unwrap();
+        assert_eq!(report.status, ProvisionStatus::Created, "{:?}", report.error);
+        assert!(report.actions.contains(&"created subscription".to_string()), "{:?}", report.actions);
+        let retries = retried(&client);
+        assert_eq!(
+            retries,
+            [
+                ("subscription".to_string(), "Throttling".to_string()),
+                ("subscription".to_string(), "AWS.SimpleQueueService.NonExistentQueue".to_string())
+            ]
+        );
+        let subscriptions = client.backend().sns.list_subscriptions_by_topic(&topic.arn).await.unwrap();
+        assert_eq!(subscriptions.len(), 1);
+        let policy = client.queue_attributes(&queue.url).await.unwrap()["Policy"].clone();
+        assert!(policy.contains(&topic.arn), "{policy}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn transient_failures_are_tried_five_times_in_all() {
+        let mut backend = MemoryBroker::new("us-east-1", "000000000000").backend();
+        let sqs = Arc::new(FailingQueueAttributes::new(backend.sqs.clone(), 100));
+        backend.sqs = sqs.clone();
+        let client = client_with(backend);
+        let spec = QueueSpec { name: Some("never".into()), policy: ensure(), ..QueueSpec::default() };
+        let started = tokio::time::Instant::now();
+        let report = client.ensure_queue(&spec).await.unwrap();
+        assert_eq!(report.status, ProvisionStatus::Failed);
+        assert!(report.error.unwrap().is_not_found());
+        assert_eq!(report.actions, ["created queue"]);
+        assert_eq!(sqs.calls.load(Ordering::SeqCst), PROVISION_ATTEMPTS as usize);
+        assert_eq!(retried(&client).len(), PROVISION_ATTEMPTS as usize - 1);
+        // Delays of at most 0.5 + 1 + 2 + 4 seconds.
+        assert!(started.elapsed() <= Duration::from_millis(7_500));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_queue_deleted_moments_ago_is_not_tried_again() {
+        let client = client_with(MemoryBroker::new("us-east-1", "000000000000").backend());
+        let spec = QueueSpec { name: Some("again".into()), policy: ensure(), ..QueueSpec::default() };
+        let url = client.ensure_queue(&spec).await.unwrap().resource.unwrap().url;
+        client.delete_queue(&url).await.unwrap();
+        let started = tokio::time::Instant::now();
+        let report = client.ensure_queue(&spec).await.unwrap();
+        assert_eq!(report.status, ProvisionStatus::Failed);
+        let code = report.error.unwrap().aws().and_then(|aws| aws.code.clone());
+        assert_eq!(code.as_deref(), Some("AWS.SimpleQueueService.QueueDeletedRecently"));
+        assert!(retried(&client).is_empty());
+        assert_eq!(started.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lasting_failures_are_not_tried_again() {
+        let mut backend = MemoryBroker::new("us-east-1", "000000000000").backend();
+        let sqs = Arc::new(
+            FailingQueueAttributes::new(backend.sqs.clone(), 100)
+                .with_error(AwsErrorKind::AccessDenied, "AccessDenied"),
+        );
+        backend.sqs = sqs.clone();
+        let client = client_with(backend);
+        let spec = QueueSpec { name: Some("denied".into()), policy: ensure(), ..QueueSpec::default() };
+        let report = client.ensure_queue(&spec).await.unwrap();
+        assert_eq!(report.status, ProvisionStatus::Failed);
+        assert_eq!(sqs.calls.load(Ordering::SeqCst), 1);
+        assert!(retried(&client).is_empty());
+    }
+}
