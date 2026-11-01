@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import re
 import types
 import typing
 from collections.abc import Mapping
@@ -69,6 +70,9 @@ __all__ = [
 ]
 
 _METADATA = "fanferro.aws"
+
+_INTEGER = re.compile(r"-?[0-9]+")
+"""An integer as a string (ASCII digits only: ``str.isdigit()`` accepts ``²``, which ``int()`` rejects)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,7 +192,7 @@ def _convert(value: Any, hint: Any, path: tuple[str, ...]) -> Any:
     elif hint is int:
         if isinstance(value, int) and not isinstance(value, bool):
             return value
-        if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        if isinstance(value, str) and _INTEGER.fullmatch(value.strip()):
             return int(value)
     elif hint is str:
         if isinstance(value, str):

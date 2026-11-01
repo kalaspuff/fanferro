@@ -84,6 +84,13 @@ class TestS3:
             aws.S3Event.from_json({"Records": [{**json.loads(S3_PUT)["Records"][0], "eventTime": "yesterday"}]})
         with pytest.raises(fanferro.DecodeError, match="expected a list"):
             aws.S3Event.from_json({"Records": {}})
+        record = json.loads(S3_PUT)["Records"][0]
+        for size in ("²", "1.5", "", "--1"):
+            record["s3"]["object"]["size"] = size
+            with pytest.raises(fanferro.DecodeError, match="expected int"):
+                aws.S3Event.from_json({"Records": [record]})
+        record["s3"]["object"]["size"] = " 2048 "
+        assert aws.S3Event.from_json({"Records": [record]}).records[0].object.size == 2048
 
 
 class TestSes:
