@@ -7,7 +7,7 @@ When a handler raises:
 1. **Handler actions** decide explicitly: `fanferro.Retry(delay=...)`, `fanferro.Requeue(delay=...)`,
    `fanferro.Reject(reason)` (dead-letter now), `fanferro.Discard(reason)` (delete, no retries).
    A delay is a non-negative number of seconds: `Retry(delay=-1)` and `message.retry(delay=-1)`
-   raise `ValueError` and leave the message unsettled.
+   raise `ConfigurationError` (also a `ValueError`) and leave the message unsettled.
 2. `RetryPolicy.classify(error)` (if set) may return `"retry"`, `"dead_letter"` or `"discard"`.
    A `classify` that raises is reported as a `consumer.error` event (with its own exception), and
    the next steps decide as if it had returned `None`.

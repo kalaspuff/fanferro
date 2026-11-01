@@ -31,6 +31,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
 from fanferro._utils import Duration, seconds
+from fanferro.errors import ConfigurationError
 from fanferro.messages import BatchFailure, PreparedMessage, PublishResult
 
 if TYPE_CHECKING:
@@ -398,7 +399,7 @@ class OutboxRelay:
         max_attempts: int | None = 10,
     ) -> None:
         if max_attempts is not None and max_attempts < 1:
-            raise ValueError("max_attempts must be at least 1 (or None)")
+            raise ConfigurationError("max_attempts must be at least 1 (or None)")
         self.client = client
         self.store = store
         self.batch_size = batch_size

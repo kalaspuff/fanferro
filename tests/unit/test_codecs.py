@@ -273,7 +273,7 @@ def test_custom_codec_takes_precedence() -> None:
     assert registry.encode("abc") == EncodedBody(b"ABC", "text/x-upper")
     assert registry.decode(b"ABC", str, "text/x-upper") == "abc"
     assert registry.by_name("upper").name == "upper"
-    with pytest.raises(KeyError):
+    with pytest.raises(fanferro.ConfigurationError, match="no codec named 'nope'; the registered codecs are 'upper', "):
         registry.by_name("nope")
 
 

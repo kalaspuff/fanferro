@@ -169,6 +169,8 @@ class _Destination(_Resource):
         self._envelope = envelope
         self._large_payloads = large_payloads
         self._group_id = group_id
+        if isinstance(codec, str):
+            client.codecs.by_name(codec)  # fail fast on a codec name that is not registered
         self._codec = codec
         self._transport: Transport | None = None
         self._destination_cache: tuple[Any, dict[str, Any]] | None = None

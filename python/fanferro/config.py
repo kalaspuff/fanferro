@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from fanferro._utils import Duration, seconds
+from fanferro._utils import Duration, optional_seconds, seconds
+from fanferro.errors import ConfigurationError
 
 __all__ = ["AwsRetry", "Credentials", "Timeouts"]
 
@@ -50,10 +51,16 @@ class AwsRetry:
     initial_backoff: Duration = 0.2
     max_backoff: Duration = 20.0
 
+    def __post_init__(self) -> None:
+        if self.max_attempts < 1:
+            raise ConfigurationError(f"max_attempts must be at least 1, got {self.max_attempts}")
+        if self.mode not in ("standard", "adaptive"):
+            raise ConfigurationError(f"mode must be 'standard' or 'adaptive', got {self.mode!r}")
+        seconds(self.initial_backoff, "initial_backoff")
+        seconds(self.max_backoff, "max_backoff")
+
     def to_core(self) -> dict[str, Any]:
         """The core representation."""
-        if self.max_attempts < 1:
-            raise ValueError("max_attempts must be at least 1")
         return {
             "max_attempts": self.max_attempts,
             "mode": self.mode,
@@ -82,6 +89,10 @@ class Timeouts:
     read: Duration | None = 10.0
     operation: Duration | None = None
     attempt: Duration | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("connect", "read", "operation", "attempt"):
+            optional_seconds(getattr(self, name), name)
 
     def to_core(self) -> dict[str, Any]:
         """The core representation."""

@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! FanferroError
-//! ├── ConfigurationError
+//! ├── ConfigurationError               (also a ValueError)
 //! ├── ValidationError
 //! │   └── MessageTooLargeError        (.size, .limit)
 //! ├── AwsError                         (.service .operation .kind .code .aws_message .request_id .status)
@@ -13,22 +13,25 @@
 //! ├── PayloadError
 //! │   └── PayloadIntegrityError
 //! ├── EnvelopeError
-//! ├── LeaseError
+//! ├── LeaseError                       (also a RuntimeError)
 //! └── ShutdownError
 //! ```
 //!
 //! Every instance has a `retryable` attribute. Python-only errors (provisioning, codecs,
 //! routing, ...) are defined in `fanferro/errors.py` and also derive from `FanferroError`.
 //! The classes below name `fanferro.errors` as their module too: it re-exports them, so
-//! tracebacks show the public name and `pickle` finds them there.
+//! tracebacks show the public name and `pickle` finds them there. `create_exception!` takes one
+//! base class, so the two that also derive from a built-in exception (`except ValueError` keeps
+//! catching invalid options) are created by calling `type(name, bases, namespace)`.
 
 use fanferro_core::error::{AwsErrorKind, Error};
 use pyo3::create_exception;
-use pyo3::exceptions::PyException;
+use pyo3::exceptions::{PyException, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
+use pyo3::types::{PyDict, PyTuple, PyType};
 
 create_exception!(fanferro.errors, FanferroError, PyException, "Base class of all fanferro errors.");
-create_exception!(fanferro.errors, ConfigurationError, FanferroError, "Invalid configuration.");
 create_exception!(
     fanferro.errors,
     ValidationError,
@@ -59,13 +62,72 @@ create_exception!(
     "A fetched payload did not match its recorded size or checksum."
 );
 create_exception!(fanferro.errors, EnvelopeError, FanferroError, "A message envelope could not be produced or parsed.");
-create_exception!(
-    fanferro.errors,
-    LeaseError,
-    FanferroError,
-    "The message was already settled or its lease is no longer valid."
-);
 create_exception!(fanferro.errors, ShutdownError, FanferroError, "The consumer or client is shut down.");
+
+/// An exception class deriving from `FanferroError` and a built-in exception, created once.
+struct TwoBaseException {
+    class: PyOnceLock<Py<PyType>>,
+    name: &'static str,
+    doc: &'static str,
+    builtin: fn(Python<'_>) -> Bound<'_, PyType>,
+}
+
+impl TwoBaseException {
+    fn class<'py>(&self, py: Python<'py>) -> &Bound<'py, PyType> {
+        self.class
+            .get_or_init(py, || {
+                let created = (|| -> PyResult<Py<PyType>> {
+                    let bases = PyTuple::new(py, [py.get_type::<FanferroError>(), (self.builtin)(py)])?;
+                    let namespace = PyDict::new(py);
+                    namespace.set_item("__module__", "fanferro.errors")?;
+                    namespace.set_item("__doc__", self.doc)?;
+                    let class = py.get_type::<PyType>().call1((self.name, bases, namespace))?;
+                    Ok(class.cast_into::<PyType>()?.unbind())
+                })();
+                created.unwrap_or_else(|err| panic!("cannot create fanferro.errors.{}: {err}", self.name))
+            })
+            .bind(py)
+    }
+
+    fn new_err(&self, message: String) -> PyErr {
+        Python::attach(|py| PyErr::from_type(self.class(py).clone(), message))
+    }
+}
+
+static CONFIGURATION_ERROR: TwoBaseException = TwoBaseException {
+    class: PyOnceLock::new(),
+    name: "ConfigurationError",
+    doc: "Invalid configuration (also a ValueError).",
+    builtin: |py| py.get_type::<PyValueError>(),
+};
+
+static LEASE_ERROR: TwoBaseException = TwoBaseException {
+    class: PyOnceLock::new(),
+    name: "LeaseError",
+    doc: "The message was already settled or its lease is no longer valid (also a RuntimeError).",
+    builtin: |py| py.get_type::<PyRuntimeError>(),
+};
+
+/// `fanferro.errors.ConfigurationError`: invalid configuration (also a `ValueError`).
+pub struct ConfigurationError;
+
+impl ConfigurationError {
+    /// Creates the error with `message`.
+    pub fn new_err(message: impl Into<String>) -> PyErr {
+        CONFIGURATION_ERROR.new_err(message.into())
+    }
+}
+
+/// `fanferro.errors.LeaseError`: the message was already settled or its lease is no longer valid
+/// (also a `RuntimeError`).
+pub struct LeaseError;
+
+impl LeaseError {
+    /// Creates the error with `message`.
+    pub fn new_err(message: impl Into<String>) -> PyErr {
+        LEASE_ERROR.new_err(message.into())
+    }
+}
 
 /// Converts a core error into a Python exception with structured attributes.
 pub fn to_py_err(error: Error) -> PyErr {
@@ -121,7 +183,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
     for (name, class) in [
         ("FanferroError", py.get_type::<FanferroError>()),
-        ("ConfigurationError", py.get_type::<ConfigurationError>()),
+        ("ConfigurationError", CONFIGURATION_ERROR.class(py).clone()),
         ("ValidationError", py.get_type::<ValidationError>()),
         ("MessageTooLargeError", py.get_type::<MessageTooLargeError>()),
         ("AwsError", py.get_type::<AwsError>()),
@@ -132,7 +194,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         ("PayloadError", py.get_type::<PayloadError>()),
         ("PayloadIntegrityError", py.get_type::<PayloadIntegrityError>()),
         ("EnvelopeError", py.get_type::<EnvelopeError>()),
-        ("LeaseError", py.get_type::<LeaseError>()),
+        ("LeaseError", LEASE_ERROR.class(py).clone()),
         ("ShutdownError", py.get_type::<ShutdownError>()),
     ] {
         // Errors raised from Rust default to non-retryable; instances override this.

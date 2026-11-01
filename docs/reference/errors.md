@@ -5,6 +5,12 @@ retrying the same operation unchanged may succeed). Errors raised by the Rust co
 `category`; AWS errors have `service`, `operation`, `kind`, `code`, `aws_message`, `request_id`
 and `status`.
 
+Invalid options of the client, resources, consumers, policies and middleware raise
+`ConfigurationError` where they are given (a misspelt codec name lists the registered ones), and
+settling a message twice raises `LeaseError`. Both also derive from the built-in exception that
+Python code expects for them, `ValueError` and `RuntimeError`, as `HandlerTimeoutError` derives
+from `TimeoutError`. Arguments of the wrong type raise `TypeError`.
+
 All of them are classes of `fanferro.errors` (also exported by `fanferro`), the module that
 tracebacks, the `error_type` of events and dead-letter metadata, and OpenTelemetry's `error.type`
 name: `fanferro.errors.AccessDeniedError`.
@@ -19,7 +25,7 @@ every attribute. `AttributeValue` and `WireMessage` pickle too.
 
 | Exception | Raised when | Retryable |
 | --- | --- | --- |
-| `ConfigurationError` | Invalid configuration (client, consumer, resource declarations) | no |
+| `ConfigurationError` | Invalid configuration: client, consumer, resource declarations, policies, codec names (also a `ValueError`) | no |
 | `ValidationError` | A value is invalid before any network call (attributes, FIFO group id, reserved names) | no |
 | `MessageTooLargeError` | Encoded message exceeds the destination limit without offloading (`.size`, `.limit`) | no |
 | `AwsError` | An AWS call failed (`kind`: throttling, transient, timeout, network, not_found, access_denied, invalid_request, kms, receipt_handle_invalid, service) | by kind |
@@ -30,7 +36,7 @@ every attribute. `AttributeValue` and `WireMessage` pickle too.
 | `PayloadError` | Storing or fetching a claim-check payload failed (also: URL not allowed) | no |
 | `PayloadIntegrityError` | Downloaded payload size or SHA-256 does not match | no |
 | `EnvelopeError` | Envelope could not be produced or parsed | no |
-| `LeaseError` | Message already settled, or its lease is no longer valid | no |
+| `LeaseError` | Message already settled, or its lease is no longer valid (also a `RuntimeError`) | no |
 | `ShutdownError` | Consumer/client closed, or used after `fork()` | no |
 | `ProvisioningError` | Provisioning failed with failure mode `"raise"` (`.report`) | by cause |
 | `ResourceUnavailableError` | A resource could not be resolved (log/ignore mode); re-resolved later | yes |
