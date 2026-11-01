@@ -130,7 +130,7 @@ fn subscription_info_to_py(py: Python<'_>, subscription: &SubscriptionInfo) -> P
     dict.into_py_any(py)
 }
 
-/// Converts an event into a `dict`.
+/// Converts a received (peeked) message into a `dict`.
 fn received_message_to_py(py: Python<'_>, message: &ReceivedMessage) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     let system = &message.system;
@@ -152,6 +152,7 @@ fn received_message_to_py(py: Python<'_>, message: &ReceivedMessage) -> PyResult
     dict.into_py_any(py)
 }
 
+/// Converts the messages a redrive did not move (or delete) into a list of `dict`s.
 fn not_moved_to_py(py: Python<'_>, entries: &[NotMoved]) -> PyResult<Py<PyAny>> {
     let list = PyList::empty(py);
     for entry in entries {
@@ -164,6 +165,7 @@ fn not_moved_to_py(py: Python<'_>, entries: &[NotMoved]) -> PyResult<Py<PyAny>> 
     list.into_py_any(py)
 }
 
+/// Converts a redrive report into a `dict`.
 fn redrive_report_to_py(py: Python<'_>, report: &RedriveReport) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     dict.set_item("moved", report.moved)?;
@@ -173,6 +175,7 @@ fn redrive_report_to_py(py: Python<'_>, report: &RedriveReport) -> PyResult<Py<P
     dict.into_py_any(py)
 }
 
+/// Converts an event into a `dict`.
 pub fn event_to_py(py: Python<'_>, event: &Event) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     dict.set_item("kind", event.kind.as_str())?;
