@@ -8,6 +8,39 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-01
+
+### Features
+
+- [**breaking**] Statistics, metrics, queue counts and dead-letter info are typed objects (#250)
+- **lambda:** Consume SQS event source records in Lambda with fanferro's decoding and routing (#251)
+- **dead-letter:** Inspect and redrive dead-letter queues with queue.peek(), queue.redrive() and fanferro dlq (#252)
+- **consumer:** Consumer.health() and client.health() for liveness and readiness probes (#260)
+- **testing:** Transport metadata on built messages and dispatch() through a consumer's processing (#265)
+- Type the keyword options of publishing, consumers, subscriptions, provisioning and memory_client (#266)
+- Python-style reprs for native types, and reprs for Router, MemoryBroker, CodecRegistry and MessageTypes (#264)
+
+### Bug fixes
+
+- **consumer:** Heartbeats back off failed extensions and a slow call no longer delays other leases (#259)
+- **publish:** Publish_batch no longer retries batch calls that failed as a whole on top of the AWS SDK (#254)
+- **release:** Prepare release gives git-cliff a GitHub token and shows why git-cliff failed (#262)
+- **typing:** @consumer.route, @consumer.default and @client.on keep the types of the functions they decorate (#263)
+- [**breaking**] Invalid options, unknown codec names and double settlements raise fanferro errors (#267)
+
+### Performance
+
+- **publish:** FIFO batches send their message groups' calls in parallel lanes (#255)
+- **outbox:** Relay rounds publish FIFO groups and destinations at once (#256)
+- **publish:** Less Python per publish, and OpenTelemetry without an SDK costs well under a microsecond (#257)
+- **idempotency:** InMemoryIdempotencyStore sweeps only expired keys and keeps at most max_entries (#253)
+- **consumer:** Decode received bodies without a copy, presize downloads and hash large payloads off the workers (#258)
+- **publish:** Share bodies from Python to the SDK, hash offloaded payloads once and check text faster (#261)
+
+### Tests
+
+- Run the Python tests in parallel with pytest-xdist (#249)
+
 ## [0.8.0] - 2026-11-01
 
 ### Bug fixes
