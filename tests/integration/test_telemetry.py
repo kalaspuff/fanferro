@@ -183,8 +183,8 @@ async def test_disabled_telemetry(name: Any) -> None:
 async def test_trace_context_passes_through_without_an_sdk(name: Any) -> None:
     # Without an SDK, spans record nothing, but a handler still runs in the producer's trace
     # context, so messages it publishes carry that context on.
-    if not isinstance(trace.get_tracer_provider(), getattr(trace, "ProxyTracerProvider", ())):
-        pytest.skip("a global tracer provider is configured in this process")
+    # No test leaves a global tracer provider behind (tests/conftest.py checks it).
+    assert isinstance(trace.get_tracer_provider(), trace.ProxyTracerProvider)
     client = testing.memory_client()
     queue = client.queue(name("no-sdk"))
     forward = client.queue(name("no-sdk-forward"))
