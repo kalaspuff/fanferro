@@ -202,6 +202,35 @@ attribute. `TomodachiJSON` refuses binary payloads and `TomodachiProtobuf` JSON 
 * tomodachi does not read claim checks: do not offload payloads (`large_payloads`) of messages for
   tomodachi services; compression keeps most of them within the SNS limit.
 
+### Compared with tomodachi
+
+Exchanging the same messages, fanferro uses about 3× less CPU per published message and about 9×
+less per consumed message than a tomodachi service doing the same work, in about half the memory:
+
+| CPU per message | fanferro | tomodachi |
+| --- | ---: | ---: |
+| JSON (`TomodachiJSON` / `JsonBase`), publish one at a time | 176 µs | 554 µs |
+| JSON, publish 50 at a time | 136 µs | 437 µs |
+| JSON, consume (body decoded into a dict) | 51 µs | 466 µs |
+| protobuf (`TomodachiProtobuf` / `ProtobufBase`), publish one at a time | 179 µs | 520 µs |
+| protobuf, consume (body decoded into the message class) | 45 µs | 467 µs |
+| protobuf without an envelope (fanferro's default; tomodachi base64-encoding by hand), publish | 179 µs | 488 µs |
+| protobuf without an envelope, consume | 47 µs | 454 µs |
+| resident memory of the process | 39-47 MB | 65-77 MB |
+
+fanferro also publishes batches (`publish_batch()`, 10 messages per call: 33 µs per message), which
+tomodachi does not. Consuming, the difference comes from fanferro receiving, unwrapping SNS
+notifications and parsing the tomodachi envelope in Rust, off the event loop, and deleting messages
+in batches, where tomodachi makes a call through botocore for each message; the envelope itself
+barely matters on either side.
+
+Measured on 2026-11-01 with fanferro 0.9.0 and tomodachi 0.29.0, both on Python 3.13 and asyncio,
+against MiniStack on the same machine (Linux aarch64, 4 CPUs): 2,000 messages of about 400 bytes
+(JSON) or 174 bytes (protobuf) after 50 to warm up, medians of three runs, which differed by less
+than 3%. The CPU is that of the publishing or consuming process (its event loop and its threads),
+not of MiniStack, so it leaves out the time spent waiting for the network; against SQS, round
+trips set the throughput, but each message costs the process about as much CPU.
+
 ## Binary data on SQS
 
 SQS bodies must be text. Binary bodies (protobuf, compressed data) are base64-encoded by the
