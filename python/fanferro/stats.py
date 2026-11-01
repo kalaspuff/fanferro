@@ -423,7 +423,8 @@ class ClientHealth(_HealthSnapshot):
     A client without consumers is healthy and ready.
 
     Attributes:
-        consumers: Health of each consumer, by consumer name.
+        consumers: Health of each consumer, by consumer name; consumers that share a name (by default
+            the queue's) after the first are ``name#2``, ``name#3``... in the order they were created.
     """
 
     consumers: Mapping[str, ConsumerHealth]

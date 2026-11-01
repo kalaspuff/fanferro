@@ -232,3 +232,21 @@ async def test_consumers_failing_one_after_the_other_let_the_others_drain() -> N
         with pytest.raises(fanferro.ResourceNotFoundError):
             await asyncio.wait_for(run, 30)
     assert finished == [1], "the healthy consumer's handler must drain, not be cancelled"
+
+
+async def test_consumers_sharing_a_name_all_count_in_client_health() -> None:
+    client = testing.memory_client()
+    queue = client.queue("shared")
+    first = client.consumer(queue, _ignore, wait_time=1)
+    second = client.consumer(queue, _ignore, wait_time=1)
+    third = client.consumer(queue, _ignore, wait_time=1)
+    assert first.name == second.name == third.name == "shared"
+    async with client:
+        await first.start()
+        await third.start()
+        health = client.health()
+        assert list(health.consumers) == ["shared", "shared#2", "shared#3"]
+        assert health.consumers["shared#2"].state == "created"
+        assert not health.healthy(), "a consumer that is not running must not hide behind one that is"
+        await first.stop()
+        await third.stop()

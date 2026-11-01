@@ -32,7 +32,7 @@ from fanferro.provisioning import (
 )
 from fanferro.resources import _UNSET, GroupId, Queue, Subscription, Topic
 from fanferro.routing import Router
-from fanferro.stats import ClientCounters, ClientHealth, ClientMetrics
+from fanferro.stats import ClientCounters, ClientHealth, ClientMetrics, ConsumerHealth
 from fanferro.telemetry import Telemetry, TelemetryRuntime, monotonic
 
 if TYPE_CHECKING:
@@ -1124,7 +1124,15 @@ class Client:
         is wrong); see :class:`~fanferro.stats.ClientHealth`. Cheap: no AWS call; safe to call from
         another thread.
         """
-        return ClientHealth(consumers={consumer.name: consumer.health() for consumer in self._consumers})
+        consumers: dict[str, ConsumerHealth] = {}
+        for consumer in self._consumers:
+            # Names need not be unique (they default to the queue's): none may hide another.
+            key, count = consumer.name, 1
+            while key in consumers:
+                count += 1
+                key = f"{consumer.name}#{count}"
+            consumers[key] = consumer.health()
+        return ClientHealth(consumers=consumers)
 
     async def account(self) -> str:
         """The AWS account id of the configured credentials."""
