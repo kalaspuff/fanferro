@@ -1325,3 +1325,35 @@ async fn numbers_of_more_than_38_digits_are_refused_like_sqs() {
         )
     );
 }
+
+/// Receipt handles of earlier receives the broker holds, over all queues.
+fn earlier_receipts(broker: &MemoryBroker) -> usize {
+    let state = broker.inner.state.lock();
+    state.queues.values().flat_map(|queue| queue.messages.iter()).map(|message| message.earlier_receipts.len()).sum()
+}
+
+#[tokio::test(start_paused = true)]
+async fn earlier_receipt_handles_are_forgotten_with_their_message() {
+    // #212: the broker kept every replaced receipt handle for its whole life.
+    let (broker, backend) = broker();
+    let url = backend.sqs.create_queue("q", &StringMap::new(), &StringMap::new()).await.unwrap();
+    for body in ["deleted", "purged"] {
+        backend.sqs.send_message(&url, send(body)).await.unwrap();
+    }
+    let mut handles: HashMap<String, Vec<String>> = HashMap::new();
+    for _ in 0..3 {
+        for message in backend.sqs.receive_messages(receive(&url, 10, Some(1))).await.unwrap() {
+            handles.entry(message.body.clone()).or_default().push(message.receipt_handle);
+        }
+        tokio::time::advance(Duration::from_secs(2)).await;
+    }
+    assert_eq!(earlier_receipts(&broker), 4, "two earlier handles per message");
+    // Earlier handles of a message still in the queue keep working on a standard queue.
+    change_visibility(&backend, &url, &handles["deleted"][0], 30).await.unwrap();
+    delete(&backend, &url, &handles["deleted"][1]).await.unwrap();
+    assert_eq!(earlier_receipts(&broker), 2, "a deleted message's handles go with it");
+    // An earlier handle of a deleted message is answered as before.
+    delete(&backend, &url, &handles["deleted"][0]).await.unwrap();
+    backend.sqs.purge_queue(&url).await.unwrap();
+    assert_eq!(earlier_receipts(&broker), 0, "a purge forgets them too");
+}

@@ -19,7 +19,7 @@
 pub mod filter_policy;
 mod store;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -266,7 +266,6 @@ struct State {
     topics: BTreeMap<String, Topic>,
     subscriptions: BTreeMap<String, Subscription>,
     buckets: BTreeMap<String, BTreeMap<String, StoredObject>>,
-    retired_receipts: HashMap<String, String>,
     /// When queues were deleted, by name (SQS refuses to create them again for 60 seconds).
     deleted_queues: HashMap<String, Instant>,
     sequence: u64,
@@ -640,6 +639,7 @@ fn enqueue(state: &mut State, queue_url: &str, operation: &'static str, request:
             receive_count,
             first_receive,
             receipt_handle: None,
+            earlier_receipts: HashSet::new(),
             received_at: None,
             in_flight: false,
             group_id: request.group_id,
@@ -849,12 +849,8 @@ fn try_receive(state: &mut State, request: &ReceiveRequest, now: Instant) -> Res
         .take(max)
         .collect();
     let mut received = Vec::with_capacity(sequences.len());
-    let mut retired = Vec::new();
     for sequence in sequences {
-        let Some((message, previous)) = queue.messages.receive(sequence, now, now + visibility) else { continue };
-        if let Some(previous) = previous {
-            retired.push((previous, message.message_id.clone()));
-        }
+        let Some(message) = queue.messages.receive(sequence, now, now + visibility) else { continue };
         received.push(ReceivedMessage {
             message_id: message.message_id.clone(),
             receipt_handle: message.receipt_handle.clone().unwrap_or_default(),
@@ -874,9 +870,6 @@ fn try_receive(state: &mut State, request: &ReceiveRequest, now: Instant) -> Res
                 dead_letter_queue_source_arn: message.dead_letter_source.clone(),
             },
         });
-    }
-    for (handle, message_id) in retired {
-        state.retired_receipts.insert(handle, message_id);
     }
     Ok(received)
 }
@@ -913,17 +906,20 @@ enum Receipt {
 }
 
 impl Receipt {
-    fn of(queue: &Queue, retired: &HashMap<String, String>, handle: &str) -> Self {
+    fn of(queue: &Queue, handle: &str) -> Self {
         if let Some(sequence) = queue.messages.by_receipt(handle) {
             return Self::Current(sequence);
         }
-        let earlier = retired.get(handle).map(String::as_str);
         // The broker's handles are `<message id>#<uuid>`.
-        let Some(message_id) = earlier.or_else(|| handle.split_once('#').map(|(id, _)| id)) else {
+        let Some((message_id, _)) = handle.split_once('#') else {
             return Self::Invalid;
         };
         match queue.messages.by_id(message_id) {
-            Some(sequence) if earlier.is_some() => Self::Earlier(sequence),
+            Some(sequence)
+                if queue.messages.get(sequence).is_some_and(|message| message.earlier_receipts.contains(handle)) =>
+            {
+                Self::Earlier(sequence)
+            }
             Some(_) => Self::Invalid,
             None => Self::Gone,
         }
@@ -1046,13 +1042,13 @@ impl SqsApi for MemorySqs {
 
     async fn delete_message_batch(&self, queue_url: &str, receipt_handles: Vec<String>) -> Result<BatchResult<()>> {
         let mut state = self.0.state.lock();
-        let State { queues, retired_receipts, .. } = &mut *state;
+        let State { queues, .. } = &mut *state;
         let queue = queues.get_mut(queue_url).ok_or_else(|| queue_not_found("DeleteMessageBatch"))?;
         // Deleting can unblock a FIFO message group: wake long polls like SQS would.
         queue.notify.notify_waiters();
         let results = receipt_handles
             .into_iter()
-            .map(|handle| match Receipt::of(queue, retired_receipts, &handle) {
+            .map(|handle| match Receipt::of(queue, &handle) {
                 Receipt::Current(sequence) => {
                     queue.messages.remove(sequence);
                     Ok(())
@@ -1078,7 +1074,7 @@ impl SqsApi for MemorySqs {
         entries: Vec<VisibilityChange>,
     ) -> Result<BatchResult<()>> {
         let mut state = self.0.state.lock();
-        let State { queues, retired_receipts, .. } = &mut *state;
+        let State { queues, .. } = &mut *state;
         let queue = queues.get_mut(queue_url).ok_or_else(|| queue_not_found("ChangeMessageVisibilityBatch"))?;
         let now = Instant::now();
         // Messages whose visibility timeout expired are no longer in flight.
@@ -1097,7 +1093,7 @@ impl SqsApi for MemorySqs {
                         ),
                     ));
                 }
-                let sequence = match Receipt::of(queue, retired_receipts, &entry.receipt_handle) {
+                let sequence = match Receipt::of(queue, &entry.receipt_handle) {
                     Receipt::Current(sequence) => sequence,
                     // A standard queue applies the handle of an earlier receive too.
                     Receipt::Earlier(sequence) if !queue.fifo => sequence,
