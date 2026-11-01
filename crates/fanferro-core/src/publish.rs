@@ -228,7 +228,7 @@ pub(crate) fn is_fifo_id(id: &str) -> bool {
     (1..=128).contains(&id.len()) && id.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
-fn entry_error(service: &'static str, operation: &'static str, error: &BatchEntryError) -> Error {
+pub(crate) fn entry_error(service: &'static str, operation: &'static str, error: &BatchEntryError) -> Error {
     let mut kind = classify(Some(&error.code), error.message.as_deref(), None);
     if !error.sender_fault && !kind.is_retryable() {
         kind = crate::error::AwsErrorKind::Transient;

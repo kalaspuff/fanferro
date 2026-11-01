@@ -43,6 +43,7 @@ from fanferro import middleware as middleware
 from fanferro import payloads as payloads
 from fanferro import policies as policies
 from fanferro import provisioning as provisioning
+from fanferro import redrive as redrive
 from fanferro import resources as resources
 from fanferro import routing as routing
 from fanferro import stats as stats
@@ -118,6 +119,7 @@ from fanferro.provisioning import (
     TopicAttributes,
     TopicInfo,
 )
+from fanferro.redrive import PeekedMessage, RedriveFailure, RedriveResult
 from fanferro.resources import Queue, Subscription, Topic
 from fanferro.routing import Route, Router
 from fanferro.stats import ClientCounters, ClientMetrics, ConsumerStats, EngineStats, QueueCounts
@@ -180,6 +182,7 @@ __all__ = [
     "PayloadFetch",
     "PayloadIntegrityError",
     "PayloadPointer",
+    "PeekedMessage",
     "PrepareNext",
     "PreparedMessage",
     "Propagation",
@@ -195,6 +198,8 @@ __all__ = [
     "QueueCounts",
     "QueueInfo",
     "RateLimit",
+    "RedriveFailure",
+    "RedriveResult",
     "Reject",
     "Requeue",
     "ResourceNotFoundError",

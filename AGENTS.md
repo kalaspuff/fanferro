@@ -12,7 +12,8 @@ the message pipeline and the invariants you must preserve.
 
 ```text
 crates/fanferro-core/src/      Rust core (no Python): envelope/, transport/, publish.rs, consumer/,
-                               provision/, backend/{aws,memory}/, events.rs, metrics.rs, retry.rs
+                               provision/, backend/{aws,memory}/, events.rs, metrics.rs, retry.rs,
+                               redrive.rs
 crates/fanferro-core/tests/    Rust end-to-end tests against an emulator (aws_emulator.rs)
 crates/fanferro-py/src/        PyO3 bindings: runtime.rs (Tokio + asyncio bridge), errors.rs, convert.rs,
                                types.rs, envelopes.rs, client.rs, consumer.rs

@@ -12,7 +12,9 @@ uv run fanferro guide        # or: python -m fanferro guide
 ```
 
 It is authoritative for the installed version (this skill only summarizes it). Also useful:
-`fanferro events` (event kinds), `fanferro attributes` (reserved message attributes).
+`fanferro events` (event kinds), `fanferro attributes` (reserved message attributes),
+`fanferro dlq stats|peek|redrive --queue-url URL` (inspect a dead-letter queue, move its messages back;
+in code: `await dlq.peek()`, `await dlq.redrive()`).
 
 ## Non-negotiables
 
