@@ -49,9 +49,15 @@ queue never revokes a subscription's permission.
 concurrently, up to 8 at a time, and then the subscriptions, so a service's startup waits for a few
 round trips rather than for every call in turn. A dead-letter queue comes with the report of the
 queue that provisioned it, without being looked up again. Subscriptions of the same queue (or
-dead-letter queue) run one after another, since each one rewrites that queue's policy. When a
-resource raises, the others still finish first; the error of the first such resource in
-declaration order is raised. Events of different resources may arrive in any order.
+dead-letter queue) run one after another, in declaration order. When a resource raises, the others
+still finish first; the error of the first such resource in declaration order is raised. Events of
+different resources may arrive in any order.
+
+A subscription rewrites the policy of its queue (and of its own dead-letter queue)
+read-modify-write, so the client lets one subscription at a time do so for each queue, however it
+is resolved: by `client.provision()`, `subscription.resolve()`, a consumer starting, or a publish
+resolving late subscriptions. Two at once could otherwise drop the statement the other has just
+added, and SNS would silently drop that topic's messages.
 
 ## Policies
 
