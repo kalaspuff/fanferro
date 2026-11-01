@@ -86,8 +86,20 @@ def test_benchmark_runs() -> None:
     )
     assert result.returncode == 0, result.stderr
     rows = [json.loads(line) for line in result.stdout.splitlines()]
-    assert [row["scenario"] for row in rows] == list(load("benchmark").SCENARIOS)
+    # Each scenario with the default telemetry and with Telemetry.disabled().
+    assert [(row["scenario"], row["telemetry"]) for row in rows] == [
+        (scenario, telemetry) for scenario in load("benchmark").SCENARIOS for telemetry in ("default", "disabled")
+    ]
     assert all(row["messages"] == 30 and row["wall_us_per_message"] > 0 for row in rows)
+
+
+def test_benchmark_runs_one_telemetry_configuration() -> None:
+    command = [sys.executable, "-I", str(SCRIPTS / "benchmark.py"), "-n", "30", "--json"]
+    command += ["--scenarios", "publish", "--telemetry", "disabled"]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=120, check=False)
+    assert result.returncode == 0, result.stderr
+    rows = [json.loads(line) for line in result.stdout.splitlines()]
+    assert [(row["scenario"], row["telemetry"]) for row in rows] == [("publish", "disabled")]
 
 
 def test_wheel_smoke_test_passes() -> None:
