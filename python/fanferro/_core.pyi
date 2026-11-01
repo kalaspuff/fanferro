@@ -2,7 +2,7 @@
 # Keep in sync with the Rust bindings: scripts/check_consistency.py verifies the names.
 
 import datetime
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Literal, final
 
 __version__: str
@@ -232,6 +232,43 @@ class TomodachiProtobufEnvelope:
     def __hash__(self) -> int: ...
 
 @final
+class MetadataProtobufEnvelope:
+    def __init__(
+        self,
+        envelope: str,
+        *,
+        version: str | None = None,
+        service_name: str | None = None,
+        correlation_id: Callable[[], str | None] | None = None,
+        generate_missing_correlation_id: bool = True,
+        type_attribute: str | None = "fanferro.type",
+        compress_threshold: int | None = 60000,
+    ) -> None: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def envelope(self) -> str: ...
+    @property
+    def version(self) -> str | None: ...
+    @property
+    def marker(self) -> str: ...
+    @property
+    def service_name(self) -> str | None: ...
+    @property
+    def correlation_id(self) -> Callable[[], str | None] | None: ...
+    @property
+    def generate_missing_correlation_id(self) -> bool: ...
+    @property
+    def type_attribute(self) -> str | None: ...
+    @property
+    def compress_threshold(self) -> int | None: ...
+    def wrap(self, payload: Payload) -> WireMessage: ...
+    def wrap_for(self, payload: Payload, kind: Literal["topic", "queue"], name: str) -> WireMessage: ...
+    def unwrap(self, wire: WireMessage) -> Payload | None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
 class Transport:
     @property
     def offloading(self) -> bool: ...
@@ -335,6 +372,7 @@ class CoreClient:
             | RawEnvelope
             | TomodachiJSONEnvelope
             | TomodachiProtobufEnvelope
+            | MetadataProtobufEnvelope
         ]
         | None = None,
     ) -> ConsumerEngine: ...

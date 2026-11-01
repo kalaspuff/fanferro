@@ -32,6 +32,7 @@ from fanferro._core import (
     Delivery,
     FanferroError,
     LeaseError,
+    MetadataProtobufEnvelope,
     ShutdownError,
     TomodachiJSONEnvelope,
     TomodachiProtobufEnvelope,
@@ -89,6 +90,7 @@ _BUILTIN_ENVELOPES = (
     Raw,
     TomodachiJSONEnvelope,
     TomodachiProtobufEnvelope,
+    MetadataProtobufEnvelope,
 )
 
 

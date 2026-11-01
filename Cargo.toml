@@ -46,7 +46,7 @@ time = { version = "0.3", features = ["formatting", "parsing", "macros", "serde"
 tokio = { version = "1.53", features = ["rt-multi-thread", "time", "sync", "macros"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
-uuid = { version = "1.28", features = ["v4", "v7", "fast-rng"] }
+uuid = { version = "1.28", features = ["v4", "v5", "v7", "fast-rng"] }
 
 # Local/editable builds: optimized but quick to compile.
 [profile.release]

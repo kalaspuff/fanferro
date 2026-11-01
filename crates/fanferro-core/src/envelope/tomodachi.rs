@@ -24,6 +24,9 @@
 //! The tomodachi topic is the fanferro message type: incoming messages take their type from
 //! `metadata.topic` (unless they carry the type attribute), and a message published to a topic
 //! names that topic, decoded from tomodachi's topic name encoding, in `metadata.topic`.
+//!
+//! [`MetadataProtobuf`] is a protobuf envelope with a metadata message that tomodachi services
+//! bring as their own envelope, sent like tomodachi's.
 
 use std::borrow::Cow;
 use std::sync::OnceLock;
@@ -43,6 +46,10 @@ use super::{
 };
 use crate::error::{Error, Result};
 use crate::types::{Headers, MessageAttributes, Payload, WireMessage, new_message_id};
+
+mod metadata;
+
+pub use metadata::{CORRELATION_ID_HEADER, DATA_CLASS_HEADER, MetadataProtobuf};
 
 /// `metadata.protocol_version` of tomodachi's JSON envelope (`tomodachi.envelope.JsonBase`).
 pub const TOMODACHI_JSON_PROTOCOL_VERSION: &str = "tomodachi-json-base--1.0.0";

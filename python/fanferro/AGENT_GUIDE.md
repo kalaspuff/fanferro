@@ -27,9 +27,11 @@ compact reference for writing applications with it. Print it with `fanferro guid
    context). Messages are raw by default (the body is the JSON document); use
    `Client(envelope=fanferro.envelopes.CloudEvents())` when consumers need CloudEvents metadata
    (`source`, `subject`, headers inside the body). To exchange messages with tomodachi services,
-   use `fanferro.envelopes.compat.TomodachiJSON()`/`TomodachiProtobuf()` (envelope of their
-   topics and queues, and in `accept_envelopes` before `Raw`); the tomodachi topic is the message
-   type (`@fanferro.message_type("order-created")` on the model), and the data decodes into and
+   use `fanferro.envelopes.compat.TomodachiJSON()`/`TomodachiProtobuf()`, or
+   `MetadataProtobuf("<envelope name>", version=..., correlation_id=...)` for services with a
+   protobuf data + metadata envelope of their own (envelope of their topics and queues, and in
+   `accept_envelopes` before `Raw`; correlation ids are the `correlationid` header); the tomodachi
+   topic is the message type (`@fanferro.message_type("order-created")` on the model), and the data decodes into and
    encodes from models like any payload. S3 event and SES email notifications (from SNS or
    straight to SQS) are recognised and typed by default: annotate handlers with
    `fanferro.aws.S3Event`, `SesBounceNotification`, `SesComplaintNotification` or

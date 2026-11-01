@@ -202,6 +202,92 @@ attribute. `TomodachiJSON` refuses binary payloads and `TomodachiProtobuf` JSON 
 * tomodachi does not read claim checks: do not offload payloads (`large_payloads`) of messages for
   tomodachi services; compression keeps most of them within the SNS limit.
 
+### Metadata protobuf envelopes
+
+tomodachi services can bring an envelope of their own. `compat.MetadataProtobuf` reads and writes
+one layout of such envelopes: a protobuf message of the data and a metadata message, base64-encoded
+as the body and sent like tomodachi's envelopes.
+
+```proto
+message Metadata {
+    string uuid = 1;            // message.id
+    string envelope = 2;        // the envelope's name and version: "example-envelope--1.0.0"
+    string topic = 3;           // message.type
+    string origin = 4;          // message.source
+    string timestamp = 5;       // message.time, "2026-11-01T15:33:45.242502Z"
+    string encoding = 6;        // proto, json, string or raw; gzip_ in front when compressed
+    string external_path = 7;   // neither read nor written
+    string correlation_id = 8;  // the correlationid header
+    string data_definition = 9; // protobuf data: its .proto file (the data schema)
+    string data_class = 10;     // protobuf data: its message name (the dataclass header)
+}
+
+message Message {
+    bytes data = 1;
+    Metadata metadata = 2;
+}
+```
+
+Nothing but `metadata.envelope` tells these messages apart, so the envelope's name is its first
+argument: messages whose `metadata.envelope` begins with it are read, and published messages
+carry it with `version`.
+
+```python
+from fanferro.envelopes import default_envelopes
+from fanferro.envelopes.compat import MetadataProtobuf
+
+envelope = MetadataProtobuf(
+    "example-envelope",
+    version="1.0.0",                         # metadata.envelope: "example-envelope--1.0.0"
+    service_name="billing",                  # metadata.origin (default: the message's source)
+    correlation_id=current_correlation_id,   # () -> str | None, called for each message published
+)
+client = fanferro.Client(accept_envelopes=[envelope, *default_envelopes()])  # before Raw
+invoices = client.topic("invoice-created", envelope=envelope)
+```
+
+**Data.** The encoding follows the content type, so the data decodes into and encodes from
+models like any payload: protobuf messages are `proto` (with their `.proto` file and message name
+in `data_definition` and `data_class`), pydantic models, dataclasses, msgspec structs and dicts
+`json`, text `string` and bytes `raw`. Other content types (a MessagePack codec, say) fail before
+sending: the format has no name for them. Data over 60,000 bytes is compressed with zlib
+(`gzip_json`, ...; `compress_threshold`, `None` to never compress), and compressed data is read
+up to 64 MiB. A service that reads a topic's data with a protobuf class reads only `proto`: publish
+models to topics whose consumers read JSON.
+
+**Correlation ids.** `metadata.correlation_id` is the `correlationid` header. A published message
+takes it from its own `correlationid` header, else from the envelope's `correlation_id` function,
+which is called where the message is prepared (in the publishing task, so it sees its context
+variables, like a logging context), else gets a random UUID. An incoming message without one gets
+one derived from its uuid (`generate_missing_correlation_id=False` leaves it out), the same for
+every delivery of the message. To keep the id through a chain of handlers, set the context the
+function reads from the incoming message in consume middleware:
+
+```python
+correlation: ContextVar[str | None] = ContextVar("correlation", default=None)
+
+
+def current_correlation_id() -> str | None:
+    return correlation.get()
+
+
+async def correlated(message: fanferro.Message[Any], call_next: HandlerNext) -> None:
+    value = message.headers.get("correlationid")
+    token = correlation.set(value if isinstance(value, str) else None)
+    try:
+        await call_next(message)  # what the handler publishes carries the same correlation id
+    finally:
+        correlation.reset(token)
+
+
+client = fanferro.Client(consume_middleware=[correlated], accept_envelopes=[envelope, *default_envelopes()])
+```
+
+* Other headers travel as message attributes, next to the promoted type (`fanferro.type`).
+* Data stored out of band (`encoding` starting with `oob_`) is not read: the message fails to
+  decode (`EnvelopeError`). Do not offload payloads (`large_payloads`) of messages for these
+  services either: they do not read claim checks.
+
 ### Compared with tomodachi
 
 Exchanging the same messages, fanferro uses about 3× less CPU per published message and about 9×
@@ -218,6 +304,7 @@ less per consumed message than a tomodachi service doing the same work, in about
 | protobuf without an envelope, consume | 47 µs | 454 µs |
 | resident memory of the process | 39-47 MB | 65-77 MB |
 
+`MetadataProtobuf`, implemented in Rust the same way, was not part of these measurements.
 fanferro also publishes batches (`publish_batch()`, 10 messages per call: 33 µs per message), which
 tomodachi does not. Consuming, the difference comes from fanferro receiving, unwrapping SNS
 notifications and parsing the tomodachi envelope in Rust, off the event loop, and deleting messages

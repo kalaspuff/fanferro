@@ -11,6 +11,7 @@
 //! | `raw`                  | payload bytes as-is                   | always matches (use last)                    |
 //! | `tomodachi-json`       | tomodachi's `JsonBase` envelope       | `metadata.protocol_version` in the body      |
 //! | `tomodachi-protobuf`   | tomodachi's `ProtobufBase` (base64)   | `metadata.protocol_version` in the body      |
+//! | `metadata-protobuf`    | protobuf data + metadata (base64)     | `metadata.envelope` in the body (a setting)  |
 //!
 //! Consumers try their configured envelopes in order; the first that returns
 //! `Ok(Some(payload))` wins. Custom envelopes implemented in Python follow the same
@@ -32,8 +33,9 @@ pub use cloudevents_json::{CLOUDEVENTS_JSON_CONTENT_TYPE, CloudEventsJson};
 pub use cloudevents_proto::{CLOUDEVENTS_PROTOBUF_CONTENT_TYPE, CloudEventsProtobuf};
 pub use raw::{IMPLICIT_CONTENT_TYPE, RawEnvelope};
 pub use tomodachi::{
-    TOMODACHI_COMPRESS_THRESHOLD, TOMODACHI_JSON_PROTOCOL_VERSION, TOMODACHI_PROTOBUF_PROTOCOL_VERSION,
-    TomodachiDestination, TomodachiJson, TomodachiProtobuf, decode_tomodachi_topic,
+    CORRELATION_ID_HEADER, DATA_CLASS_HEADER, MetadataProtobuf, TOMODACHI_COMPRESS_THRESHOLD,
+    TOMODACHI_JSON_PROTOCOL_VERSION, TOMODACHI_PROTOBUF_PROTOCOL_VERSION, TomodachiDestination, TomodachiJson,
+    TomodachiProtobuf, decode_tomodachi_topic,
 };
 
 use crate::error::{Error, Result};

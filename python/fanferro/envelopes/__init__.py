@@ -12,7 +12,8 @@ Built-in envelopes are implemented in Rust:
   recognised by their body and given a message type (``aws.s3.event``, ``aws.ses.bounce``...); the
   typed bodies are in :mod:`fanferro.aws`.
 
-:mod:`fanferro.envelopes.compat` holds the envelopes of other frameworks' services (tomodachi).
+:mod:`fanferro.envelopes.compat` holds the envelopes of other frameworks' services (tomodachi, and
+protobuf envelopes with a metadata message that tomodachi services bring).
 
 Consumers try their envelopes in order (default: CloudEvents, CloudEventsProtobuf, AwsNotifications,
 Raw), so a
