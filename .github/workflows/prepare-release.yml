@@ -24,6 +24,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: astral-sh/setup-uv@v10.3.2
       - id: release
+        env:
+          # git-cliff looks up pull requests on the GitHub API; unauthenticated, runners share a
+          # limit of 60 requests an hour per IP address, and git-cliff panics once it runs out.
+          GITHUB_TOKEN: ${{ github.token }}
         run: uv run --no-project scripts/release.py "${{ inputs.version }}" --github-output "$GITHUB_OUTPUT"
       - uses: peter-evans/create-pull-request@v8
         with:
