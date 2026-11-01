@@ -76,6 +76,9 @@ SQS accepts up to 1 MiB; SNS 256 KiB by default (topics can raise it with
 `await topic.prepare(obj, **options)` does everything except sending and returns a
 `PreparedMessage` that serializes to JSON (`to_json()` / `from_json()`). Send it later with
 `client.publish_prepared(...)`. This is the basis of the [transactional outbox](patterns.md#transactional-outbox).
+`prepare()` checks the attributes as a publish does (count, names, values) and raises
+`ValidationError` for a message that could not be sent, so it fails before it is stored; offloading
+a payload to S3 takes one more attribute, which only the publish can tell.
 
 ## Middleware
 
