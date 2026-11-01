@@ -14,8 +14,7 @@ import fanferro
 from pydantic import BaseModel                  # or dataclasses, msgspec, protobuf, ...
 
 
-@fanferro.message_type("checkout.order_placed.v1")
-class OrderPlaced(BaseModel):
+class OrderPlaced(BaseModel):                   # type name on the wire: "OrderPlaced" (see Message types)
     order_id: str
     amount_cents: int
 
@@ -49,6 +48,26 @@ async def main() -> None:
 uv add fanferro                   # pip install fanferro
 uv add "fanferro[all]"            # + pydantic, protobuf, msgspec, opentelemetry-api
 ```
+
+## Message types
+
+Every message carries a type name (the `fanferro.type` attribute, and `type` in CloudEvents):
+consumers route on it, and SNS filter policies can match it. Without a decorator it is the class
+name; give classes that cross service boundaries an explicit, versioned name instead:
+
+```python
+@fanferro.message_type("checkout.order_placed.v1")
+class OrderPlaced(BaseModel):
+    order_id: str
+    amount_cents: int
+```
+
+The name is then a contract between services rather than a Python class name: renaming the class
+doesn't change what consumers match, `v2` can run next to `v1` while consumers migrate, and the
+prefix tells which service owns the message. Extra arguments are aliases a consumer still accepts
+(`@fanferro.message_type("checkout.order_placed.v1", "order_placed")`), for renaming a type without
+breaking publishers that haven't been redeployed yet. See
+[message types](docs/guides/message-formats.md#message-types).
 
 ## AWS Lambda
 
