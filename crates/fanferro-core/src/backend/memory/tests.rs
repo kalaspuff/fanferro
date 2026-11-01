@@ -696,6 +696,20 @@ async fn objects_and_presigned_urls() {
     assert!(backend.http.get("https://example.com/x", 100).await.is_err());
 }
 
+#[tokio::test]
+async fn uploads_are_checked_against_their_sha256() {
+    let (_, backend) = broker();
+    backend.objects.create_bucket("b").await.unwrap();
+    let sha256 = |data: &[u8]| Some(hex::encode(sha2::Sha256::digest(data)));
+    let matching = PutOptions { sha256: sha256(b"data"), ..PutOptions::default() };
+    backend.objects.put_object("b", "k", Bytes::from_static(b"data"), &matching).await.unwrap();
+    assert_eq!(&backend.objects.get_object("b", "k", 10).await.unwrap()[..], b"data");
+    let other = PutOptions { sha256: sha256(b"other"), ..PutOptions::default() };
+    let error = backend.objects.put_object("b", "k", Bytes::from_static(b"changed"), &other).await.unwrap_err();
+    assert_eq!(error.aws().and_then(|aws| aws.code.as_deref()), Some("BadDigest"), "{error}");
+    assert_eq!(&backend.objects.get_object("b", "k", 10).await.unwrap()[..], b"data", "nothing was stored");
+}
+
 #[tokio::test(start_paused = true)]
 async fn visibility_timeouts_and_delays_are_whole_seconds() {
     // SQS takes whole seconds; like the AWS adapter, the broker rounds fractions up.

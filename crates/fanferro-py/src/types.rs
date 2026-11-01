@@ -7,8 +7,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyType};
 
 use crate::convert::{
-    attribute_value_to_py, attributes_from_py, attributes_to_py, bytes_from_py, headers_from_py, headers_to_py,
-    time_from_py, time_to_py,
+    attribute_value_to_py, attributes_from_py, attributes_to_py, body_from_py, bytes_from_py, headers_from_py,
+    headers_to_py, time_from_py, time_to_py,
 };
 use crate::errors::{ValidationError, to_py_err};
 
@@ -109,7 +109,7 @@ fn payload_from_kwargs(base: Payload, kwargs: Option<&Bound<'_, PyDict>>) -> PyR
             if value.is_none() { Ok(None) } else { value.extract().map(Some) }
         };
         match key.as_str() {
-            "data" => payload.data = bytes_from_py(&value)?,
+            "data" => payload.data = body_from_py(&value)?,
             "content_type" => payload.content_type = text(&value)?,
             "message_type" => payload.message_type = text(&value)?,
             "id" => payload.id = text(&value)?,
@@ -159,7 +159,7 @@ impl PyPayload {
         };
         Ok(Self {
             inner: Payload {
-                data: bytes_from_py(data)?,
+                data: body_from_py(data)?,
                 content_type,
                 message_type,
                 id,
@@ -259,7 +259,7 @@ impl PyWireMessage {
     #[new]
     #[pyo3(signature = (body, attributes=None))]
     fn new(body: &Bound<'_, PyAny>, attributes: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
-        Ok(Self { inner: WireMessage::new(bytes_from_py(body)?, attributes_from_py(attributes)?) })
+        Ok(Self { inner: WireMessage::new(body_from_py(body)?, attributes_from_py(attributes)?) })
     }
 
     /// Body bytes.
@@ -285,7 +285,7 @@ impl PyWireMessage {
     fn replace(&self, body: Option<&Bound<'_, PyAny>>, attributes: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
         let mut inner = self.inner.clone();
         if let Some(body) = body {
-            inner.body = bytes_from_py(body)?;
+            inner.body = body_from_py(body)?;
         }
         if let Some(attributes) = attributes {
             inner.attributes = attributes_from_py(Some(attributes))?;

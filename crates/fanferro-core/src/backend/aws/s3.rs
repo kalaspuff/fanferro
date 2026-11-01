@@ -3,9 +3,15 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use aws_runtime::auth::PayloadSigningOverride;
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{BucketLocationConstraint, CreateBucketConfiguration, ServerSideEncryption, StorageClass};
+use aws_smithy_runtime_api::box_error::BoxError;
+use aws_smithy_runtime_api::client::interceptors::Intercept;
+use aws_smithy_runtime_api::client::interceptors::context::BeforeTransmitInterceptorContextMut;
+use aws_smithy_runtime_api::client::runtime_components::RuntimeComponents;
+use aws_smithy_types::config_bag::ConfigBag;
 use aws_smithy_types::error::display::DisplayErrorContext;
 use bytes::Bytes;
 
@@ -52,6 +58,34 @@ impl AwsObjectStore {
     }
 }
 
+/// Signs a request with the payload hash the caller computed (`x-amz-content-sha256`), instead of
+/// the one the SDK computes by reading the whole body.
+#[derive(Debug)]
+struct PrecomputedPayloadHash(String);
+
+impl Intercept for PrecomputedPayloadHash {
+    fn name(&self) -> &'static str {
+        "PrecomputedPayloadHash"
+    }
+
+    fn modify_before_signing(
+        &self,
+        _context: &mut BeforeTransmitInterceptorContextMut<'_>,
+        _components: &RuntimeComponents,
+        cfg: &mut ConfigBag,
+    ) -> std::result::Result<(), BoxError> {
+        cfg.interceptor_state().store_put(PayloadSigningOverride::Precomputed(self.0.clone()));
+        Ok(())
+    }
+}
+
+/// A hex SHA-256 as S3's `x-amz-checksum-sha256` takes it (base64 of the digest).
+fn base64_digest(hex_digest: &str) -> Option<String> {
+    use base64::Engine as _;
+    let digest = hex::decode(hex_digest).ok().filter(|digest| digest.len() == 32)?;
+    Some(base64::engine::general_purpose::STANDARD.encode(digest))
+}
+
 #[async_trait]
 impl ObjectStoreApi for AwsObjectStore {
     async fn put_object(&self, bucket: &str, key: &str, data: Bytes, options: &PutOptions) -> Result<()> {
@@ -65,7 +99,8 @@ impl ObjectStoreApi for AwsObjectStore {
             .body(ByteStream::from(data))
             .set_content_type(options.content_type.clone())
             .set_storage_class(options.storage_class.as_deref().map(StorageClass::from))
-            .set_metadata((!options.metadata.is_empty()).then(|| options.metadata.clone().into_iter().collect()));
+            .set_metadata((!options.metadata.is_empty()).then(|| options.metadata.clone().into_iter().collect()))
+            .set_checksum_sha256(options.sha256.as_deref().and_then(base64_digest));
         call = match &options.encryption {
             ObjectEncryption::BucketDefault => call,
             ObjectEncryption::S3Managed => call.server_side_encryption(ServerSideEncryption::Aes256),
@@ -74,14 +109,16 @@ impl ObjectStoreApi for AwsObjectStore {
                 .set_ssekms_key_id(key_id.clone())
                 .bucket_key_enabled(*bucket_key),
         };
-        match timeouts {
-            Some(timeouts) => {
-                let timeouts = aws_sdk_s3::config::Builder::default().timeout_config(timeouts);
-                call.customize().config_override(timeouts).send().await
-            }
-            None => call.send().await,
+        let mut call = call.customize();
+        if let Some(timeouts) = timeouts {
+            call = call.config_override(aws_sdk_s3::config::Builder::default().timeout_config(timeouts));
         }
-        .map_err(|err| map_sdk_error("s3", "PutObject", err))?;
+        // The SHA-256 the claim check computed signs the request: the SDK would hash the payload
+        // again for SigV4 (and a checksum given by the caller spares it the CRC32 of its own).
+        if let Some(sha256) = &options.sha256 {
+            call = call.interceptor(PrecomputedPayloadHash(sha256.clone()));
+        }
+        call.send().await.map_err(|err| map_sdk_error("s3", "PutObject", err))?;
         Ok(())
     }
 

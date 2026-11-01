@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use fanferro_core::backend::aws::{AwsConfig, StaticCredentials, TimeoutSettings};
-use fanferro_core::backend::{ReceiveRequest, SendRequest, StringMap};
+use fanferro_core::backend::{PutOptions, ReceiveRequest, SendRequest, StringMap};
 use fanferro_core::consumer::{ConsumerConfig, ConsumerEngine, Delivery};
 use fanferro_core::provision::{
     DeadLetterSpec, ProvisionPolicy, ProvisionStatus, QueueSpec, SubscriptionSpec, TopicSpec,
@@ -18,6 +18,7 @@ use fanferro_core::transport::OffloadSettings;
 use fanferro_core::transport::claim_check::{EncryptionSettings, PointerFormat, ReferenceMode};
 use fanferro_core::types::{AttributeValue, MessageAttributes, WireMessage};
 use fanferro_core::{Client, ClientConfig};
+use sha2::Digest as _;
 
 fn endpoint() -> Option<String> {
     std::env::var("FANFERRO_TEST_ENDPOINT_URL").ok().filter(|v| !v.is_empty())
@@ -425,4 +426,23 @@ async fn long_polls_outlast_configured_timeouts() {
     send.await.unwrap().unwrap();
     assert_eq!(received.iter().map(|m| m.body.as_str()).collect::<Vec<_>>(), ["late"]);
     client.delete_queue(&queue.url).await.unwrap();
+}
+
+#[tokio::test]
+async fn uploads_are_signed_and_checked_with_the_sha256_of_the_claim_check() {
+    let Some(_) = endpoint() else { return };
+    let client = client(ClientConfig::default()).await;
+    let objects = &client.backend().objects;
+    let bucket = unique("sha");
+    objects.create_bucket(&bucket).await.unwrap();
+    let data = Bytes::from(vec![7u8; 300_000]);
+    let sha256 = Some(hex::encode(sha2::Sha256::digest(&data)));
+    objects.put_object(&bucket, "k", data.clone(), &PutOptions { sha256, ..PutOptions::default() }).await.unwrap();
+    assert_eq!(objects.get_object(&bucket, "k", 1 << 20).await.unwrap(), data);
+    let wrong = Some(hex::encode(sha2::Sha256::digest(b"other")));
+    let error = objects
+        .put_object(&bucket, "k2", data, &PutOptions { sha256: wrong, ..PutOptions::default() })
+        .await
+        .unwrap_err();
+    assert_eq!(error.aws().and_then(|aws| aws.code.as_deref()), Some("BadDigest"), "{error}");
 }

@@ -90,6 +90,21 @@ def test_benchmark_runs() -> None:
     assert all(row["messages"] == 30 and row["wall_us_per_message"] > 0 for row in rows)
 
 
+def test_benchmark_runs_with_large_offloaded_bodies() -> None:
+    scenarios = "publish,publish-batch-10,consume"
+    command = ["-n", "12", "--body-size", "300000", "--offload", "--scenarios", scenarios, "--json"]
+    result = subprocess.run(
+        [sys.executable, "-I", str(SCRIPTS / "benchmark.py"), *command],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    rows = [json.loads(line) for line in result.stdout.splitlines()]
+    assert [row["scenario"] for row in rows] == scenarios.split(",")
+
+
 def test_wheel_smoke_test_passes() -> None:
     result = subprocess.run(
         [sys.executable, "-I", str(SCRIPTS / "smoke_test.py")], capture_output=True, text=True, timeout=120, check=False

@@ -56,6 +56,8 @@ uv run python scripts/benchmark.py --endpoint http://localhost:4566 -n 2000 --re
 uv run python scripts/benchmark.py --endpoint http://localhost:4566 --latency 0.015 -n 3000 --scenarios consume-io
 ```
 
-`-o NAME=JSON` passes a consumer option to the consume scenarios (`-o max_pollers=1`).
+`-o NAME=JSON` passes a consumer option to the consume scenarios (`-o max_pollers=1`). `--body-size
+BYTES` sends text bodies of that size instead of the small JSON object, and `--offload` stores every
+payload in S3; run them with a few messages (`--body-size 4000000 --offload -n 40`).
 
 Start MiniStack with `uv run ministack` first.

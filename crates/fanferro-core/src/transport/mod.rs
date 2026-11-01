@@ -35,8 +35,9 @@ pub const SNS_DEFAULT_MAX_MESSAGE_SIZE: usize = 262_144;
 /// A message ready to be sent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutgoingBody {
-    /// SQS/SNS-safe body text.
-    pub body: String,
+    /// SQS/SNS-safe body text (UTF-8), shared with the wire message it was encoded from when that
+    /// was text already: it is copied into a `String` only for the request ([`OutgoingBody::text`]).
+    pub body: Bytes,
     /// Attributes including transport attributes.
     pub attributes: MessageAttributes,
     /// Set when the payload was offloaded.
@@ -47,6 +48,18 @@ impl OutgoingBody {
     /// Encoded size in bytes (body plus attributes) as counted by SQS/SNS.
     pub fn encoded_len(&self) -> usize {
         self.body.len() + attributes_encoded_len(&self.attributes)
+    }
+
+    /// The body as a `String`, for a request (a copy: the body stays for another attempt).
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+
+    /// The body as a `String`, without a copy when nothing else shares it and it was built in
+    /// Rust (base64 bodies, pointers).
+    pub fn into_text(body: Bytes) -> String {
+        String::from_utf8(Vec::from(body))
+            .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
     }
 }
 
@@ -121,16 +134,15 @@ impl Transport {
         Self::new(self.backend.clone(), offload, (*self.fetch).clone())
     }
 
-    /// Encodes `wire` for a destination whose size limit is `limit` bytes.
-    pub async fn encode(&self, wire: &WireMessage, message_id: &str, limit: usize) -> Result<OutgoingBody> {
-        let mut attributes = wire.attributes.clone();
+    /// Encodes `wire` for a destination whose size limit is `limit` bytes. Takes the wire message,
+    /// so that its body and attributes are moved, not copied, into the outgoing body (or the upload
+    /// of an offloaded payload).
+    pub async fn encode(&self, wire: WireMessage, message_id: &str, limit: usize) -> Result<OutgoingBody> {
+        let WireMessage { body, mut attributes } = wire;
         refuse_transport_attributes(&attributes)?;
-        let text = as_sqs_safe_text(&wire.body);
-        let inline_body_len = match text {
-            Some(text) => text.len(),
-            None => base64_len(wire.body.len()),
-        };
-        if text.is_none() {
+        let is_text = as_sqs_safe_text(&body).is_some();
+        let inline_body_len = if is_text { body.len() } else { base64_len(body.len()) };
+        if !is_text {
             attributes.insert(reserved::ENCODING.into(), AttributeValue::string("base64"));
         }
         let size = inline_body_len + attributes_encoded_len(&attributes);
@@ -157,7 +169,8 @@ impl Transport {
             if attributes_len > limit {
                 return Err(Error::MessageTooLarge { size: attributes_len, limit });
             }
-            let pointer = claim_check::offload(&self.backend, settings, message_id, wire.body.clone()).await?;
+            let payload_len = body.len();
+            let pointer = claim_check::offload(&self.backend, settings, message_id, body).await?;
             match pointer.format {
                 PointerFormat::Fanferro => {
                     attributes.insert(reserved::CLAIM_CHECK.into(), AttributeValue::string("v1"));
@@ -165,11 +178,11 @@ impl Transport {
                 PointerFormat::AwsExtended => {
                     attributes.insert(
                         reserved::EXTENDED_PAYLOAD_SIZE.into(),
-                        AttributeValue::number(wire.body.len().to_string()),
+                        AttributeValue::number(payload_len.to_string()),
                     );
                 }
             }
-            let outgoing = OutgoingBody { body: pointer.to_body()?, attributes, offloaded: Some(pointer) };
+            let outgoing = OutgoingBody { body: Bytes::from(pointer.to_body()?), attributes, offloaded: Some(pointer) };
             validate_attributes(&outgoing.attributes)?;
             let size = outgoing.encoded_len();
             if size > limit {
@@ -180,10 +193,7 @@ impl Transport {
         if size > limit {
             return Err(Error::MessageTooLarge { size, limit });
         }
-        let body = match text {
-            Some(text) => text.to_string(),
-            None => BASE64.encode(&wire.body),
-        };
+        let body = if is_text { body } else { Bytes::from(BASE64.encode(&body)) };
         validate_attributes(&attributes)?;
         Ok(OutgoingBody { body, attributes, offloaded: None })
     }
@@ -280,10 +290,10 @@ mod tests {
     async fn text_bodies_pass_through() {
         let (transport, _) = transport(None);
         let wire = WireMessage::new(Bytes::from_static(b"hello"), MessageAttributes::new());
-        let out = transport.encode(&wire, "id", 1000).await.unwrap();
+        let out = transport.encode(wire.clone(), "id", 1000).await.unwrap();
         assert_eq!(out.body, "hello");
         assert!(out.attributes.is_empty());
-        let decoded = transport.decode(out.body.into(), out.attributes).await.unwrap();
+        let decoded = transport.decode(out.body, out.attributes).await.unwrap();
         assert_eq!(decoded.wire, wire);
     }
 
@@ -291,10 +301,10 @@ mod tests {
     async fn binary_bodies_are_base64_encoded() {
         let (transport, _) = transport(None);
         let wire = WireMessage::new(Bytes::from_static(&[0, 1, 2, 255]), MessageAttributes::new());
-        let out = transport.encode(&wire, "id", 1000).await.unwrap();
+        let out = transport.encode(wire.clone(), "id", 1000).await.unwrap();
         assert_eq!(out.body, "AAEC/w==");
         assert_eq!(out.attributes.get(reserved::ENCODING), Some(&AttributeValue::string("base64")));
-        let decoded = transport.decode(out.body.into(), out.attributes).await.unwrap();
+        let decoded = transport.decode(out.body, out.attributes).await.unwrap();
         assert_eq!(decoded.wire, wire);
     }
 
@@ -319,7 +329,7 @@ mod tests {
         let valid: Vec<bool> = cases.iter().map(|wire| validate_wire(wire).is_ok()).collect();
         assert_eq!(valid, [true, false, true, false, false, false, false]);
         for (wire, valid) in cases.iter().zip(valid) {
-            assert_eq!(transport.encode(wire, "id", 1 << 20).await.is_ok(), valid, "{wire:?}");
+            assert_eq!(transport.encode(wire.clone(), "id", 1 << 20).await.is_ok(), valid, "{wire:?}");
         }
     }
 
@@ -327,7 +337,7 @@ mod tests {
     async fn too_large_without_offloading_fails_fast() {
         let (transport, _) = transport(None);
         let wire = WireMessage::new(Bytes::from(vec![b'a'; 100]), MessageAttributes::new());
-        let err = transport.encode(&wire, "id", 50).await.unwrap_err();
+        let err = transport.encode(wire.clone(), "id", 50).await.unwrap_err();
         assert!(matches!(err, Error::MessageTooLarge { size: 100, limit: 50 }));
     }
 
@@ -339,10 +349,10 @@ mod tests {
             let mut attributes = MessageAttributes::new();
             attributes.insert("tenant".into(), AttributeValue::string("acme"));
             let wire = WireMessage::new(Bytes::from(vec![0u8; 64]), attributes);
-            let out = transport.encode(&wire, "msg-1", 1000).await.unwrap();
+            let out = transport.encode(wire.clone(), "msg-1", 1000).await.unwrap();
             assert!(out.offloaded.is_some());
             assert!(!out.attributes.contains_key(reserved::ENCODING));
-            let decoded = transport.decode(out.body.into(), out.attributes).await.unwrap();
+            let decoded = transport.decode(out.body, out.attributes).await.unwrap();
             assert_eq!(decoded.wire, wire, "{format:?}");
             let key = decoded.pointer.unwrap().key.unwrap();
             assert_eq!(key, format!("x/msg-1/{}", hex::encode(Sha256::digest(&wire.body))), "{format:?}");
@@ -356,11 +366,11 @@ mod tests {
         let (transport, backend) = transport(Some(offload(1000, PointerFormat::Fanferro)));
         backend.objects.create_bucket("payloads").await.unwrap();
         let wire = WireMessage::new(Bytes::from(vec![b'a'; 600]), MessageAttributes::new());
-        let out = transport.encode(&wire, "over-limit", 500).await.unwrap();
+        let out = transport.encode(wire.clone(), "over-limit", 500).await.unwrap();
         assert!(out.offloaded.is_some());
         assert!(out.encoded_len() <= 500);
-        assert_eq!(transport.decode(out.body.into(), out.attributes).await.unwrap().wire, wire);
-        let inline = transport.encode(&wire, "under-limit", 800).await.unwrap();
+        assert_eq!(transport.decode(out.body, out.attributes).await.unwrap().wire, wire);
+        let inline = transport.encode(wire.clone(), "under-limit", 800).await.unwrap();
         assert!(inline.offloaded.is_none(), "under both the limit and the threshold");
     }
 
@@ -372,12 +382,12 @@ mod tests {
         backend.objects.create_bucket("payloads").await.unwrap();
         let first = WireMessage::new(Bytes::from(vec![b'a'; 64]), MessageAttributes::new());
         let second = WireMessage::new(Bytes::from(vec![b'b'; 64]), MessageAttributes::new());
-        let first_out = transport.encode(&first, "same-id", 1000).await.unwrap();
-        let second_out = transport.encode(&second, "same-id", 1000).await.unwrap();
-        assert_eq!(transport.decode(first_out.body.into(), first_out.attributes).await.unwrap().wire, first);
-        assert_eq!(transport.decode(second_out.body.into(), second_out.attributes).await.unwrap().wire, second);
+        let first_out = transport.encode(first.clone(), "same-id", 1000).await.unwrap();
+        let second_out = transport.encode(second.clone(), "same-id", 1000).await.unwrap();
+        assert_eq!(transport.decode(first_out.body, first_out.attributes).await.unwrap().wire, first);
+        assert_eq!(transport.decode(second_out.body, second_out.attributes).await.unwrap().wire, second);
         // The same bytes again share the object (retries do not pile up objects).
-        let again = transport.encode(&first, "same-id", 1000).await.unwrap();
+        let again = transport.encode(first.clone(), "same-id", 1000).await.unwrap();
         assert_eq!(again.offloaded.unwrap().key, first_out.offloaded.unwrap().key);
     }
 
@@ -390,17 +400,17 @@ mod tests {
         for count in [10, 11] {
             let attributes: MessageAttributes =
                 (0..count).map(|i| (format!("a{i}"), AttributeValue::string("v"))).collect();
-            let error = transport.encode(&WireMessage::new(body.clone(), attributes), "id", 100_000).await.unwrap_err();
+            let error = transport.encode(WireMessage::new(body.clone(), attributes), "id", 100_000).await.unwrap_err();
             assert!(matches!(error, Error::Validation(_)), "{error:?}");
             assert!(error.to_string().contains("at most 9 attributes"), "{count}: {error}");
         }
         let mut reserved_name = MessageAttributes::new();
         reserved_name.insert("AWS.trace".into(), AttributeValue::string("v"));
-        let error = transport.encode(&WireMessage::new(body.clone(), reserved_name), "id", 100_000).await.unwrap_err();
+        let error = transport.encode(WireMessage::new(body.clone(), reserved_name), "id", 100_000).await.unwrap_err();
         assert!(matches!(error, Error::Validation(_)), "{error:?}");
         let mut huge = MessageAttributes::new();
         huge.insert("note".into(), AttributeValue::string("x".repeat(2000)));
-        let error = transport.encode(&WireMessage::new(body, huge), "id", 1000).await.unwrap_err();
+        let error = transport.encode(WireMessage::new(body, huge), "id", 1000).await.unwrap_err();
         assert!(matches!(error, Error::MessageTooLarge { .. }), "{error:?}");
     }
 
@@ -409,13 +419,13 @@ mod tests {
         let (transport, backend) = transport(Some(offload(1000, PointerFormat::Fanferro)));
         backend.objects.create_bucket("payloads").await.unwrap();
         let wire = WireMessage::new(Bytes::from_static(b"tiny"), MessageAttributes::new());
-        assert!(transport.encode(&wire, "a", 5000).await.unwrap().offloaded.is_none());
+        assert!(transport.encode(wire.clone(), "a", 5000).await.unwrap().offloaded.is_none());
         let always = transport
             .with_offload(Some(OffloadSettings { always: true, ..offload(1000, PointerFormat::Fanferro) }))
             .unwrap();
-        let out = always.encode(&wire, "b", 5000).await.unwrap();
+        let out = always.encode(wire.clone(), "b", 5000).await.unwrap();
         assert!(out.offloaded.is_some());
-        assert_eq!(always.decode(out.body.into(), out.attributes).await.unwrap().wire, wire);
+        assert_eq!(always.decode(out.body, out.attributes).await.unwrap().wire, wire);
     }
 
     #[tokio::test]
@@ -431,7 +441,7 @@ mod tests {
             let mut attributes = MessageAttributes::new();
             attributes.insert(name.into(), AttributeValue::string("1"));
             let wire = WireMessage::new(Bytes::from_static(b"x"), attributes);
-            let err = transport.encode(&wire, "id", 100).await.unwrap_err();
+            let err = transport.encode(wire.clone(), "id", 100).await.unwrap_err();
             assert!(err.to_string().contains("reserved for the transport layer"), "{name}: {err}");
         }
     }

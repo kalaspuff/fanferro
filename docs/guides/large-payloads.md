@@ -15,7 +15,9 @@ client = fanferro.Client(
 
 Publishing a message whose encoded size exceeds the threshold (or the destination's size limit, when
 that is lower: 256 KiB for SNS topics by default, a queue's `max_message_size`) uploads the body to
-`s3://bucket/{prefix}{message_id}/{sha256 of the body}` and sends a small pointer instead. Consumers
+`s3://bucket/{prefix}{message_id}/{sha256 of the body}` and sends a small pointer instead. The upload
+carries the same SHA-256 as its checksum (`x-amz-checksum-sha256`), which S3 checks and stores with
+the object, and is signed with it, so the body is hashed once. Consumers
 resolve pointers before your handler runs; handlers never notice. Per destination:
 `client.topic("x", large_payloads=LargePayloads(...))` or `large_payloads=None` to disable.
 `create_bucket=True` creates the bucket when the client provisions (`async with client` or

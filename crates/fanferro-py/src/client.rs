@@ -1,5 +1,6 @@
 //! `CoreClient`: publishing, provisioning, events and metrics; plus the in-memory broker.
 
+use bytes::Bytes;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -284,6 +285,13 @@ impl PyCoreClient {
     }
 }
 
+/// References to the bodies of messages being published, held until the outcome is converted (or
+/// discarded) on the event loop's thread: a body may share a Python `bytes` object (see
+/// [`crate::convert::body_from_py`]), whose last reference should go while the thread is attached
+/// to the interpreter, not on a runtime thread. (A cancelled call drops it with its aborted task on
+/// a runtime thread, like the task's reference to its awaitable.)
+struct BodyKeeper(#[allow(dead_code)] Vec<Bytes>);
+
 fn message_from_kwargs(
     wire: &Bound<'_, PyWireMessage>,
     message_id: String,
@@ -424,12 +432,16 @@ impl PyCoreClient {
         let destination = destination_from(destination)?;
         let message = message_from_kwargs(wire, message_id, group_id, deduplication_id, delay, subject, trace_header)?;
         let transport = transport.map(|transport| transport.get().inner.clone());
+        let body = BodyKeeper(vec![message.wire.body.clone()]);
         future_into_py(py, async move {
             let receipt = match &transport {
                 Some(transport) => client.publish_with(transport, &destination, message).await,
                 None => client.publish(&destination, message).await,
             };
-            convert(receipt, |py, receipt| receipt_to_py(py, &receipt))
+            convert(receipt, move |py, receipt| {
+                drop(body);
+                receipt_to_py(py, &receipt)
+            })
         })
     }
 
@@ -446,12 +458,14 @@ impl PyCoreClient {
         let destination = destination_from(destination)?;
         let messages = messages.try_iter()?.map(|item| message_from_dict(&item?)).collect::<PyResult<Vec<_>>>()?;
         let transport = transport.map(|transport| transport.get().inner.clone());
+        let bodies = BodyKeeper(messages.iter().map(|message| message.wire.body.clone()).collect());
         future_into_py(py, async move {
             let results = match &transport {
                 Some(transport) => client.publish_batch_with(transport, &destination, messages).await,
                 None => client.publish_batch(&destination, messages).await,
             };
-            convert(results, |py, results| {
+            convert(results, move |py, results| {
+                drop(bodies);
                 let list = PyList::empty(py);
                 for result in &results {
                     match result {

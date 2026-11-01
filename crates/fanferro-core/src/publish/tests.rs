@@ -286,7 +286,7 @@ async fn retried_batch_entries_stay_split_by_trace_header() {
 #[test]
 fn chunking_respects_count_and_size() {
     let prepared = |size: usize| Prepared {
-        body: OutgoingBody { body: "x".repeat(size), attributes: MessageAttributes::new(), offloaded: None },
+        body: OutgoingBody { body: "x".repeat(size).into(), attributes: MessageAttributes::new(), offloaded: None },
         group_id: None,
         deduplication_id: None,
         delay: None,

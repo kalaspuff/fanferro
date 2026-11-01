@@ -4,6 +4,7 @@ use bytes::Bytes;
 use fanferro_core::types::{AttributeData, AttributeValue, HeaderValue, Headers, MessageAttributes};
 use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
+use pyo3::pybacked::PyBackedBytes;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyMemoryView, PyString};
 use time::OffsetDateTime;
@@ -98,6 +99,20 @@ pub fn bytes_from_py(value: &Bound<'_, PyAny>) -> PyResult<Bytes> {
         return Ok(Bytes::copy_from_slice(bytes.cast::<PyBytes>()?.as_bytes()));
     }
     Err(ValidationError::new_err(format!("expected bytes or str, got {}", value.get_type().name()?)))
+}
+
+/// Reads a message body or payload like [`bytes_from_py`], but shares a `bytes` object instead
+/// of copying it: a large body is then held once while it is published.
+///
+/// The `Bytes` keeps the Python object alive. Whoever drops its last reference while not attached
+/// to the interpreter leaves the reference to PyO3's pool (a lock that a runtime thread may hold
+/// at `fork()`): the publish calls keep a reference until their outcome is converted on the
+/// event loop's thread (see `client.rs`), and the in-memory broker copies the objects it stores.
+pub fn body_from_py(value: &Bound<'_, PyAny>) -> PyResult<Bytes> {
+    if let Ok(bytes) = value.cast::<PyBytes>() {
+        return Ok(Bytes::from_owner(PyBackedBytes::from(bytes.clone())));
+    }
+    bytes_from_py(value)
 }
 
 /// Converts a Python attribute value (an `AttributeValue`, `str`, `bytes`, `bool`, `int`,

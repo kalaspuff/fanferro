@@ -18,6 +18,7 @@ aws-sdk-sqs = { version = "1.114", default-features = false, features = ["defaul
 aws-sdk-sns = { version = "1.116", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
 aws-sdk-s3 = { version = "1.152", default-features = false, features = ["default-https-client", "rt-tokio", "http-1x", "behavior-version-latest"] }
 aws-sdk-sts = { version = "1.119", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
+aws-runtime = "1.10"
 aws-smithy-types = "1.8"
 aws-smithy-runtime-api = { version = "1.19", features = ["client"] }
 aws-credential-types = "1.3"
