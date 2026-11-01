@@ -295,8 +295,8 @@ pub fn md5_of_attributes(attributes: &MessageAttributes) -> String {
 }
 
 /// Computes the MD5 digest SQS reports as `MD5OfMessageBody`.
-pub fn md5_of_body(body: &str) -> String {
-    hex::encode(Md5::digest(body.as_bytes()))
+pub fn md5_of_body(body: impl AsRef<[u8]>) -> String {
+    hex::encode(Md5::digest(body.as_ref()))
 }
 
 fn update_length_prefixed(hasher: &mut Md5, bytes: &[u8]) {

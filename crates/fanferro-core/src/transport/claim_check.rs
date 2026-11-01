@@ -148,8 +148,9 @@ impl OffloadSettings {
         Ok(())
     }
 
-    fn put_options(&self) -> PutOptions {
+    fn put_options(&self, sha256: String) -> PutOptions {
         PutOptions {
+            sha256: Some(sha256),
             content_type: Some("application/octet-stream".into()),
             encryption: match &self.encryption {
                 EncryptionSettings::BucketDefault => ObjectEncryption::BucketDefault,
@@ -326,7 +327,7 @@ pub async fn offload(
     // retries of the same bytes keep writing the same object.
     let key = format!("{}{}/{}", settings.key_prefix, message_id, sha256);
     let size = data.len() as u64;
-    backend.objects.put_object(&settings.bucket, &key, data, &settings.put_options()).await?;
+    backend.objects.put_object(&settings.bucket, &key, data, &settings.put_options(sha256.clone())).await?;
     let url = match settings.reference {
         ReferenceMode::S3 => None,
         ReferenceMode::Url | ReferenceMode::Both => Some(

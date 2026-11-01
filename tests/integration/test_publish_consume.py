@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import gc
 import json
+import sys
 import time
 from typing import Any, Literal
 
@@ -14,7 +16,7 @@ from fanferro import matchers as m
 from fanferro.envelopes import CloudEvents
 from fanferro.outbox import InMemoryOutbox, OutboxRelay
 from tests.conftest import ClientFactory
-from tests.helpers import OrderCancelled, OrderCreated, consume_until, drain_queue
+from tests.helpers import OrderCancelled, OrderCreated, consume_until, drain_queue, wait_for
 
 
 async def test_queue_roundtrip_with_metadata(client_factory: ClientFactory, name: Any) -> None:
@@ -433,6 +435,25 @@ async def test_large_payloads(client_factory: ClientFactory, name: Any) -> None:
     assert bodies == [{"blob": "tiny"}, big]
     offloaded = [message for message in messages if message.pointer is not None]
     assert len(offloaded) == 1
+
+
+async def test_published_bodies_are_released_once_sent(client_factory: ClientFactory, name: Any) -> None:
+    # Bodies given as bytes are shared with the native message, not copied; a publish holds them
+    # until it is done (and releases them on the event loop's thread).
+    client = client_factory(large_payloads=fanferro.LargePayloads(name("payloads"), threshold=2048, create_bucket=True))
+    queue = client.queue(name("shared"))
+    large, small = ("x" * 50_000).encode(), b"small"
+    before = sys.getrefcount(large), sys.getrefcount(small)
+    async with client:
+        assert (await queue.send(large)).offloaded is not None
+        assert (await queue.send(small)).offloaded is None
+        results = await queue.send_batch([large, small])
+        assert [result.offloaded is not None for result in results.successful] == [True, False]
+        del results
+        gc.collect()
+        await wait_for(lambda: (sys.getrefcount(large), sys.getrefcount(small)) == before)
+        received = await drain_queue(client, queue)
+    assert sorted(message.body for message in received) == sorted([large, small, large, small])
 
 
 async def test_a_message_published_again_keeps_its_offloaded_payload(client_factory: ClientFactory, name: Any) -> None:

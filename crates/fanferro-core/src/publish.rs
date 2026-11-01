@@ -246,34 +246,28 @@ impl Client {
         message: OutgoingMessage,
     ) -> Result<Prepared> {
         validate(destination, &message)?;
-        let body = transport.encode(&message.wire, &message.message_id, destination.max_message_size()).await?;
+        let OutgoingMessage { wire, message_id, group_id, deduplication_id, delay, subject, trace_header } = message;
+        let payload_len = wire.body.len();
+        let body = transport.encode(wire, &message_id, destination.max_message_size()).await?;
         if let Some(pointer) = &body.offloaded {
             self.inner.metrics.payloads_offloaded.inc();
-            self.inner.metrics.bytes_offloaded.add(message.wire.body.len() as u64);
+            self.inner.metrics.bytes_offloaded.add(payload_len as u64);
             self.inner.events.emit(EventKind::PayloadOffloaded, || {
                 Event::new(EventKind::PayloadOffloaded, "payload offloaded")
-                    .field("message_id", &message.message_id)
+                    .field("message_id", &message_id)
                     .field("destination", destination.address())
-                    .field("size", message.wire.body.len())
+                    .field("size", payload_len)
                     .field_opt("bucket", pointer.bucket.clone())
                     .field_opt("key", pointer.key.clone())
                     .field("presigned_url", pointer.url.is_some())
             });
         }
-        let deduplication_id = match (&message.deduplication_id, destination.is_fifo()) {
-            (Some(id), _) => Some(id.clone()),
-            (None, true) if !destination.content_based_deduplication() => Some(message.message_id.clone()),
+        let deduplication_id = match (deduplication_id, destination.is_fifo()) {
+            (Some(id), _) => Some(id),
+            (None, true) if !destination.content_based_deduplication() => Some(message_id.clone()),
             _ => None,
         };
-        Ok(Prepared {
-            body,
-            group_id: message.group_id,
-            deduplication_id,
-            delay: message.delay,
-            subject: message.subject,
-            trace_header: message.trace_header,
-            message_id: message.message_id,
-        })
+        Ok(Prepared { body, group_id, deduplication_id, delay, subject, trace_header, message_id })
     }
 
     fn verify_send(&self, destination: &Destination, prepared: &Prepared, output: &SendOutput) -> Result<()> {
@@ -299,7 +293,7 @@ impl Client {
 
     fn send_request(prepared: &Prepared) -> SendRequest {
         SendRequest {
-            body: prepared.body.body.clone(),
+            body: prepared.body.text(),
             attributes: prepared.body.attributes.clone(),
             delay: prepared.delay,
             group_id: prepared.group_id.clone(),
@@ -310,7 +304,7 @@ impl Client {
 
     fn publish_request(prepared: &Prepared) -> PublishRequest {
         PublishRequest {
-            message: prepared.body.body.clone(),
+            message: prepared.body.text(),
             attributes: prepared.body.attributes.clone(),
             subject: prepared.subject.clone(),
             group_id: prepared.group_id.clone(),
@@ -337,7 +331,7 @@ impl Client {
         let (transport_message_id, sequence_number) = match destination {
             Destination::Queue { url, .. } => {
                 let request = SendRequest {
-                    body: body.body,
+                    body: OutgoingBody::into_text(body.body),
                     attributes: body.attributes,
                     delay,
                     group_id,
@@ -349,7 +343,7 @@ impl Client {
             }
             Destination::Topic { arn, .. } => {
                 let request = PublishRequest {
-                    message: body.body,
+                    message: OutgoingBody::into_text(body.body),
                     attributes: body.attributes,
                     subject,
                     group_id,

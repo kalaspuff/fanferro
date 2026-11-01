@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import datetime
 import pickle
+import sys
 import traceback
 from decimal import Decimal
 
@@ -109,6 +110,17 @@ class TestPayloadAndWire:
         assert wire.attributes["flag"] == fanferro.AttributeValue.string("true")
         assert fanferro.WireMessage(b"\xff").body_text is None
         assert wire.replace(body="x").body == b"x"
+
+    def test_bytes_bodies_are_shared_not_copied(self) -> None:
+        body = bytes(range(256)) * 64
+        before = sys.getrefcount(body)
+        wire = fanferro.WireMessage(body)
+        payload = fanferro.Payload(body)
+        assert sys.getrefcount(body) == before + 2
+        assert wire.body == body
+        assert payload.data == body
+        del wire, payload
+        assert sys.getrefcount(body) == before
 
     def test_wire_message_pickles_and_copies(self) -> None:
         wire = fanferro.WireMessage(

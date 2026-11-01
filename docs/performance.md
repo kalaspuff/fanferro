@@ -64,5 +64,7 @@ uv run python scripts/benchmark.py --endpoint http://localhost:4566 --latency 0.
 scenario runs with the default `Telemetry()` (with `opentelemetry-api` installed, as with
 `fanferro[all]`, and no SDK configured) and with `Telemetry.disabled()`, so that the cost of the
 default configuration stays visible; `--telemetry default` or `--telemetry disabled` runs one.
+`--body-size BYTES` sends text bodies of that size instead of the small JSON object, and `--offload`
+stores every payload in S3; run them with a few messages (`--body-size 4000000 --offload -n 40`).
 
 Start MiniStack with `uv run ministack` first.

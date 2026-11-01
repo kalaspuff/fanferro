@@ -3,6 +3,7 @@
     uv run python scripts/benchmark.py                        # in-memory broker
     uv run python scripts/benchmark.py --endpoint http://127.0.0.1:4566 -n 2000   # MiniStack
     uv run python scripts/benchmark.py --endpoint http://127.0.0.1:4566 --latency 0.015 --scenarios consume-io
+    uv run python scripts/benchmark.py --body-size 4000000 --offload -n 50 --scenarios publish,consume
 
 CPU time is the whole process (the event loop and the Rust runtime's threads), so it shows what
 fanferro costs per message even when the broker is the bottleneck of the wall time. Each scenario
@@ -10,7 +11,8 @@ uses a queue of its own; consumers handle messages with an empty handler, except
 whose handlers wait 50 ms (I/O-bound, ``concurrency=100``: at most 2,000 messages per second).
 ``--latency`` puts a proxy in front of the endpoint that delays every call, like the round trip
 to SQS from inside its region (about 15 ms), which local endpoints do not have. Results vary
-between runs: compare the best of a few (``--repeat``), on the same machine.
+between runs: compare the best of a few (``--repeat``), on the same machine. ``--body-size`` sends
+larger text bodies, and ``--offload`` stores every payload in S3 (a bucket of its own per run).
 
 Each scenario runs with the default telemetry (``Telemetry()``: with ``opentelemetry-api``
 installed, as with ``fanferro[all]``, and no SDK configured) and with ``Telemetry.disabled()``
@@ -76,28 +78,36 @@ async def measure(scenario: str, messages: int, work: Callable[[], Awaitable[Non
     return Result(scenario, messages, time.perf_counter() - wall, time.process_time() - cpu)
 
 
-async def publish(queue: fanferro.Queue, messages: int) -> None:
+def sized_body(size: int) -> bytes:
+    """A text body of ``size`` bytes, JSON-like and with some non-ASCII characters (as the
+    SQS-safe text check sees real documents), sent as ``bytes`` with the raw envelope."""
+    unit = '{"name": "Åsa Öberg", "note": "plain ASCII text follows"}\n'.encode() + b"x" * 200 + b"\n"
+    return (unit * (size // len(unit) + 1))[:size]
+
+
+async def publish(queue: fanferro.Queue, messages: int, body: Any) -> None:
     for _ in range(messages):
-        await queue.send(BODY)
+        await queue.send(body)
 
 
-async def publish_concurrently(queue: fanferro.Queue, messages: int, concurrency: int = 64) -> None:
+async def publish_concurrently(queue: fanferro.Queue, messages: int, body: Any, concurrency: int = 64) -> None:
     limit = asyncio.Semaphore(concurrency)
 
     async def one() -> None:
         async with limit:
-            await queue.send(BODY)
+            await queue.send(body)
 
     await asyncio.gather(*(one() for _ in range(messages)))
 
 
-async def publish_batches(queue: fanferro.Queue, messages: int, size: int) -> None:
+async def publish_batches(queue: fanferro.Queue, messages: int, body: Any, size: int) -> None:
     for start in range(0, messages, size):
-        await queue.send_batch([BODY] * min(size, messages - start))
+        await queue.send_batch([body] * min(size, messages - start))
 
 
-async def fill(queue: fanferro.Queue, messages: int) -> None:
-    calls = [queue.send_batch([BODY] * min(100, messages - start)) for start in range(0, messages, 100)]
+async def fill(queue: fanferro.Queue, messages: int, body: Any) -> None:
+    # Batches of 10 at most: large bodies do not fit more in one call anyway.
+    calls = [queue.send_batch([body] * min(10, messages - start)) for start in range(0, messages, 10)]
     for start in range(0, len(calls), 8):
         await asyncio.gather(*calls[start : start + 8])
 
@@ -174,9 +184,10 @@ async def consume(
     *,
     typed: bool,
     io: bool = False,
+    body: Any = BODY,
     options: dict[str, Any] | None = None,
 ) -> Result:
-    await fill(queue, messages)
+    await fill(queue, messages, body)
     done = asyncio.Event()
     handled = 0
 
@@ -228,8 +239,13 @@ async def run(
     endpoint: str | None,
     options: dict[str, Any] | None = None,
     telemetry: str = "default",
+    *,
+    body_size: int | None = None,
+    offload: bool = False,
 ) -> Result:
-    result = await _run(scenario, messages, endpoint, options, TELEMETRY[telemetry]())
+    result = await _run(
+        scenario, messages, endpoint, options, TELEMETRY[telemetry](), body_size=body_size, offload=offload
+    )
     return dataclasses.replace(result, telemetry=telemetry)
 
 
@@ -239,10 +255,16 @@ async def _run(
     endpoint: str | None,
     options: dict[str, Any] | None,
     telemetry: fanferro.Telemetry,
+    *,
+    body_size: int | None,
+    offload: bool,
 ) -> Result:
     quiet = fanferro.LoggingConfig(enabled=False)  # e.g. warnings about the missing dead-letter queue
+    bucket = f"benchmark-payloads-{uuid.uuid4().hex[:8]}"
+    large_payloads = fanferro.LargePayloads(bucket, always=True, create_bucket=True) if offload else None
+    body: Any = BODY if body_size is None else sized_body(body_size)
     if endpoint is None:
-        client = testing.memory_client(logging=quiet, telemetry=telemetry)
+        client = testing.memory_client(logging=quiet, telemetry=telemetry, large_payloads=large_payloads)
     else:
         client = fanferro.Client(
             region="us-east-1",
@@ -252,24 +274,26 @@ async def _run(
             provisioning=fanferro.Provisioning.ensure(),
             logging=quiet,
             telemetry=telemetry,
+            large_payloads=large_payloads,
         )
     async with client:
         queue = client.queue(f"benchmark-{scenario}-{uuid.uuid4().hex[:8]}")
         await queue.resolve()
         try:
             if scenario == "publish":
-                return await measure(scenario, messages, lambda: publish(queue, messages))
+                return await measure(scenario, messages, lambda: publish(queue, messages, body))
             if scenario == "publish-concurrent":
-                return await measure(scenario, messages, lambda: publish_concurrently(queue, messages))
+                return await measure(scenario, messages, lambda: publish_concurrently(queue, messages, body))
             if scenario.startswith("publish-batch-"):
                 size = int(scenario.removeprefix("publish-batch-"))
-                return await measure(scenario, messages, lambda: publish_batches(queue, messages, size))
+                return await measure(scenario, messages, lambda: publish_batches(queue, messages, body, size))
             return await consume(
                 client,
                 queue,
                 messages,
                 typed=scenario == "consume-typed",
                 io=scenario == "consume-io",
+                body=body,
                 options=options,
             )
         finally:
@@ -297,6 +321,17 @@ async def main() -> None:
         help="a consumer option for the consume scenarios, e.g. -o pollers=4 (repeatable)",
     )
     parser.add_argument(
+        "--body-size",
+        type=int,
+        metavar="BYTES",
+        help="send text bodies of this many bytes (as bytes, raw envelope) instead of a small JSON object",
+    )
+    parser.add_argument(
+        "--offload",
+        action="store_true",
+        help="offload every payload to a new bucket (LargePayloads(always=True)), e.g. with --body-size 4000000",
+    )
+    parser.add_argument(
         "--telemetry",
         choices=("both", *TELEMETRY),
         default="both",
@@ -316,13 +351,24 @@ async def main() -> None:
     unknown = sorted(set(scenarios) - set(SCENARIOS))
     if unknown:
         parser.error(f"unknown scenarios: {', '.join(unknown)}")
+    if args.body_size is not None and "consume-typed" in scenarios:
+        parser.error("consume-typed decodes the small JSON body: leave it out with --body-size")
     telemetries = list(TELEMETRY) if args.telemetry == "both" else [args.telemetry]
     if not args.json:
         print(f"{'scenario':20} {'telemetry':10} {'messages/s':>11} {'wall µs/msg':>12} {'CPU µs/msg':>11}")
     for scenario in scenarios:
         for telemetry in telemetries:
             runs = [
-                await run(scenario, args.messages, endpoint, options, telemetry) for _ in range(max(1, args.repeat))
+                await run(
+                    scenario,
+                    args.messages,
+                    endpoint,
+                    options,
+                    telemetry,
+                    body_size=args.body_size,
+                    offload=args.offload,
+                )
+                for _ in range(max(1, args.repeat))
             ]
             row = min(runs, key=lambda result: result.wall).row()
             if args.json:

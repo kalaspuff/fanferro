@@ -1921,7 +1921,21 @@ fn decode_key(encoded: &str) -> Option<String> {
 
 #[async_trait]
 impl ObjectStoreApi for MemoryObjects {
-    async fn put_object(&self, bucket: &str, key: &str, data: Bytes, _options: &PutOptions) -> Result<()> {
+    async fn put_object(&self, bucket: &str, key: &str, data: Bytes, options: &PutOptions) -> Result<()> {
+        if let Some(expected) = &options.sha256
+            && !hex::encode(Sha256::digest(&data)).eq_ignore_ascii_case(expected)
+        {
+            return Err(aws_error(
+                "s3",
+                "PutObject",
+                AwsErrorKind::InvalidRequest,
+                "BadDigest",
+                "The SHA256 you specified did not match the calculated checksum.",
+            ));
+        }
+        // A copy: the data may be shared with a Python object (a published message's body), which
+        // must not be released by whichever thread drops the broker's object.
+        let data = Bytes::copy_from_slice(&data);
         let mut state = self.0.state.lock();
         let objects = state.buckets.get_mut(bucket).ok_or_else(|| no_such_bucket("PutObject"))?;
         objects.insert(key.to_string(), StoredObject { data });

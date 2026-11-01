@@ -293,6 +293,9 @@ pub struct PutOptions {
     pub storage_class: Option<String>,
     /// Object metadata.
     pub metadata: StringMap,
+    /// The SHA-256 of the data (lowercase hex), when the caller computed it already: S3 checks the
+    /// upload against it, and the request is signed with it instead of hashing the data again.
+    pub sha256: Option<String>,
 }
 
 /// Object storage (S3) operations used for large payloads.
