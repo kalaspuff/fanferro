@@ -291,7 +291,8 @@ client = fanferro.Client(consume_middleware=[correlated], accept_envelopes=[enve
 ### Compared with tomodachi
 
 Exchanging the same messages, fanferro uses about 3× less CPU per published message and about 9×
-less per consumed message than a tomodachi service doing the same work, in about half the memory:
+less per consumed message than a tomodachi service doing the same work, in about 60% of its memory
+(25-30 MB less):
 
 | CPU per message | fanferro | tomodachi |
 | --- | ---: | ---: |
