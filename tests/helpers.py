@@ -48,12 +48,17 @@ async def consume_until(consumer: fanferro.Consumer, condition: Callable[[], boo
 async def drain_queue(
     client: fanferro.Client, queue: fanferro.Queue, timeout: float = 15.0
 ) -> list[fanferro.Message[Any]]:
-    """Receives everything currently in ``queue`` (acks it) and returns the messages."""
+    """Receives everything currently in ``queue`` (acks it) and returns the messages.
+
+    The in-memory broker hands out what a queue holds at once, so a short quiet spell is enough
+    there; an emulator gets a second.
+    """
     received: list[fanferro.Message[Any]] = []
 
     async def collect(message: fanferro.Message[bytes]) -> None:
         received.append(message)
 
     consumer = client.consumer(queue, collect, wait_time=1, name=f"drain-{queue.name}")
-    await consumer.run_until_idle(idle_for=1.0, timeout=timeout)
+    idle_for = 0.3 if client.broker is not None else 1.0
+    await consumer.run_until_idle(idle_for=idle_for, timeout=timeout)
     return received

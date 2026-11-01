@@ -28,7 +28,7 @@ description: Default workflow for any change to the fanferro library (Rust core,
    uv run ruff format python tests examples scripts && uv run ruff check python tests examples scripts
    uv run pyrefly check
    uv run python scripts/check_consistency.py
-   uv run pytest
+   uv run pytest -n auto --dist worksteal
    ```
    (`make check` runs all of them.)
 7. **Commit** with a conventional commit message (`feat(consumer): ...`, `fix(transport): ...`);
