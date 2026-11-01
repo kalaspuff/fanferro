@@ -353,28 +353,38 @@ class TelemetryRuntime:
         ) as span:
             yield span
 
-    def inject(self, message: OutgoingMessage, envelope: Envelope) -> None:
-        """Writes the current trace context into ``message`` according to the propagation settings."""
+    def inject(self, message: OutgoingMessage, envelope: Envelope) -> dict[str, str] | None:
+        """Writes the current trace context into ``message`` according to the propagation settings.
+
+        Envelope headers and the AWS trace header are written into ``message``; the message
+        attributes are returned instead (``traceparent`` first, then the other keys in the order of
+        ``attribute_keys``), for the caller to add as far as the attribute limit allows.
+        """
         if self._otel is None or not self.config.propagation.inject:
-            return
+            return None
         carrier: dict[str, str] = {}
         self._propagator().inject(carrier)
         traceparent = carrier.get("traceparent")
         if not traceparent:
-            return
+            return None
         from fanferro.envelopes import supports_headers
 
+        attributes: dict[str, str] | None = None
         for target in self.config.propagation.inject:
             if target is Carrier.MESSAGE_ATTRIBUTES:
-                for key in self.config.propagation.attribute_keys:
-                    if carrier.get(key):
-                        message.attributes.setdefault(key, carrier[key])
+                keys = self.config.propagation.attribute_keys
+                attributes = {
+                    key: carrier[key]
+                    for key in sorted(keys, key=lambda key: key != "traceparent")
+                    if carrier.get(key) and key not in message.attributes
+                }
             elif target is Carrier.ENVELOPE and supports_headers(envelope):
                 for key, value in carrier.items():
                     if value and key.isalnum() and key.islower():
                         message.headers.setdefault(key, value)
             elif target is Carrier.AWS_TRACE_HEADER and message.trace_header is None:
                 message.trace_header = xray_from_traceparent(traceparent)
+        return attributes
 
     def extract(self, message: Message[Any]) -> Any:
         """The trace context carried by ``message`` (``None`` if absent)."""

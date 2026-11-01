@@ -13,7 +13,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Literal
 
-from fanferro._core import Payload, Transport
+from fanferro._core import AttributeValue, Payload, Transport, is_sqs_safe_text, validate_wire
 from fanferro._utils import LoopLocal, optional_seconds
 from fanferro.errors import ConfigurationError, ResourceUnavailableError, ValidationError
 from fanferro.events import EventKind
@@ -52,6 +52,8 @@ __all__ = ["Queue", "Subscription", "Topic"]
 
 _UNSET: Any = object()
 _RETRY_AFTER_FAILURE = (1.0, 60.0)
+_MAX_ATTRIBUTES = 10
+"""Message attributes SQS and SNS accept per message."""
 
 type GroupId = str | Callable[[OutgoingMessage], str]
 """A FIFO message group id, or a function deriving it from the message."""
@@ -62,6 +64,14 @@ _PLAIN_BODIES = (str, bytes, bytearray, memoryview, int, float, bool, dict, list
 
 def _structured(body: Any) -> bool:
     return not isinstance(body, _PLAIN_BODIES)
+
+
+def _is_text(body: bytes) -> bool:
+    """Whether the transport sends ``body`` as it is (no base64 and no encoding attribute)."""
+    try:
+        return is_sqs_safe_text(body.decode())
+    except UnicodeDecodeError:
+        return False
 
 
 class _Resource:
@@ -162,6 +172,7 @@ class _Destination(_Resource):
         self._native_destination_cache: tuple[Mapping[str, Any], Any] | None = None
         self._pending_subscriptions: list[Subscription] = []
         """Subscriptions of this topic declared after the client provisioned, resolved before publishing."""
+        self._trace_budget_warned = False
 
     async def _resolve_pending_subscriptions(self) -> None:
         """Resolves subscriptions declared after the client provisioned, so the next message reaches them.
@@ -241,7 +252,7 @@ class _Destination(_Resource):
         if self.fifo and not message.group_id:
             raise ValidationError(f"publishing to FIFO {self.kind} {self.name!r} requires group_id")
         envelope = message.envelope or self.envelope
-        client._telemetry.inject(message, envelope)
+        trace_attributes = client._telemetry.inject(message, envelope)
         codec = message.codec if message.codec is not None else self._codec
         if isinstance(codec, str):
             codec = client.codecs.by_name(codec)
@@ -261,12 +272,14 @@ class _Destination(_Resource):
             headers=message.headers,
         )
         wire = envelope.wrap(payload)
-        if message.attributes:
+        if message.attributes or trace_attributes:
             attributes = dict(wire.attributes)
             for name, value in message.attributes.items():
                 if name.startswith("fanferro."):
                     raise ValidationError(f"attribute {name!r} uses the reserved 'fanferro.' prefix")
                 attributes[name] = to_attribute_value(value)
+            if trace_attributes:
+                self._add_trace_attributes(attributes, trace_attributes, wire.body, message)
             wire = wire.replace(attributes=attributes)
         return PreparedMessage(
             destination=self._destination_for(info),
@@ -282,6 +295,45 @@ class _Destination(_Resource):
             trace_header=message.trace_header,
         )
 
+    def _add_trace_attributes(
+        self,
+        attributes: dict[str, AttributeValue],
+        trace: dict[str, str],
+        body: bytes,
+        message: OutgoingMessage,
+    ) -> None:
+        """Adds the trace context attributes that fit into the attribute limit.
+
+        Propagation must never make a message fail that would be sent without it: ``tracestate``
+        (and other keys) go first, ``traceparent`` last, with a ``config.warning`` the first time
+        for this destination. One slot stays free when the transport may need one (the encoding
+        of a binary body, the pointer of an offloaded payload).
+        """
+        free = _MAX_ATTRIBUTES - len(attributes)
+        if len(trace) > free - 1 and (self.large_payloads is not None or not _is_text(body)):
+            free -= 1
+        for key, value in trace.items():
+            if free <= 0:
+                break
+            attributes[key] = AttributeValue.string(value)
+            free -= 1
+        dropped = [key for key in trace if key not in attributes]
+        if dropped and not self._trace_budget_warned and len(attributes) <= _MAX_ATTRIBUTES:
+            self._trace_budget_warned = True
+            fallback = (
+                "the trace continues through the AWS trace header"
+                if message.trace_header is not None
+                else "the trace context is not propagated"
+            )
+            self._client.events.emit(
+                EventKind.CONFIG_WARNING,
+                f"left trace context attributes {', '.join(dropped)} out of a message to {self.kind} {self.name!r}: "
+                f"a message carries at most {_MAX_ATTRIBUTES} attributes and {fallback}; "
+                "reduce the attributes of its messages to propagate it (reported once per destination)",
+                destination=self.name,
+                attributes=dropped,
+            )
+
     async def _prepare_message(self, message: OutgoingMessage, info: Any) -> PreparedMessage:
         if not self._client.publish_middleware:
             return self._encode_now(message, info)
@@ -296,12 +348,19 @@ class _Destination(_Resource):
         """Encodes a message without sending it (e.g. to store it in a transactional outbox).
 
         Accepts the same options as :meth:`publish`. Send it later with ``client.publish_prepared``.
+        Its attributes are checked as a publish checks them before sending (count, names, values),
+        so that a message that could never be sent fails here, before it is stored.
+
+        Raises:
+            ValidationError: The message could not be published as it is.
         """
         message = body if isinstance(body, OutgoingMessage) else self._message(body, options)
         info = await self._resolve()
         if self._pending_subscriptions:
             await self._resolve_pending_subscriptions()
-        return await self._prepare_message(message, info)
+        prepared = await self._prepare_message(message, info)
+        validate_wire(prepared.wire)
+        return prepared
 
     async def publish(self, body: Any, /, **options: Any) -> PublishResult:
         """Publishes one message.

@@ -4,6 +4,7 @@ from collections.abc import Iterator
 from typing import Any
 
 import pytest
+from opentelemetry import context as otel_context
 from opentelemetry import trace
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
@@ -109,6 +110,75 @@ async def test_each_publish_carries_its_own_trace_context(otel: Any, name: Any) 
     requests = {span.name: span for span in exporter.get_finished_spans() if span.name in ("first", "second")}
     trace_ids = {message.attribute("traceparent").split("-")[1] for message in received}
     assert trace_ids == {f"{span.context.trace_id:032x}" for span in requests.values()}
+
+
+def _request_context_with_tracestate() -> Any:
+    """A remote parent context whose trace state a vendor filled (as in incoming request headers)."""
+    parent = trace.SpanContext(
+        trace_id=0x5759E988BD862E3FE1BE46A994272793,
+        span_id=0x53995C3F42CD8AD8,
+        is_remote=True,
+        trace_flags=trace.TraceFlags(trace.TraceFlags.SAMPLED),
+        trace_state=trace.TraceState([("vendor", "abc")]),
+    )
+    return trace.set_span_in_context(trace.NonRecordingSpan(parent))
+
+
+async def test_trace_context_never_pushes_a_message_over_the_attribute_limit(otel: Any, name: Any) -> None:
+    tracer_provider, exporter, meter_provider, _ = otel
+    telemetry = fanferro.Telemetry(tracer_provider=tracer_provider, meter_provider=meter_provider)
+    client = testing.memory_client(telemetry=telemetry)
+    queue = client.queue(name("attribute-budget"))
+    other = client.queue(name("attribute-budget-other"))
+    warnings: list[fanferro.Event] = []
+    client.on("config.warning", warnings.append)
+    handled: list[fanferro.Message[Any]] = []
+    consumer = client.consumer(queue, wait_time=1)
+
+    @consumer.default
+    async def handle(message: fanferro.Message[Any]) -> None:
+        handled.append(message)
+
+    def attributes(count: int) -> dict[str, str]:
+        return {f"a{i}": "x" for i in range(count)}
+
+    async with client:
+        # What the envelope adds by itself (no active span: no trace context).
+        own = len((await queue.prepare({"n": 0})).wire.attributes)
+        own_binary = len((await queue.prepare(b"\xff")).wire.attributes)
+        token = otel_context.attach(_request_context_with_tracestate())
+        try:
+            await queue.send({"n": 0}, attributes=attributes(8 - own))  # room for both
+            await queue.send({"n": 1}, attributes=attributes(9 - own))  # room for traceparent
+            await queue.send({"n": 2}, attributes=attributes(9 - own))  # warned once only
+            await queue.send({"n": 3}, attributes=attributes(10 - own))  # no room at all
+            await queue.send(b"\xff", attributes=attributes(9 - own_binary))  # the base64 encoding needs one
+            await other.send({"n": 4}, attributes=attributes(10 - own))  # another destination warns again
+        finally:
+            otel_context.detach(token)
+        await consume_until(consumer, lambda: len(handled) == 5)
+        assert len(await drain_queue(client, other)) == 1
+    by_body = {repr(message.body): message for message in handled}
+    keys = {
+        body: [key for key in ("traceparent", "tracestate") if key in message.raw_attributes]
+        for body, message in by_body.items()
+    }
+    assert keys == {
+        repr({"n": 0}): ["traceparent", "tracestate"],
+        repr({"n": 1}): ["traceparent"],
+        repr({"n": 2}): ["traceparent"],
+        repr({"n": 3}): [],
+        repr(b"\xff"): [],
+    }
+    assert all(message.trace_header for message in handled), "the AWS trace header still carries the trace"
+    processes = [span for span in exporter.get_finished_spans() if span.name == f"process {queue.name}"]
+    assert {span.context.trace_id for span in processes} == {0x5759E988BD862E3FE1BE46A994272793}
+    trace_warnings = [event for event in warnings if "trace context" in event.message]
+    assert [(event.fields["destination"], event.fields["attributes"]) for event in trace_warnings] == [
+        (queue.name, ["tracestate"]),
+        (other.name, ["traceparent", "tracestate"]),
+    ]
+    assert "AWS trace header" in trace_warnings[0].message
 
 
 async def test_link_mode_and_errors(otel: Any, name: Any) -> None:

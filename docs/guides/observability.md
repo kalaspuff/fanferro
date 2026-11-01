@@ -90,6 +90,17 @@ attribute only. `Client(split_batches_by_trace_header=True)` sends such batches 
 trace header instead (at once on standard topics, one after the other on FIFO topics): up to ten
 calls per ten messages, for consumers that rely on the X-Ray header alone.
 
+Trace context attributes never make a message fail. A message carries at most 10 attributes,
+and fanferro's own (`fanferro.id`, `fanferro.type`, `content-type`...) count too; when the
+propagation attributes would push a message over the limit, `tracestate` (and any other key) is
+left out first, then `traceparent`, and a `config.warning` event names the destination (once per
+destination). The trace then continues through the AWS trace header, which takes no attribute slot
+(left out of `inject`, the context is not propagated). fanferro keeps one slot free for the
+transport where it may need one: a binary body's `fanferro.encoding` attribute, or the pointer of a
+payload offloaded to S3 when the destination has large payloads enabled. To keep `traceparent` on
+every message, leave a slot free for it (two with `tracestate`, one more for binary bodies or
+offloaded payloads).
+
 Context is injected from the current span (your web request's span if tracing is off for
 fanferro), so `Telemetry(tracing=False)` still propagates. `Telemetry.disabled()` turns everything off.
 

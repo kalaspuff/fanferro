@@ -59,6 +59,36 @@ pub struct DecodedBody {
     pub pointer: Option<PayloadPointer>,
 }
 
+/// Checks the attributes of `wire` as [`Transport::encode`] does for a message sent inline: names,
+/// values, the transport's reserved names and the count, including the encoding attribute a body
+/// that is not SQS-safe text gets.
+///
+/// For messages encoded later, such as prepared ones stored in an outbox, so that they fail where
+/// they are built rather than when they are sent. Offloading a payload adds checks of its own (the pointer takes an attribute).
+pub fn validate_wire(wire: &WireMessage) -> Result<()> {
+    refuse_transport_attributes(&wire.attributes)?;
+    if as_sqs_safe_text(&wire.body).is_some() {
+        return validate_attributes(&wire.attributes);
+    }
+    let mut attributes = wire.attributes.clone();
+    attributes.insert(reserved::ENCODING.into(), AttributeValue::string("base64"));
+    validate_attributes(&attributes)
+}
+
+fn refuse_transport_attributes(attributes: &MessageAttributes) -> Result<()> {
+    for name in [
+        reserved::ENCODING,
+        reserved::CLAIM_CHECK,
+        reserved::EXTENDED_PAYLOAD_SIZE,
+        reserved::LEGACY_EXTENDED_PAYLOAD_SIZE,
+    ] {
+        if attributes.contains_key(name) {
+            return Err(Error::validation(format!("attribute {name:?} is reserved for the transport layer")));
+        }
+    }
+    Ok(())
+}
+
 /// Encodes and decodes message bodies for transport.
 #[derive(Clone, Debug)]
 pub struct Transport {
@@ -94,16 +124,7 @@ impl Transport {
     /// Encodes `wire` for a destination whose size limit is `limit` bytes.
     pub async fn encode(&self, wire: &WireMessage, message_id: &str, limit: usize) -> Result<OutgoingBody> {
         let mut attributes = wire.attributes.clone();
-        for name in [
-            reserved::ENCODING,
-            reserved::CLAIM_CHECK,
-            reserved::EXTENDED_PAYLOAD_SIZE,
-            reserved::LEGACY_EXTENDED_PAYLOAD_SIZE,
-        ] {
-            if attributes.contains_key(name) {
-                return Err(Error::validation(format!("attribute {name:?} is reserved for the transport layer")));
-            }
-        }
+        refuse_transport_attributes(&attributes)?;
         let text = as_sqs_safe_text(&wire.body);
         let inline_body_len = match text {
             Some(text) => text.len(),
@@ -267,6 +288,31 @@ mod tests {
         assert_eq!(out.attributes.get(reserved::ENCODING), Some(&AttributeValue::string("base64")));
         let decoded = transport.decode(&out.body, out.attributes).await.unwrap();
         assert_eq!(decoded.wire, wire);
+    }
+
+    #[tokio::test]
+    async fn validate_wire_refuses_what_an_inline_encode_refuses() {
+        let (transport, _) = transport(None);
+        let attributes = |count: usize| -> MessageAttributes {
+            (0..count).map(|i| (format!("a{i}"), AttributeValue::string("x"))).collect()
+        };
+        let cases = [
+            WireMessage::new(Bytes::from_static(b"text"), attributes(10)),
+            WireMessage::new(Bytes::from_static(b"text"), attributes(11)),
+            WireMessage::new(Bytes::from_static(&[0, 255]), attributes(9)),
+            WireMessage::new(Bytes::from_static(&[0, 255]), attributes(10)),
+            WireMessage::new(Bytes::from_static(b"text"), [("a".into(), AttributeValue::string(""))].into()),
+            WireMessage::new(Bytes::from_static(b"text"), [("AWS.x".into(), AttributeValue::string("x"))].into()),
+            WireMessage::new(
+                Bytes::from_static(b"text"),
+                [(reserved::ENCODING.into(), AttributeValue::string("base64"))].into(),
+            ),
+        ];
+        let valid: Vec<bool> = cases.iter().map(|wire| validate_wire(wire).is_ok()).collect();
+        assert_eq!(valid, [true, false, true, false, false, false, false]);
+        for (wire, valid) in cases.iter().zip(valid) {
+            assert_eq!(transport.encode(wire, "id", 1 << 20).await.is_ok(), valid, "{wire:?}");
+        }
     }
 
     #[tokio::test]

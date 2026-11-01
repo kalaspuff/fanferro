@@ -572,6 +572,28 @@ async def test_outbox_prepare_and_relay(client_factory: ClientFactory, name: Any
     assert [message.json()["order_id"] for message in fifo_messages] == [0, 1]
 
 
+async def test_prepare_refuses_attributes_a_publish_refuses(memory_client: fanferro.Client, name: Any) -> None:
+    # An outbox row with attributes SQS refuses was committed, and the relay gave it up later.
+    queue = memory_client.queue(name("prepare-attributes"))
+    own = len((await queue.prepare({"x": 1})).wire.attributes)
+    own_binary = len((await queue.prepare(b"\xff")).wire.attributes)
+    many = {f"a{i}": "x" for i in range(10 - own)}
+    await queue.prepare({"x": 1}, attributes=many)  # exactly at the limit
+    refused: list[tuple[Any, dict[str, Any]]] = [
+        ({"x": 1}, {**many, "one-more": "x"}),
+        (b"\xff", {f"a{i}": "x" for i in range(10 - own_binary)}),  # the base64 encoding needs one
+        ({"x": 1}, {"empty": ""}),
+        ({"x": 1}, {"AWS.trace": "x"}),
+        ({"x": 1}, {"with space": "x"}),
+        ({"x": 1}, {"fanferro.encoding": "base64"}),
+    ]
+    for body, attributes in refused:
+        with pytest.raises(fanferro.ValidationError):
+            await queue.prepare(body, attributes=attributes)
+        with pytest.raises(fanferro.ValidationError):
+            await queue.send(body, attributes=attributes)
+
+
 async def test_prepared_messages_use_the_large_payload_settings_of_their_destination(
     client_factory: ClientFactory, name: Any
 ) -> None:
