@@ -1284,6 +1284,12 @@ class Consumer:
                 return await self._payload_gone(delivery)
             self._stats.decode_failures += 1
             return await self._undecodable(delivery, error)
+        return await self._process_message(message, slot, started)
+
+    async def _process_message(self, message: Message[Any], slot: _Slot, started: float) -> Outcome | None:
+        """Handles a message built from a delivery (or by :func:`fanferro.testing.dispatch`)."""
+        delivery = message.delivery
+        assert delivery is not None
         message._slot = slot
         telemetry = self._client._telemetry
         with telemetry.process_span(message, self.queue.name) as span:
@@ -1311,6 +1317,17 @@ class Consumer:
                 await self._confirm_settlements(message)
         # None when a settlement failed: the message comes back, so a FIFO group must wait for it.
         return None if message._settlement_failed else message.outcome
+
+    async def _dispatch(self, message: Message[Any]) -> Outcome | None:
+        """Processes one message outside the receive loop (:func:`fanferro.testing.dispatch`)."""
+        semaphore = asyncio.Semaphore(1)
+        await semaphore.acquire()
+        self._active += 1
+        slot = _Slot(self, semaphore)
+        try:
+            return await self._process_message(message, slot, monotonic())
+        finally:
+            slot.release()
 
     async def _handle(self, message: Message[Any], slot: _Slot) -> None:
         """Routes, decodes and runs the handler while holding ``slot``, then settles without it."""
