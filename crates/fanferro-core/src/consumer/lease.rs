@@ -74,6 +74,9 @@ pub(crate) struct LeaseEntry {
     pub status: LeaseStatus,
     /// Set while a heartbeat extension of the lease is in flight; cancelled when its call ended.
     pub extending: Option<CancellationToken>,
+    /// Heartbeat extensions that failed in a row (their retries back off, see
+    /// `heartbeat::retry_delay`).
+    pub extension_failures: u32,
 }
 
 /// How a message was settled (used for events and metrics).

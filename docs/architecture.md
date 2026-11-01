@@ -99,7 +99,11 @@ These are relied upon across layers; tests cover each of them.
 3. **Leases are protected until settled.** Heartbeats extend visibility (batched by ten) while a
    message is buffered, processing or waiting for a settling permit, capped at 12 hours after
    receipt and `max_duration`. An extension call that gets no answer within half the heartbeat
-   interval (0.5-10 s) is retried at the next tick, so a stuck connection cannot stall the others.
+   interval (0.5-10 s) is retried at the next tick; the heartbeat loop keeps its calls in flight
+   next to its tick, so a slow or stuck call does not delay the extension of other leases. Failed
+   extensions that retrying soon cannot fix (throttling, access denied, a deleted queue) back off
+   per lease from 1 s up to the heartbeat interval, reported in one `lease.extension_failed` event
+   per tick.
    A retry or a release of a lease waits until an extension call of it that is in flight ended
    (at most that call's timeout), so that the extension cannot reach SQS after it and hide the
    message for another `extend_by`. The lease stays tracked until its settlement completed.
