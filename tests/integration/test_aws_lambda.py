@@ -72,7 +72,7 @@ async def test_records_are_decoded_routed_and_failures_reported(client_factory: 
         )
         again = await invoke_sqs_handler(handler, queue, wait_time=2)
         assert again == {"batchItemFailures": []}
-        assert sum((await queue.approximate_count()).values()) == 0
+        assert await queue.approximate_count() == fanferro.QueueCounts(visible=0, in_flight=0, delayed=0)
     assert failing.message_id
     assert sorted(seen) == [(1, 1, False), (2, 1, False), (2, 2, False), (5000, 1, True)]
 
@@ -94,7 +94,7 @@ async def test_dead_lettered_records_are_forwarded_and_not_reported(client_facto
             await queue.send(OrderCreated(order_id=order_id))
         responses = [await invoke_sqs_handler(handler, queue, wait_time=1) for _ in range(3)]
         assert all(response == {"batchItemFailures": []} for response in responses)
-        assert sum((await queue.approximate_count()).values()) == 0
+        assert await queue.approximate_count() == fanferro.QueueCounts(visible=0, in_flight=0, delayed=0)
         assert queue.dead_letter_queue is not None
         dead = await drain_queue(client, queue.dead_letter_queue)
     assert [message.json() for message in dead] == [{"order_id": 1, "total": 0.0}]
@@ -158,7 +158,7 @@ async def test_handlers_still_running_at_the_deadline_are_reported(client_factor
         core = await client._core()
         await core.delete_records(queue.url, [r["receiptHandle"] for r in event["Records"] if r["messageId"] != slow])
         assert await invoke_sqs_handler(handler, queue, wait_time=1) == {"batchItemFailures": []}
-        assert sum((await queue.approximate_count()).values()) == 0
+        assert await queue.approximate_count() == fanferro.QueueCounts(visible=0, in_flight=0, delayed=0)
     assert any("cancelled 1 unfinished" in event.message for event in errors)
 
 

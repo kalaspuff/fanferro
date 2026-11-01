@@ -61,7 +61,7 @@ async def main() -> list[str]:
     print(f"booked {sorted(booked)}; responses: {responses}")
     assert all(response == {"batchItemFailures": []} for response in responses)
     assert payments.dead_letter_queue is not None
-    assert (await payments.dead_letter_queue.approximate_count())["visible"] == 1
+    assert (await payments.dead_letter_queue.approximate_count()).visible == 1
     await client.close()
     return sorted(booked)
 
