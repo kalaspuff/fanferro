@@ -53,8 +53,9 @@ result = await queue.send_batch([ResizeImage(id=i) for i in range(100)], attribu
 ```
 
 Batches are split into calls of up to 10 entries (and by size). Up to eight calls are in flight at
-once for standard queues and topics; FIFO destinations get one call after another, so that each
-message group keeps its order. Entries that fail with retryable errors are retried; if some still
+once. On FIFO destinations the message groups are spread over up to eight lanes (one per ten
+entries, a group always in the same lane), and each lane sends its calls one after another, with
+the retries of a call before its next one, so that each message group keeps its order. Entries that fail with retryable errors are retried; if some still
 fail, `BatchPublishError` is raised after the others were sent (`error.result.failed` lists them).
 Pass `raise_on_failure=False` to inspect `result.failed`.
 
