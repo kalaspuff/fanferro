@@ -60,6 +60,7 @@ class EventKind(StrEnum):
     RESOURCE_DRIFT = "resource.drift"
     RESOURCE_MISSING = "resource.missing"
     RESOURCE_FAILED = "resource.failed"
+    RESOURCE_RETRIED = "resource.retried"
     RESOURCE_FALLBACK = "resource.fallback"
     RESOURCE_POLICY_UPDATED = "resource.policy_updated"
     RESOURCE_DELETED = "resource.deleted"
@@ -123,6 +124,7 @@ _DEFAULT_LEVELS: dict[EventKind, int] = {
     EventKind.RESOURCE_DRIFT: logging.WARNING,
     EventKind.RESOURCE_MISSING: logging.WARNING,
     EventKind.RESOURCE_FAILED: logging.ERROR,
+    EventKind.RESOURCE_RETRIED: logging.WARNING,
     EventKind.RESOURCE_FALLBACK: logging.WARNING,
     EventKind.RESOURCE_POLICY_UPDATED: logging.INFO,
     EventKind.RESOURCE_DELETED: logging.INFO,

@@ -14,6 +14,7 @@ available as `fanferro events`.
 | `resource.drift` | warning | Resource attributes differ from the spec and were not updated. |
 | `resource.missing` | warning | A resource does not exist and was not created. |
 | `resource.failed` | error | Provisioning a resource failed. |
+| `resource.retried` | warning | Provisioning a resource failed transiently and is tried again shortly. |
 | `resource.fallback` | warning | A provisioning fallback handler supplied the resource. |
 | `resource.policy_updated` | info | A queue policy was updated to allow an SNS topic to send messages. |
 | `resource.deleted` | info | A resource was deleted (teardown). |

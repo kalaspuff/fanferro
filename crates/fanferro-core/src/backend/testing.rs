@@ -477,3 +477,172 @@ impl SnsApi for ThrottledPublishBatches {
         self.inner.confirm_subscription(topic_arn, token).await
     }
 }
+
+/// Takes one of a number of failures, while some are left.
+#[derive(Debug)]
+struct Failures(parking_lot::Mutex<usize>);
+
+impl Failures {
+    fn new(count: usize) -> Self {
+        Self(parking_lot::Mutex::new(count))
+    }
+
+    fn take(&self) -> bool {
+        let mut left = self.0.lock();
+        *left > 0 && {
+            *left -= 1;
+            true
+        }
+    }
+}
+
+/// SQS whose first `failures` `GetQueueAttributes` and `SetQueueAttributes` calls fail with `error`
+/// (by default `NonExistentQueue`, as SQS answers for a queue created a moment earlier); it counts
+/// the calls.
+#[derive(Debug)]
+pub(crate) struct FailingQueueAttributes {
+    inner: Arc<dyn SqsApi>,
+    failures: Failures,
+    error: AwsError,
+    /// `GetQueueAttributes` and `SetQueueAttributes` calls, failed ones included.
+    pub(crate) calls: AtomicUsize,
+}
+
+impl FailingQueueAttributes {
+    pub(crate) fn new(inner: Arc<dyn SqsApi>, failures: usize) -> Self {
+        let error =
+            AwsError::new("sqs", "GetQueueAttributes", AwsErrorKind::NotFound, "The specified queue does not exist.")
+                .with_code("AWS.SimpleQueueService.NonExistentQueue");
+        Self { inner, failures: Failures::new(failures), error, calls: AtomicUsize::new(0) }
+    }
+
+    pub(crate) fn with_error(mut self, kind: AwsErrorKind, code: &str) -> Self {
+        self.error = AwsError::new("sqs", "GetQueueAttributes", kind, code).with_code(code);
+        self
+    }
+
+    fn fail(&self) -> Result<()> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.failures.take() { Err(self.error.clone().into()) } else { Ok(()) }
+    }
+}
+
+#[async_trait]
+impl SqsApi for FailingQueueAttributes {
+    async fn send_message(&self, queue_url: &str, request: SendRequest) -> Result<SendOutput> {
+        self.inner.send_message(queue_url, request).await
+    }
+    async fn send_message_batch(&self, queue_url: &str, entries: Vec<SendRequest>) -> Result<BatchResult<SendOutput>> {
+        self.inner.send_message_batch(queue_url, entries).await
+    }
+    async fn receive_messages(&self, request: ReceiveRequest) -> Result<Vec<ReceivedMessage>> {
+        self.inner.receive_messages(request).await
+    }
+    async fn delete_message_batch(&self, queue_url: &str, receipt_handles: Vec<String>) -> Result<BatchResult<()>> {
+        self.inner.delete_message_batch(queue_url, receipt_handles).await
+    }
+    async fn change_visibility_batch(
+        &self,
+        queue_url: &str,
+        entries: Vec<VisibilityChange>,
+    ) -> Result<BatchResult<()>> {
+        self.inner.change_visibility_batch(queue_url, entries).await
+    }
+    async fn get_queue_url(&self, name: &str, owner_account_id: Option<&str>) -> Result<String> {
+        self.inner.get_queue_url(name, owner_account_id).await
+    }
+    async fn get_queue_attributes(&self, queue_url: &str) -> Result<StringMap> {
+        self.fail()?;
+        self.inner.get_queue_attributes(queue_url).await
+    }
+    async fn create_queue(&self, name: &str, attributes: &StringMap, tags: &StringMap) -> Result<String> {
+        self.inner.create_queue(name, attributes, tags).await
+    }
+    async fn set_queue_attributes(&self, queue_url: &str, attributes: &StringMap) -> Result<()> {
+        self.fail()?;
+        self.inner.set_queue_attributes(queue_url, attributes).await
+    }
+    async fn list_queue_tags(&self, queue_url: &str) -> Result<StringMap> {
+        self.inner.list_queue_tags(queue_url).await
+    }
+    async fn tag_queue(&self, queue_url: &str, tags: &StringMap) -> Result<()> {
+        self.inner.tag_queue(queue_url, tags).await
+    }
+    async fn delete_queue(&self, queue_url: &str) -> Result<()> {
+        self.inner.delete_queue(queue_url).await
+    }
+    async fn purge_queue(&self, queue_url: &str) -> Result<()> {
+        self.inner.purge_queue(queue_url).await
+    }
+}
+
+/// SNS whose first `failures` `ListSubscriptionsByTopic` calls are throttled (after the SDK's own
+/// retries), as when many subscriptions of a topic are provisioned at once.
+#[derive(Debug)]
+pub(crate) struct ThrottledSubscriptionLookups {
+    inner: Arc<dyn SnsApi>,
+    failures: Failures,
+}
+
+impl ThrottledSubscriptionLookups {
+    pub(crate) fn new(inner: Arc<dyn SnsApi>, failures: usize) -> Self {
+        Self { inner, failures: Failures::new(failures) }
+    }
+}
+
+#[async_trait]
+impl SnsApi for ThrottledSubscriptionLookups {
+    async fn publish(&self, topic_arn: &str, request: PublishRequest) -> Result<PublishOutput> {
+        self.inner.publish(topic_arn, request).await
+    }
+    async fn publish_batch(&self, topic_arn: &str, entries: Vec<PublishRequest>) -> Result<BatchResult<PublishOutput>> {
+        self.inner.publish_batch(topic_arn, entries).await
+    }
+    async fn create_topic(&self, name: &str, attributes: &StringMap, tags: &StringMap) -> Result<String> {
+        self.inner.create_topic(name, attributes, tags).await
+    }
+    async fn get_topic_attributes(&self, topic_arn: &str) -> Result<StringMap> {
+        self.inner.get_topic_attributes(topic_arn).await
+    }
+    async fn set_topic_attribute(&self, topic_arn: &str, name: &str, value: &str) -> Result<()> {
+        self.inner.set_topic_attribute(topic_arn, name, value).await
+    }
+    async fn list_topic_tags(&self, topic_arn: &str) -> Result<StringMap> {
+        self.inner.list_topic_tags(topic_arn).await
+    }
+    async fn tag_topic(&self, topic_arn: &str, tags: &StringMap) -> Result<()> {
+        self.inner.tag_topic(topic_arn, tags).await
+    }
+    async fn delete_topic(&self, topic_arn: &str) -> Result<()> {
+        self.inner.delete_topic(topic_arn).await
+    }
+    async fn subscribe(
+        &self,
+        topic_arn: &str,
+        protocol: &str,
+        endpoint: &str,
+        attributes: &StringMap,
+    ) -> Result<String> {
+        self.inner.subscribe(topic_arn, protocol, endpoint, attributes).await
+    }
+    async fn list_subscriptions_by_topic(&self, topic_arn: &str) -> Result<Vec<SubscriptionInfo>> {
+        if self.failures.take() {
+            return Err(AwsError::new("sns", "ListSubscriptionsByTopic", AwsErrorKind::Throttling, "Rate exceeded")
+                .with_code("Throttling")
+                .into());
+        }
+        self.inner.list_subscriptions_by_topic(topic_arn).await
+    }
+    async fn get_subscription_attributes(&self, subscription_arn: &str) -> Result<StringMap> {
+        self.inner.get_subscription_attributes(subscription_arn).await
+    }
+    async fn set_subscription_attribute(&self, subscription_arn: &str, name: &str, value: &str) -> Result<()> {
+        self.inner.set_subscription_attribute(subscription_arn, name, value).await
+    }
+    async fn unsubscribe(&self, subscription_arn: &str) -> Result<()> {
+        self.inner.unsubscribe(subscription_arn).await
+    }
+    async fn confirm_subscription(&self, topic_arn: &str, token: &str) -> Result<String> {
+        self.inner.confirm_subscription(topic_arn, token).await
+    }
+}

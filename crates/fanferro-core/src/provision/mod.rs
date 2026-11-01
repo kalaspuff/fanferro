@@ -25,10 +25,13 @@ pub use queue::QueueInfo;
 pub use subscription::SubscriptionInfo;
 pub use topic::TopicInfo;
 
+use std::time::Duration;
+
 use crate::backend::StringMap;
 use crate::client::Client;
 use crate::error::{Error, ResourceKind, Result};
 use crate::events::{Event, EventKind};
+use crate::retry::Backoff;
 
 fn default_true() -> bool {
     true
@@ -222,7 +225,80 @@ pub fn is_aws_managed_sqs_key(key_id: &str) -> bool {
     key_id == "alias/aws/sqs" || (key_id.starts_with("arn:") && key_id.ends_with(":alias/aws/sqs"))
 }
 
+/// Attempts at provisioning one resource, the first included, while its calls fail transiently.
+pub(crate) const PROVISION_ATTEMPTS: u32 = 5;
+
+/// Delays between the attempts: about 0.5, 1, 2 and 4 seconds (with jitter, at least half of each).
+const PROVISION_BACKOFF: Backoff =
+    Backoff { initial: Duration::from_millis(500), max: Duration::from_secs(4), multiplier: 2.0, jitter: true };
+
+/// Whether provisioning that ended in this report may succeed when tried again: AWS throttled a
+/// call or failed transiently, or a resource was not found that provisioning had just created or
+/// resolved (AWS makes new queues and topics visible to every call only after a moment, and asks
+/// to wait a second after `CreateQueue`; docs/parity R1). Not when SQS refuses to create a queue
+/// within 60 seconds of deleting one of the same name: the retries would end long before that.
+fn worth_retrying<T>(report: &Report<T>) -> bool {
+    report.status == ProvisionStatus::Failed
+        && report.error.as_ref().is_some_and(|error| {
+            let deleted_recently = error
+                .aws()
+                .and_then(|aws| aws.code.as_deref())
+                .is_some_and(|code| code.ends_with("QueueDeletedRecently"));
+            (error.is_retryable() || error.is_not_found()) && !deleted_recently
+        })
+}
+
 impl Client {
+    /// Runs one provisioning attempt, and again (at most [`PROVISION_ATTEMPTS`] in all) while it
+    /// fails transiently. Every step of provisioning is idempotent: a later attempt finds what an
+    /// earlier one created, and its report keeps the earlier attempts' actions.
+    pub(crate) async fn with_provisioning_retries<T, F, Fut>(&self, mut attempt: F) -> Result<Report<T>>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<Report<T>>>,
+    {
+        let mut earlier: Vec<String> = Vec::new();
+        let mut number = 1;
+        loop {
+            let mut report = attempt().await?;
+            if !earlier.is_empty() {
+                let created = earlier.iter().any(|action| action.starts_with("created "));
+                let later = std::mem::take(&mut report.actions);
+                report.actions = std::mem::take(&mut earlier);
+                for action in later {
+                    if !report.actions.contains(&action) {
+                        report.actions.push(action);
+                    }
+                }
+                if created && matches!(report.status, ProvisionStatus::Found | ProvisionStatus::Updated) {
+                    report.status = ProvisionStatus::Created;
+                }
+            }
+            if number >= PROVISION_ATTEMPTS || !worth_retrying(&report) {
+                return Ok(report);
+            }
+            let ceiling = PROVISION_BACKOFF.ceiling(number - 1);
+            let delay = ceiling / 2 + PROVISION_BACKOFF.delay(number - 1) / 2;
+            self.inner.events.emit(EventKind::ResourceRetried, || {
+                let mut event = Event::new(
+                    EventKind::ResourceRetried,
+                    format!("provisioning {} {} failed; retrying", report.kind, report.name),
+                )
+                .field("resource", report.kind.as_str())
+                .field("name", &report.name)
+                .field("attempt", number)
+                .field("delay", delay.as_secs_f64());
+                if let Some(error) = &report.error {
+                    event = event.error(error);
+                }
+                event
+            });
+            earlier = report.actions;
+            tokio::time::sleep(delay).await;
+            number += 1;
+        }
+    }
+
     pub(crate) fn emit_resource(
         &self,
         kind: EventKind,
@@ -281,6 +357,10 @@ impl Client {
 
     /// Ensures the payload bucket exists (creates it when `create` is set).
     pub async fn ensure_bucket(&self, bucket: &str, create: bool) -> Result<Report<String>> {
+        self.with_provisioning_retries(|| self.ensure_bucket_once(bucket, create)).await
+    }
+
+    async fn ensure_bucket_once(&self, bucket: &str, create: bool) -> Result<Report<String>> {
         let mut report = Report::new(ResourceKind::Bucket, bucket);
         match self.inner.backend.objects.bucket_exists(bucket).await {
             Ok(true) => {

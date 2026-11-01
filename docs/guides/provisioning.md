@@ -69,6 +69,15 @@ least-privilege deployments.
 
 ## Failure modes
 
+Before a failure counts, provisioning tries a resource again, up to 5 times in all with about 0.5,
+1, 2 and 4 seconds between attempts, when AWS throttled a call or failed transiently (after the
+AWS SDK's own retries), or answered that a queue or topic does not exist that provisioning had just
+created or resolved. AWS makes a new queue usable by every call only after a moment, so the
+subscriptions of a queue created a moment earlier can otherwise fail. Each attempt finds what an
+earlier one created. Every retry emits a `resource.retried` event (warning) with the error,
+`attempt` and `delay`. Other errors, such as access denied, invalid attributes, or a queue name
+deleted less than 60 seconds ago, fail at once.
+
 Each policy has `on_missing`, `on_drift` and `on_error`, each one of:
 
 * `"raise"` - raise `ProvisioningError` (with `.report`). Default for missing resources and errors.
