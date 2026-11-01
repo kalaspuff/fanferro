@@ -148,6 +148,46 @@ async def on_created(event: aws.S3ObjectEvent) -> None:
     await index(event.bucket.name, event.object.key, event.object.size)
 ```
 
+### Typed events of AWS services
+
+These events, which applications commonly react to, have classes in `fanferro.aws` (each the
+event's `detail`; `message.time` is the event's time):
+
+| Event (`detail-type`) | Message type | Class |
+| --- | --- | --- |
+| a scheduled rule fired (`Scheduled Event`) | `aws.events.scheduled_event` | `ScheduledEvent` (no fields: the rule's ARN is in `EventBridgeMetadata.of(message).resources`) |
+| `ECS Task State Change` | `aws.ecs.task_state_change` | `EcsTaskStateChange`: `last_status`, `stopped`, `stop_code`, `stopped_reason`, `containers` (`exit_code`, `reason`), `group`, `version`... |
+| `Step Functions Execution Status Change` (standard workflows) | `aws.states.step_functions_execution_status_change` | `StepFunctionsExecutionStatusChange`: `status`, `succeeded`, `failed`, `error`, `cause`, `start_date`, `stop_date`, `input_json()`, `output_json()` |
+| `EC2 Spot Instance Interruption Warning` | `aws.ec2.spot_instance_interruption_warning` | `Ec2SpotInstanceInterruptionWarning`: `instance_id`, `instance_action` |
+| `EC2 Instance Rebalance Recommendation` | `aws.ec2.instance_rebalance_recommendation` | `Ec2InstanceRebalanceRecommendation`: `instance_id` |
+| `EC2 Instance State-change Notification` | `aws.ec2.instance_state_change_notification` | `Ec2InstanceStateChange`: `instance_id`, `state` |
+| `EC2 Instance-launch Lifecycle Action`, `EC2 Instance-terminate Lifecycle Action` | `aws.autoscaling.ec2_instance_launch_lifecycle_action`, `..._terminate_lifecycle_action` | `AutoScalingLifecycleAction`: `launching`, `terminating`, `ec2_instance_id`, `auto_scaling_group_name`, `lifecycle_hook_name`, `lifecycle_action_token` |
+| `AWS Health Event`, `AWS Health Abuse Event` | `aws.health.event`, `aws.health.abuse_event` | `HealthEvent`: `service`, `event_type_code`, `event_type_category`, `status_code`, `start_time`, `description`, `affected_entities`, `actionability`... |
+
+Auto Scaling lifecycle hooks can also notify an SQS queue or SNS topic directly instead of
+EventBridge; those notifications have the same types and class (with `account_id`, `request_id`
+and `time` besides). The test notification a hook sends when it is added is
+`aws.autoscaling.test_notification` (`AutoScalingTestNotification`): give it a route, or a
+default route, that acknowledges it.
+
+```python
+@consumer.route
+async def on_terminating(action: aws.AutoScalingLifecycleAction) -> None:
+    if action.terminating:
+        await drain(action.ec2_instance_id)
+        await autoscaling.complete_lifecycle_action(
+            LifecycleHookName=action.lifecycle_hook_name,
+            AutoScalingGroupName=action.auto_scaling_group_name,
+            LifecycleActionToken=action.lifecycle_action_token,
+            LifecycleActionResult="CONTINUE",
+        )
+
+
+@consumer.route
+async def on_autoscaling_test(notification: aws.AutoScalingTestNotification) -> None:
+    pass  # acknowledged
+```
+
 Events of other AWS services decode into classes of your own (or `Message[dict]`), routed by
 their type (`@consumer.route("aws.batch.job_state_change")`). A rule with an input transformer
 sends whatever its template makes, which is not an event: route such messages like any other.

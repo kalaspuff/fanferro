@@ -88,3 +88,136 @@ def eventbridge(source: str, detail_type: str, detail: Any, **fields: Any) -> di
         "resources": fields.get("resources", []),
         "detail": detail,
     }
+
+
+# The `detail` of AWS's example events (ECS, Step Functions, EC2, Auto Scaling, AWS Health).
+ECS_TASK_RUNNING: dict[str, Any] = {
+    "attachments": [
+        {
+            "id": "fe3a9a46-6a47-40ee-afd9-7952ae90a75a",
+            "type": "eni",
+            "status": "ATTACHED",
+            "details": [
+                {"name": "subnetId", "value": "subnet-0d0eab1bb38d5ca64"},
+                {"name": "privateIPv4Address", "value": "10.0.1.163"},
+            ],
+        }
+    ],
+    "attributes": [{"name": "ecs.cpu-architecture", "value": "x86_64"}],
+    "availabilityZone": "us-east-1b",
+    "capacityProviderName": "FARGATE",
+    "clusterArn": "arn:aws:ecs:us-east-1:123456789012:cluster/example-cluster",
+    "connectivity": "CONNECTED",
+    "connectivityAt": "2025-05-06T11:02:17.19Z",
+    "containers": [
+        {
+            "containerArn": "arn:aws:ecs:us-east-1:123456789012:container/example-cluster/a1173316d40a45dea9/a0a99b87-baa8-4bf6-b9f1-a9a95917a635",  # noqa: E501 - verbatim
+            "lastStatus": "RUNNING",
+            "name": "web",
+            "image": "nginx",
+            "imageDigest": "sha256:c15da6c91de8d2f436196f3a768483ad32c258ed4e1beb3d367a27ed67253e66",
+            "runtimeId": "a1173316d40a45dea9-0265927825",
+            "taskArn": "arn:aws:ecs:us-east-1:123456789012:task/example-cluster/a1173316d40a45dea9",
+            "networkInterfaces": [
+                {"attachmentId": "fe3a9a46-6a47-40ee-afd9-7952ae90a75a", "privateIpv4Address": "10.0.1.163"}
+            ],
+            "cpu": "99",
+            "memory": "100",
+        }
+    ],
+    "cpu": "256",
+    "createdAt": "2025-05-06T11:02:13.877Z",
+    "desiredStatus": "RUNNING",
+    "enableExecuteCommand": False,
+    "ephemeralStorage": {"sizeInGiB": 20},
+    "group": "family:webserver",
+    "launchType": "FARGATE",
+    "lastStatus": "RUNNING",
+    "memory": "512",
+    "overrides": {"containerOverrides": [{"name": "web"}]},
+    "platformVersion": "1.4.0",
+    "pullStartedAt": "2025-05-06T11:02:24.162Z",
+    "pullStoppedAt": "2025-05-06T11:02:33.493Z",
+    "startedAt": "2025-05-06T11:02:34.325Z",
+    "taskArn": "arn:aws:ecs:us-east-1:123456789012:task/example-cluster/a1173316d40a45dea9",
+    "taskDefinitionArn": "arn:aws:ecs:us-east-1:123456789012:task-definition/webserver:5",
+    "updatedAt": "2025-05-06T11:02:34.325Z",
+    "version": 3,
+}
+
+STEP_FUNCTIONS_FAILED: dict[str, Any] = {
+    "executionArn": "arn:aws:states:us-east-2:123456789012:execution:state-machine-name:execution-name",
+    "stateMachineArn": "arn:aws:states:us-east-2:123456789012:stateMachine:state-machine",
+    "name": "execution-name",
+    "status": "FAILED",
+    "startDate": 1551225146847,
+    "stopDate": 1551225151881,
+    "input": "{}",
+    "inputDetails": {"included": True},
+    "output": None,
+    "outputDetails": None,
+    "stateMachineVersionArn": None,
+    "stateMachineAliasArn": None,
+    "redriveCount": 0,
+    "redriveDate": None,
+    "redriveStatus": "REDRIVABLE",
+    "redriveStatusReason": "Execution is FAILED and is redrivable",
+    "error": "ErrorCode",
+    "cause": "An error occurred.",
+}
+
+AUTO_SCALING_LAUNCHING: dict[str, Any] = {
+    "Origin": "EC2",
+    "LifecycleHookName": "my-hook",
+    "Destination": "AutoScalingGroup",
+    "AccountId": "123456789012",
+    "RequestId": "18b2ec17-3e9b-4c15-8024-ff2e8ce8786a",
+    "LifecycleTransition": "autoscaling:EC2_INSTANCE_LAUNCHING",
+    "AutoScalingGroupName": "my-asg",
+    "Service": "AWS Auto Scaling",
+    "Time": "2021-01-19T00:36:26.533Z",
+    "EC2InstanceId": "i-0598c7d356eba48d7",
+    "LifecycleActionToken": "71514b9d-6a40-4b26-8523-05e7ee35fa40",
+    "NotificationMetadata": "hook message metadata",
+}
+"""What a lifecycle hook sends an SQS queue or SNS topic directly."""
+
+AUTO_SCALING_TEST: dict[str, Any] = {
+    "AccountId": "123456789012",
+    "RequestId": "18b2ec17-3e9b-4c15-8024-ff2e8ce8786a",
+    "AutoScalingGroupARN": "arn:aws:autoscaling:us-west-2:123456789012:autoScalingGroup:042cba90-ad2f-431c-9b4d-6d9055bcc9fb:autoScalingGroupName/my-asg",  # noqa: E501 - verbatim
+    "AutoScalingGroupName": "my-asg",
+    "Service": "AWS Auto Scaling",
+    "Event": "autoscaling:TEST_NOTIFICATION",
+    "Time": "2021-01-19T00:35:52.359Z",
+}
+
+HEALTH_INSTANCE_RETIREMENT: dict[str, Any] = {
+    "eventArn": "arn:aws:health:us-east-1::event/AWS_EC2_INSTANCE_RETIREMENT_SCHEDULED_90353408594353983",
+    "service": "EC2",
+    "eventTypeCode": "AWS_EC2_INSTANCE_RETIREMENT_SCHEDULED",
+    "eventTypeCategory": "scheduledChange",
+    "eventScopeCode": "ACCOUNT_SPECIFIC",
+    "communicationId": "1234abc01232a4012345678-1",
+    "startTime": "Thu, 27 Aug 2026 13:19:03 GMT",
+    "lastUpdatedTime": "Thu, 27 Jan 2026 13:44:13 GMT",
+    "statusCode": "open",
+    "eventRegion": "us-east-1",
+    "eventDescription": [
+        {"language": "en_US", "latestDescription": "A description of the event will be provided here"}
+    ],
+    "eventMetadata": {"keystring1": "valuestring1", "truncated": "true"},
+    "affectedEntities": [
+        {
+            "entityValue": "arn:aws:ec2:us-east-1:123456789012:instance/i-1234567890abcdef0",
+            "lastUpdatedTime": "Thu, 26 Jan 2026 19:01:55 GMT",
+            "status": "PENDING",
+        }
+    ],
+    "affectedAccount": "123456789012",
+    "page": "1",
+    "totalPages": "1",
+    "backupEvent": "false",
+    "personas": ["OPERATIONS"],
+    "actionability": "ACTION_REQUIRED",
+}

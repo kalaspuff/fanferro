@@ -15,17 +15,30 @@ these classes receives them decoded::
         if message.body.bounce.permanent:
             await suppress(recipient.email_address for recipient in message.body.bounce.bounced_recipients)
 
-========================================  ===============================  ==============================
-Notification                              Message type                     Class
-========================================  ===============================  ==============================
-S3 event notification (and test event)    ``aws.s3.event``                 :class:`S3Event`
-SES bounce                                ``aws.ses.bounce``               :class:`SesBounceNotification`
-SES complaint                             ``aws.ses.complaint``            :class:`SesComplaintNotification`
-SES delivery                              ``aws.ses.delivery``             :class:`SesDeliveryNotification`
-other SES events (``Open``, ``Send``...)  ``aws.ses.open``, ...            :class:`SesNotification` (common part)
-S3 event through EventBridge              ``aws.s3.object_created``, ...   :class:`S3ObjectEvent`
-any other EventBridge event               see below                        a class of your own
-========================================  ===============================  ==============================
+Notifications sent to SNS and SQS (message type, class):
+
+* S3 event notification and test event: ``aws.s3.event``, :class:`S3Event`
+* SES bounce, complaint, delivery: ``aws.ses.bounce``, ``aws.ses.complaint``, ``aws.ses.delivery``;
+  :class:`SesBounceNotification`, :class:`SesComplaintNotification`, :class:`SesDeliveryNotification`
+* other SES events (``Open``, ``Send``...): ``aws.ses.open``, ...; :class:`SesNotification`
+* Auto Scaling lifecycle hook: ``aws.autoscaling.ec2_instance_launch_lifecycle_action``,
+  ``..._terminate_lifecycle_action``; :class:`AutoScalingLifecycleAction` (and
+  :class:`AutoScalingTestNotification`)
+
+EventBridge events (their ``detail``):
+
+* S3 events: ``aws.s3.object_created``, ``aws.s3.object_deleted``...; :class:`S3ObjectEvent`
+* SES email events: as SES's notifications above
+* scheduled rules: ``aws.events.scheduled_event``, :class:`ScheduledEvent`
+* ECS task state changes: ``aws.ecs.task_state_change``, :class:`EcsTaskStateChange`
+* Step Functions executions: ``aws.states.step_functions_execution_status_change``,
+  :class:`StepFunctionsExecutionStatusChange`
+* EC2: ``aws.ec2.spot_instance_interruption_warning``, ``aws.ec2.instance_rebalance_recommendation``,
+  ``aws.ec2.instance_state_change_notification``; :class:`Ec2SpotInstanceInterruptionWarning`,
+  :class:`Ec2InstanceRebalanceRecommendation`, :class:`Ec2InstanceStateChange`
+* Auto Scaling lifecycle hooks: as above
+* AWS Health: ``aws.health.event``, :class:`HealthEvent`
+* any other event: decoded into a class of your own (see below)
 
 SES notifications come in two formats, feedback notifications of an identity (``notificationType``)
 and event publishing of a configuration set (``eventType``); both decode into the same classes,
@@ -49,6 +62,23 @@ from __future__ import annotations
 
 from fanferro.aws._document import AwsDocument
 from fanferro.aws._eventbridge import EventBridgeMetadata, S3EventBridgeBucket, S3EventBridgeObject, S3ObjectEvent
+from fanferro.aws._events import (
+    AutoScalingLifecycleAction,
+    AutoScalingTestNotification,
+    Ec2InstanceRebalanceRecommendation,
+    Ec2InstanceStateChange,
+    Ec2SpotInstanceInterruptionWarning,
+    EcsAttachment,
+    EcsContainer,
+    EcsNameValue,
+    EcsNetworkInterface,
+    EcsTaskStateChange,
+    HealthAffectedEntity,
+    HealthEvent,
+    HealthEventDescription,
+    ScheduledEvent,
+    StepFunctionsExecutionStatusChange,
+)
 from fanferro.aws._s3 import S3Bucket, S3Event, S3EventRecord, S3Object, S3RestoreEventData, S3TestEvent
 from fanferro.aws._ses import (
     SesBounce,
@@ -66,8 +96,21 @@ from fanferro.aws._ses import (
 )
 
 __all__ = [
+    "AutoScalingLifecycleAction",
+    "AutoScalingTestNotification",
     "AwsDocument",
+    "Ec2InstanceRebalanceRecommendation",
+    "Ec2InstanceStateChange",
+    "Ec2SpotInstanceInterruptionWarning",
+    "EcsAttachment",
+    "EcsContainer",
+    "EcsNameValue",
+    "EcsNetworkInterface",
+    "EcsTaskStateChange",
     "EventBridgeMetadata",
+    "HealthAffectedEntity",
+    "HealthEvent",
+    "HealthEventDescription",
     "S3Bucket",
     "S3Event",
     "S3EventBridgeBucket",
@@ -77,6 +120,7 @@ __all__ = [
     "S3ObjectEvent",
     "S3RestoreEventData",
     "S3TestEvent",
+    "ScheduledEvent",
     "SesBounce",
     "SesBounceNotification",
     "SesBouncedRecipient",
@@ -89,4 +133,5 @@ __all__ = [
     "SesHeader",
     "SesMail",
     "SesNotification",
+    "StepFunctionsExecutionStatusChange",
 ]

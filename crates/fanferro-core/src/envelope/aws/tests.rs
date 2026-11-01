@@ -223,3 +223,23 @@ fn incomplete_eventbridge_wrappers_are_not_events() {
     assert_eq!(&payload.data[..], b"null");
     assert_eq!(payload.time, None);
 }
+
+#[test]
+fn recognises_auto_scaling_lifecycle_hook_notifications() {
+    let launching = r#"{"Origin":"EC2","LifecycleHookName":"my-hook","Destination":"AutoScalingGroup","AccountId":"123456789012","RequestId":"18b2ec17-3e9b-4c15-8024-ff2e8ce8786a","LifecycleTransition":"autoscaling:EC2_INSTANCE_LAUNCHING","AutoScalingGroupName":"my-asg","Service":"AWS Auto Scaling","Time":"2021-01-19T00:36:26.533Z","EC2InstanceId":"i-0598c7d356eba48d7","LifecycleActionToken":"71514b9d-6a40-4b26-8523-05e7ee35fa40","NotificationMetadata":"hook message metadata"}"#;
+    let payload = unwrap(launching).unwrap();
+    assert_eq!(payload.message_type.as_deref(), Some("aws.autoscaling.ec2_instance_launch_lifecycle_action"));
+    assert_eq!(payload.source.as_deref(), Some("aws.autoscaling"));
+    assert_eq!(payload.time.unwrap().millisecond(), 533);
+    let terminating = launching.replace("EC2_INSTANCE_LAUNCHING", "EC2_INSTANCE_TERMINATING");
+    assert_eq!(
+        unwrap(&terminating).unwrap().message_type.as_deref(),
+        Some("aws.autoscaling.ec2_instance_terminate_lifecycle_action")
+    );
+    let test = r#"{"AccountId":"123456789012","RequestId":"18b2ec17","AutoScalingGroupARN":"arn:aws:autoscaling:us-west-2:123456789012:autoScalingGroup:042cba90:autoScalingGroupName/my-asg","AutoScalingGroupName":"my-asg","Service":"AWS Auto Scaling","Event":"autoscaling:TEST_NOTIFICATION","Time":"2021-01-19T00:35:52.359Z"}"#;
+    assert_eq!(unwrap(test).unwrap().message_type.as_deref(), Some("aws.autoscaling.test_notification"));
+    let launch = test.replace("TEST_NOTIFICATION", "EC2_INSTANCE_LAUNCH");
+    assert_eq!(unwrap(&launch).unwrap().message_type.as_deref(), Some("aws.autoscaling.ec2_instance_launch"));
+    assert_eq!(unwrap(r#"{"Service":"AWS Auto Scaling"}"#), None);
+    assert_eq!(unwrap(r#"{"Service":"Other","Event":"AWS Auto Scaling"}"#), None);
+}

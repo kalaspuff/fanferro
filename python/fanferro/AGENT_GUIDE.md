@@ -36,7 +36,10 @@ compact reference for writing applications with it. Print it with `fanferro guid
    `SesDeliveryNotification` (types `aws.s3.event`, `aws.ses.bounce`...). EventBridge events
    delivered by a rule are unwrapped: annotate handlers with the model of their `detail` (type
    `aws.<service>.<event>` for AWS services, the `detail-type` otherwise);
-   `fanferro.aws.EventBridgeMetadata.of(message)` has the account, region and resources.
+   `fanferro.aws.EventBridgeMetadata.of(message)` has the account, region and resources. Typed
+   AWS events: `ScheduledEvent`, `EcsTaskStateChange`, `StepFunctionsExecutionStatusChange`,
+   `Ec2SpotInstanceInterruptionWarning`, `Ec2InstanceStateChange`, `AutoScalingLifecycleAction`
+   (EventBridge or a hook's direct SQS/SNS notifications), `HealthEvent`.
 10. **Test with `fanferro.testing.memory_client()`**, end to end with MiniStack.
 
 ## Minimal service
