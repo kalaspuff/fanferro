@@ -8,15 +8,33 @@ to the queue, like S3's SQS destinations.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
 import fanferro
 from fanferro import aws
 from fanferro.envelopes import AwsNotifications
-from tests.aws_samples import BOUNCE, COMPLAINT, DELIVERY, S3_PUT, S3_TEST, ses
+from tests.aws_samples import (
+    BOUNCE,
+    COMPLAINT,
+    DELIVERY,
+    EVENTBRIDGE_S3_CREATED,
+    MAIL,
+    S3_PUT,
+    S3_TEST,
+    eventbridge,
+    ses,
+)
 from tests.conftest import ClientFactory
 from tests.helpers import consume_until
+
+
+@fanferro.message_type("InvoicePaid")
+@dataclass(frozen=True)
+class InvoicePaid:
+    invoice_id: str
+    amount: float
 
 
 async def test_typed_handlers_receive_s3_and_ses_notifications(client_factory: ClientFactory, name: Any) -> None:
@@ -94,3 +112,55 @@ async def test_typed_handlers_receive_s3_and_ses_notifications(client_factory: C
     assert deliveries[0].delivery.processing_time_millis == 546
     assert {message.type for message in others} == {"aws.ses.delivery_delay"}
     assert others[0].body.notification_type == "DeliveryDelay"
+
+
+async def test_eventbridge_events_reach_handlers_of_their_detail(client_factory: ClientFactory, name: Any) -> None:
+    """EventBridge rules deliver to topics (with or without raw delivery) and queues; the detail is the body."""
+    client = client_factory()
+    topic_name, raw_queue, wrapped_queue = name("eb-events"), name("eb-raw"), name("eb-wrapped")
+    topic = client.topic(topic_name)
+    client.queue(raw_queue)
+    client.queue(wrapped_queue)
+    client.subscription(topic_name, raw_queue)
+    client.subscription(topic_name, wrapped_queue, raw_message_delivery=False)
+    paid: list[fanferro.Message[InvoicePaid]] = []
+    uploads: list[fanferro.Message[aws.S3ObjectEvent]] = []
+    bounces: list[aws.SesBounceNotification] = []
+    router = fanferro.Router()
+
+    @router.route
+    async def on_paid(message: fanferro.Message[InvoicePaid]) -> None:
+        paid.append(message)
+
+    @router.route
+    async def on_upload(message: fanferro.Message[aws.S3ObjectEvent]) -> None:
+        uploads.append(message)
+
+    @router.route
+    async def on_bounce(notification: aws.SesBounceNotification) -> None:
+        bounces.append(notification)
+
+    documents = [
+        json.dumps(eventbridge("com.acme.billing", "InvoicePaid", {"invoice_id": "i-1", "amount": 9.5})),
+        EVENTBRIDGE_S3_CREATED,
+        json.dumps(eventbridge("aws.ses", "Email Bounced", {"eventType": "Bounce", "bounce": BOUNCE, "mail": MAIL})),
+    ]
+    async with client:
+        for document in documents:
+            await topic.publish(document, envelope=AwsNotifications())
+            await client.queue(raw_queue).send(document, envelope=AwsNotifications())
+        for queue_name, copies in ((raw_queue, 2), (wrapped_queue, 1)):
+            counts = (len(paid), len(uploads), len(bounces))
+            await consume_until(
+                client.consumer(client.queue(queue_name), router, wait_time=1),
+                lambda counts=counts, copies=copies: (
+                    (len(paid), len(uploads), len(bounces)) == tuple(count + copies for count in counts)
+                ),
+            )
+
+    assert {message.body for message in paid} == {InvoicePaid(invoice_id="i-1", amount=9.5)}
+    assert {message.id for message in paid} == {"0d079340-135a-c8c6-95c2-41fb8f496c53"}
+    assert all(message.envelope == "aws" for message in paid)
+    assert {message.type for message in uploads} == {"aws.s3.object_created"}
+    assert uploads[0].body.object.key == "example-key"
+    assert all(notification.bounce.permanent for notification in bounces)

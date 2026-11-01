@@ -66,3 +66,25 @@ def ses(kind: str, details: dict[str, Any] | None, *, event_publishing: bool = F
     if details is not None:
         document[key] = details
     return document
+
+
+# AWS's example of an S3 `Object Created` event sent through EventBridge.
+EVENTBRIDGE_S3_CREATED = '{"version":"0","id":"17793124-05d4-b198-2fde-7ededc63b103","detail-type":"Object Created","source":"aws.s3","account":"111122223333","time":"2021-11-12T00:00:00Z","region":"ca-central-1","resources":["arn:aws:s3:::amzn-s3-demo-bucket1"],"detail":{"version":"0","event-version":"1.2","bucket":{"name":"amzn-s3-demo-bucket1","aws-generated-tags":{"aws:cloudformation:stack-name":"amzn-s3-demo-stack"}},"object":{"key":"example-key","size":5,"etag":"b1946ac92492d2347c6235b4d2611184","version-id":"IYV3p45BT0ac8hjHg1houSdS1a.Mro8e","sequencer":"617f08299329d189"},"request-id":"N4N7GDK58NMKJ12R","requester":"123456789012","source-ip-address":"192.0.2.1","reason":"PutObject"}}'  # noqa: E501 - verbatim
+
+# AWS's example of an S3 `Object Deleted` event (lifecycle expiration) sent through EventBridge.
+EVENTBRIDGE_S3_DELETED = '{"version":"0","id":"ad1de317-e409-eba2-9552-30113f8d88e3","detail-type":"Object Deleted","source":"aws.s3","account":"111122223333","time":"2021-11-12T00:00:00Z","region":"ca-central-1","resources":["arn:aws:s3:::amzn-s3-demo-bucket1"],"detail":{"version":"0","event-version":"1.2","bucket":{"name":"amzn-s3-demo-bucket1"},"object":{"key":"example-key","etag":"d41d8cd98f00b204e9800998ecf8427e","version-id":"mtB0cV.jejK63XkRNceanNMC.qXPWLeK","sequencer":"617b398000000000"},"request-id":"20EB74C14654DC47","requester":"s3.amazonaws.com","reason":"Lifecycle Expiration","deletion-type":"Delete Marker Created"}}'  # noqa: E501 - verbatim
+
+
+def eventbridge(source: str, detail_type: str, detail: Any, **fields: Any) -> dict[str, Any]:
+    """An EventBridge event as a rule delivers it to a queue or topic."""
+    return {
+        "version": "0",
+        "id": fields.get("id", "0d079340-135a-c8c6-95c2-41fb8f496c53"),
+        "detail-type": detail_type,
+        "source": source,
+        "account": fields.get("account", "111122223333"),
+        "time": fields.get("time", "2026-11-01T12:00:00Z"),
+        "region": fields.get("region", "eu-north-1"),
+        "resources": fields.get("resources", []),
+        "detail": detail,
+    }

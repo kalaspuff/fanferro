@@ -13,6 +13,9 @@
 //! SES types are `aws.ses.` and the snake-cased event type: `aws.ses.complaint`,
 //! `aws.ses.delivery`, `aws.ses.delivery_delay`, `aws.ses.rendering_failure`, `aws.ses.received`...
 //! The body is the payload as it is (JSON); the event time is the message time.
+//!
+//! EventBridge events that a rule sends to a queue or topic (from AWS services, SaaS partners or
+//! `PutEvents`) are unwrapped like an envelope: see [`eventbridge`].
 
 use bytes::Bytes;
 use serde_json::Value;
@@ -20,6 +23,8 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use super::Envelope;
+
+pub mod eventbridge;
 use crate::error::{Error, Result};
 use crate::types::{Headers, MessageAttributes, Payload, WireMessage, reserved};
 
@@ -43,9 +48,12 @@ struct Notification {
 }
 
 fn parse_time(value: Option<&Value>) -> Option<OffsetDateTime> {
-    let text = value?.as_str()?;
+    parse_timestamp(value?.as_str()?)
+}
+
+/// An RFC 3339 timestamp, or one in SES's `2018-10-08T14:05:45 +0000` format.
+pub(crate) fn parse_timestamp(text: &str) -> Option<OffsetDateTime> {
     OffsetDateTime::parse(text, &Rfc3339).ok().or_else(|| {
-        // SES writes some timestamps as `2018-10-08T14:05:45 +0000`.
         let (stamp, offset) = text.rsplit_once(' ')?;
         let offset =
             offset.strip_prefix('+').map(|o| ('+', o)).or_else(|| offset.strip_prefix('-').map(|o| ('-', o)))?;
@@ -55,7 +63,7 @@ fn parse_time(value: Option<&Value>) -> Option<OffsetDateTime> {
 }
 
 /// `DeliveryDelay` -> `delivery_delay`, `Rendering Failure` -> `rendering_failure`.
-fn snake_case(kind: &str) -> String {
+pub(crate) fn snake_case(kind: &str) -> String {
     let mut snake = String::with_capacity(kind.len() + 4);
     let mut previous_lower = false;
     for c in kind.chars() {
@@ -159,6 +167,11 @@ impl Envelope for AwsNotifications {
             return Ok(None);
         }
         let find = |needle: &[u8]| memchr::memmem::find(body, needle).is_some();
+        if find(b"\"detail-type\"")
+            && let Some(payload) = eventbridge::unwrap(&wire.body)
+        {
+            return Ok(Some(payload));
+        }
         let s3 = (find(b"\"Records\"") && find(b"\"aws:s3\"")) || find(b"\"s3:TestEvent\"");
         let ses = find(b"\"mail\"") && (find(b"\"notificationType\"") || find(b"\"eventType\""));
         if !s3 && !ses {

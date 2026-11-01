@@ -132,6 +132,16 @@ pub fn media_type_essence(content_type: &str) -> String {
     content_type.split(';').next().unwrap_or_default().trim().to_ascii_lowercase()
 }
 
+/// `text` as bytes: a slice of `source` when `text` lies in it (no copy), a copy otherwise.
+pub(crate) fn share(source: &bytes::Bytes, text: &str) -> bytes::Bytes {
+    let start = (text.as_ptr() as usize).wrapping_sub(source.as_ptr() as usize);
+    if start <= source.len() && text.len() <= source.len() - start {
+        source.slice(start..start + text.len())
+    } else {
+        bytes::Bytes::copy_from_slice(text.as_bytes())
+    }
+}
+
 /// Reads a text attribute.
 pub(crate) fn text_attribute<'a>(attributes: &'a MessageAttributes, name: &str) -> Option<&'a str> {
     attributes.get(name).and_then(AttributeValue::as_text)

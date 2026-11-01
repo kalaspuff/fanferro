@@ -1,9 +1,10 @@
-# Notifications of AWS services: S3 events and SES email
+# Notifications and events of AWS services
 
 S3 (bucket event notifications) and SES (bounce, complaint and delivery notifications, and the
-events a configuration set publishes) send JSON documents to SNS topics and SQS queues. fanferro
-recognises them and decodes them into typed objects of `fanferro.aws`, so receiving them is like
-receiving any typed message:
+events a configuration set publishes) send JSON documents to SNS topics and SQS queues, and
+EventBridge rules send the events of AWS services, SaaS partners and applications to them. fanferro
+recognises them and decodes them into typed objects of `fanferro.aws` or [classes of your
+own](#eventbridge-events), so receiving them is like receiving any typed message:
 
 ```python
 import fanferro
@@ -95,11 +96,68 @@ Frozen dataclasses with the fields AWS documents, in snake case. Fields AWS leav
   `source`, `destination`, `headers`, `common_headers` (`from_`, `to`, `subject`, ...), `tags`
   (event publishing), `source_arn`, `sending_account_id`, ...
 
+## EventBridge events
+
+An EventBridge rule whose target is an SQS queue or SNS topic delivers each event as EventBridge
+wraps it, whatever sent it: an AWS service, a SaaS partner (Stripe, Auth0, Shopify... through a
+partner event source) or an application (`PutEvents`):
+
+```json
+{"version": "0", "id": "0d079340-135a-c8c6-95c2-41fb8f496c53", "detail-type": "InvoicePaid",
+ "source": "com.acme.billing", "account": "111122223333", "time": "2026-11-01T12:00:00Z",
+ "region": "eu-north-1", "resources": [], "detail": {"invoice_id": "i-1", "amount": 9.5}}
+```
+
+The `AwsNotifications` envelope unwraps it like a CloudEvent: the body is the `detail`, decoded
+into the class the handler is annotated with (a pydantic model, a dataclass, a msgspec struct...),
+`message.id` is the event's `id` (EventBridge keeps it when it delivers an event again, so it is
+a good idempotency key), `message.time` its `time` and `message.source` its `source`.
+`aws.EventBridgeMetadata.of(message)` has the rest: `detail_type`, `account`, `region` and
+`resources`.
+
+```python
+@fanferro.message_type("InvoicePaid")  # the detail-type
+class InvoicePaid(BaseModel):
+    invoice_id: str
+    amount: Decimal
+
+
+@consumer.route
+async def on_paid(invoice: InvoicePaid) -> None:  # the event's detail
+    ...
+```
+
+The message type of an event is:
+
+| Source | Message type | Example |
+| --- | --- | --- |
+| an AWS service (`aws.<service>`) | `aws.<service>.<event>`: the `detail-type` in snake case, without a leading `aws_` or `<service>_` | `ECS Task State Change` from `aws.ecs`: `aws.ecs.task_state_change`; `AWS Health Event` from `aws.health`: `aws.health.event` |
+| SES email events (`aws.ses`) | the types of SES's notifications, whose document the `detail` is | `Email Bounced`: `aws.ses.bounce`, decoded into `aws.SesBounceNotification` |
+| any other source (applications, SaaS partners) | the `detail-type` as it is | `InvoicePaid`, `invoice.paid` |
+
+S3 events sent through EventBridge are not S3's notifications: one event per message, other
+event names and other fields (`reason` such as `PutObject` or `Lifecycle Expiration`,
+`deletion-type`, `requester`), events for tags, ACLs and storage classes, and object keys that are
+not URL-encoded. They decode into `aws.S3ObjectEvent`, whose routes match every S3 event type
+(`aws.s3.object_created`, `aws.s3.object_deleted`, `aws.s3.object_restore_completed`...); to handle
+one of them, give the type:
+
+```python
+@consumer.route("aws.s3.object_created")
+async def on_created(event: aws.S3ObjectEvent) -> None:
+    await index(event.bucket.name, event.object.key, event.object.size)
+```
+
+Events of other AWS services decode into classes of your own (or `Message[dict]`), routed by
+their type (`@consumer.route("aws.batch.job_state_change")`). A rule with an input transformer
+sends whatever its template makes, which is not an event: route such messages like any other.
+
 ## Setting up the subscription
 
 Subscribe the queue to the topic S3 or SES publishes to like to any topic, raw message delivery
-or not; or let S3 send to the queue itself. The queue's policy must allow S3 to send to it (a
-topic's or queue's resource policy for S3 and SES is not something fanferro provisions).
+or not; or let S3 send to the queue itself, or make it an EventBridge rule's target. The queue's
+policy must allow S3 (or EventBridge) to send to it (a topic's or queue's resource policy for S3,
+SES and EventBridge is not something fanferro provisions).
 
 ```python
 client.topic("bucket-events", provisioning=fanferro.Provisioning.existing())
