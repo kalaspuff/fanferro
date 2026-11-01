@@ -78,7 +78,8 @@ class SqsEventHandler:
 
     Call it as the function's handler (``handler(event, context)``, on its own event loop, which it
     keeps between invocations), or await :meth:`handle` from code that runs an event loop already
-    (tests, async Lambda adapters). Routes can be added on the handler (``@handler.route(...)``).
+    (tests, async Lambda adapters); it processes one event at a time. Routes can be added on the
+    handler (``@handler.route(...)``).
     """
 
     def __init__(
@@ -100,8 +101,9 @@ class SqsEventHandler:
         # Validated now: a mistake shows when the module is imported, not at the first invocation.
         Consumer(client, queue or Queue(client, "options-check"), router, **self._options)
         self._consumers: dict[str, Consumer] = {}
-        self._starting: dict[str, asyncio.Task[Consumer]] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
+        # One event at a time (as Lambda invokes a function): concurrent calls of handle() wait.
+        self._invocation = asyncio.Lock()
 
     # -- routing shortcuts -----------------------------------------------------------------
 
@@ -148,22 +150,26 @@ class SqsEventHandler:
                 arrive). Lambda returns the whole batch to the queue when the function raises.
         """
         records = event.get("Records") or []
+        loop = asyncio.get_running_loop()
         timeout = self._timeout(context)
-        client = self._client
-        client._acquire_pump()
-        try:
-            by_queue: dict[str, list[Mapping[str, Any]]] = {}
-            for record in records:
-                by_queue.setdefault(str(record.get("eventSourceARN") or ""), []).append(record)
-            failed: list[str] = []
-            for arn, batch in by_queue.items():
-                consumer = await self._consumer(arn)
-                deleted = await consumer._process_records(batch, timeout)
-                failed.extend(
-                    str(record["messageId"]) for record in batch if record.get("receiptHandle") not in deleted
-                )
-        finally:
-            await self._flush_events()
+        deadline = None if timeout is None else loop.time() + timeout
+        async with self._invocation:
+            client = self._client
+            client._acquire_pump()
+            try:
+                by_queue: dict[str, list[Mapping[str, Any]]] = {}
+                for record in records:
+                    by_queue.setdefault(str(record.get("eventSourceARN") or ""), []).append(record)
+                failed: list[str] = []
+                for arn, batch in by_queue.items():
+                    consumer = await self._consumer(arn)
+                    remaining = None if deadline is None else max(deadline - loop.time(), 0.0)
+                    deleted = await consumer._process_records(batch, remaining)
+                    failed.extend(
+                        str(record["messageId"]) for record in batch if record.get("receiptHandle") not in deleted
+                    )
+            finally:
+                await self._flush_events()
         if failed and not self.report_batch_item_failures:
             raise BatchItemFailuresError(
                 f"{len(failed)} of {len(records)} records failed; the whole batch returns to the queue",
@@ -179,21 +185,10 @@ class SqsEventHandler:
 
     async def _consumer(self, arn: str) -> Consumer:
         consumer = self._consumers.get(arn)
-        if consumer is not None:
-            return consumer
-        starting = self._starting.get(arn)
-        if starting is None:
-            starting = self._starting[arn] = asyncio.get_running_loop().create_task(self._start(arn))
-        try:
-            consumer = await starting
-        finally:
-            self._starting.pop(arn, None)
-        self._consumers[arn] = consumer
-        return consumer
-
-    async def _start(self, arn: str) -> Consumer:
-        consumer = Consumer(self._client, self._queue_of(arn), self.router, **self._options)
-        await consumer._start_records()
+        if consumer is None:
+            consumer = Consumer(self._client, self._queue_of(arn), self.router, **self._options)
+            await consumer._start_records()  # a failed start is tried again by the next invocation
+            self._consumers[arn] = consumer
         return consumer
 
     def _queue_of(self, arn: str) -> Queue:

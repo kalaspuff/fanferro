@@ -31,6 +31,8 @@ def make(error_type: type[Exception]) -> Exception:
         return fanferro.ProvisioningError("boom", report)
     if error_type is fanferro.BatchPublishError:
         return fanferro.BatchPublishError("boom", BatchPublishResult((PublishResult("1", "t1", "orders"),)))
+    if error_type is fanferro.BatchItemFailuresError:
+        return fanferro.BatchItemFailuresError("boom", ["m-1", "m-2"])
     return error_type("boom")
 
 
