@@ -33,7 +33,13 @@ from fanferro._utils import Duration, optional_seconds, seconds
 from fanferro.actions import Discard, HandlerAction, Reject, Requeue, Retry
 from fanferro.codecs import is_json_content_type, media_type
 from fanferro.envelopes import CloudEvents, CloudEventsProtobuf, Envelope, Raw, default_envelopes, unwrap_first
-from fanferro.errors import ConsumerStateError, HandlerTimeoutError, ResourceNotFoundError, error_details
+from fanferro.errors import (
+    ConfigurationError,
+    ConsumerStateError,
+    HandlerTimeoutError,
+    ResourceNotFoundError,
+    error_details,
+)
 from fanferro.events import EventKind
 from fanferro.messages import Message, Outcome
 from fanferro.middleware import ConsumeMiddleware, chain_consume
@@ -384,34 +390,36 @@ class Consumer:
         max_receive_failures: int | None = None,
     ) -> None:
         if concurrency < 1:
-            raise ValueError("concurrency must be at least 1")
+            raise ConfigurationError("concurrency must be at least 1")
         if prefetch is not None and prefetch < 0:
-            raise ValueError("prefetch must be non-negative")
+            raise ConfigurationError("prefetch must be non-negative")
         if not 1 <= batch_size <= 10:
-            raise ValueError("batch_size must be between 1 and 10")
+            raise ConfigurationError("batch_size must be between 1 and 10")
         if min_receive_batch is not None and not 1 <= min_receive_batch <= batch_size:
-            raise ValueError(f"min_receive_batch must be between 1 and batch_size ({batch_size})")
+            raise ConfigurationError(f"min_receive_batch must be between 1 and batch_size ({batch_size})")
         receive_batch_wait = seconds(receive_batch_wait, "receive_batch_wait")
         if receive_batch_wait > 20:
-            raise ValueError(f"receive_batch_wait must be between 0 and 20 seconds, got {receive_batch_wait}")
+            raise ConfigurationError(f"receive_batch_wait must be between 0 and 20 seconds, got {receive_batch_wait}")
         wait_time = seconds(wait_time, "wait_time")
         if wait_time > 20:
-            raise ValueError(f"wait_time must be between 0 and 20 seconds, got {wait_time}")
+            raise ConfigurationError(f"wait_time must be between 0 and 20 seconds, got {wait_time}")
         visibility_timeout = optional_seconds(visibility_timeout, "visibility_timeout")
         if visibility_timeout is not None and visibility_timeout > 43200:
-            raise ValueError(f"visibility_timeout must be between 0 and 43200 seconds, got {visibility_timeout}")
+            raise ConfigurationError(
+                f"visibility_timeout must be between 0 and 43200 seconds, got {visibility_timeout}"
+            )
         handler_timeout = optional_seconds(handler_timeout, "handler_timeout")
         if handler_timeout is not None and handler_timeout <= 0:
-            raise ValueError(f"handler_timeout must be positive (or None), got {handler_timeout}")
+            raise ConfigurationError(f"handler_timeout must be positive (or None), got {handler_timeout}")
         if not 1 <= pollers <= 64:
-            raise ValueError("pollers must be between 1 and 64")
+            raise ConfigurationError("pollers must be between 1 and 64")
         if max_pollers is not None and not pollers <= max_pollers <= 64:
-            raise ValueError(f"max_pollers must be between pollers ({pollers}) and 64")
+            raise ConfigurationError(f"max_pollers must be between pollers ({pollers}) and 64")
         settle_linger = seconds(settle_linger, "settle_linger")
         if settle_linger > 1:
-            raise ValueError(f"settle_linger must be between 0 and 1 second, got {settle_linger}")
+            raise ConfigurationError(f"settle_linger must be between 0 and 1 second, got {settle_linger}")
         if max_receive_failures is not None and max_receive_failures < 1:
-            raise ValueError(f"max_receive_failures must be at least 1 (or None), got {max_receive_failures}")
+            raise ConfigurationError(f"max_receive_failures must be at least 1 (or None), got {max_receive_failures}")
         self._client = client
         self.queue = queue
         self.router = router

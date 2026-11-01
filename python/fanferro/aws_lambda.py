@@ -314,7 +314,7 @@ def sqs_handler(
     """
     margin = seconds(timeout_margin, "timeout_margin")
     if margin > 60:
-        raise ValueError(f"timeout_margin must be between 0 and 60 seconds, got {margin}")
+        raise ConfigurationError(f"timeout_margin must be between 0 and 60 seconds, got {margin}")
     if isinstance(handler, Router):
         router = handler
     else:

@@ -41,7 +41,7 @@ async def test_message_api_and_settlement() -> None:
     await message.retry(delay=5)
     assert message.outcome == "retried"
     assert settler.calls == [("retry", {"delay": 5, "error": None})]
-    with pytest.raises(RuntimeError, match="already settled"):
+    with pytest.raises(fanferro.LeaseError, match="already settled"):
         await message.ack()
     with pytest.raises(RuntimeError):
         await message.extend(10)

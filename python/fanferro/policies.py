@@ -21,7 +21,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
-from fanferro._utils import Duration, seconds
+from fanferro._utils import Duration, optional_seconds, seconds
+from fanferro.errors import ConfigurationError
 
 __all__ = [
     "Backoff",
@@ -59,7 +60,7 @@ class Backoff:
         if isinstance(multiplier, bool) or not isinstance(multiplier, int | float):
             raise TypeError(f"multiplier must be a number, got {type(multiplier).__name__}")
         if not multiplier >= 1:  # also NaN
-            raise ValueError(f"multiplier must be at least 1, got {multiplier!r}")
+            raise ConfigurationError(f"multiplier must be at least 1, got {multiplier!r}")
         object.__setattr__(self, "initial", seconds(initial, "initial"))
         object.__setattr__(self, "maximum", seconds(maximum, "maximum"))
         object.__setattr__(self, "multiplier", multiplier)
@@ -125,7 +126,7 @@ class RetryPolicy:
 
     def __post_init__(self) -> None:
         if self.max_attempts is not None and self.max_attempts < 1:
-            raise ValueError("max_attempts must be at least 1 (or None)")
+            raise ConfigurationError("max_attempts must be at least 1 (or None)")
 
     def decide(self, error: BaseException) -> Literal["retry", "dead_letter", "discard"]:
         """Classifies an error raised by a handler."""
@@ -217,7 +218,7 @@ class ShutdownPolicy:
     ) -> None:
         interval = seconds(progress_interval, "progress_interval")
         if interval <= 0:
-            raise ValueError(f"progress_interval must be positive, got {progress_interval!r}")
+            raise ConfigurationError(f"progress_interval must be positive, got {progress_interval!r}")
         object.__setattr__(self, "drain_timeout", seconds(drain_timeout, "drain_timeout"))
         object.__setattr__(self, "cancel_timeout", seconds(cancel_timeout, "cancel_timeout"))
         object.__setattr__(self, "progress_interval", interval)
@@ -240,6 +241,10 @@ class Heartbeat:
     interval: Duration | None = None
     extend_by: Duration | None = None
     max_duration: Duration | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("interval", "extend_by", "max_duration"):
+            optional_seconds(getattr(self, name), f"heartbeat.{name}")
 
     def to_core(self) -> dict[str, object]:
         """The core representation."""
@@ -267,6 +272,6 @@ class RateLimit:
 
     def __post_init__(self) -> None:
         if self.per_second <= 0:
-            raise ValueError("per_second must be positive")
+            raise ConfigurationError("per_second must be positive")
         if self.burst is not None and self.burst < 1:
-            raise ValueError("burst must be at least 1")
+            raise ConfigurationError("burst must be at least 1")

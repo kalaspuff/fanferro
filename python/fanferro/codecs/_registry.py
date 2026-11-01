@@ -11,7 +11,7 @@ from fanferro.codecs._msgspec import MsgspecCodec
 from fanferro.codecs._protobuf import ProtobufCodec
 from fanferro.codecs._pydantic import PydanticCodec
 from fanferro.codecs._raw import BytesCodec, TextCodec
-from fanferro.errors import DecodeError, EncodeError
+from fanferro.errors import ConfigurationError, DecodeError, EncodeError
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -84,11 +84,16 @@ class CodecRegistry:
         return CodecRegistry(self._codecs)
 
     def by_name(self, name: str) -> Codec:
-        """The registered codec called ``name``."""
+        """The registered codec called ``name``.
+
+        Raises:
+            ConfigurationError: No codec of that name is registered (the message lists those that are).
+        """
         for codec in self._codecs:
             if codec.name == name:
                 return codec
-        raise KeyError(f"no codec named {name!r}")
+        names = ", ".join(repr(codec.name) for codec in self._codecs)
+        raise ConfigurationError(f"no codec named {name!r}; the registered codecs are {names}")
 
     def encoder_for(self, value: object) -> Codec:
         """The first codec that can encode ``value``."""

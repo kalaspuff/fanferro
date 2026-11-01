@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from fanferro._utils import Duration, seconds
 from fanferro.consumer import Duplicate, _Postpone, _report_error
+from fanferro.errors import ConfigurationError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -102,7 +103,7 @@ class InMemoryIdempotencyStore:
         if max_entries is not None and (isinstance(max_entries, bool) or not isinstance(max_entries, int)):
             raise TypeError(f"max_entries must be an int or None, got {type(max_entries).__name__}")
         if max_entries is not None and max_entries < 1:
-            raise ValueError(f"max_entries must be at least 1 (or None for no bound), got {max_entries}")
+            raise ConfigurationError(f"max_entries must be at least 1 (or None for no bound), got {max_entries}")
         self._clock = clock
         # Key -> deadline, in insertion order. Every claim uses the middleware's lock_ttl and every
         # completion its ttl, so insertion order is expiry order and a sweep stops at the first
