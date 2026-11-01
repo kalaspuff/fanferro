@@ -52,7 +52,7 @@ type Handler = Callable[..., Awaitable[None]]
 _counter = itertools.count()
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, repr=False)
 class Route:
     """A handler and the conditions under which it receives messages."""
 
@@ -84,12 +84,29 @@ class Route:
             return False
         return self.matcher is None or self.matcher(message)
 
+    def __repr__(self) -> str:
+        parts = [repr(self.name)]
+        if self.message_type is not None:
+            parts.append(f"message_type={_type_repr(self.message_type)}")
+        if self.matcher is not None:
+            parts.append(f"when={self.matcher!r}")
+        if self.priority:
+            parts.append(f"priority={self.priority!r}")
+        if self.fallback:
+            parts.append("fallback=True")
+        return f"Route({', '.join(parts)})"
+
     async def invoke(self, message: Message[Any]) -> None:
         """Calls the handler."""
         if self.pass_message:
             await self.handler(message)
         else:
             await self.handler(message.body)
+
+
+def _type_repr(value: type | str) -> str:
+    """A message type condition as written in a route: a class by its qualified name, a type name quoted."""
+    return value.__qualname__ if isinstance(value, type) else repr(value)
 
 
 def _unwrap_partial(handler: Callable[..., Any]) -> Callable[..., Any]:
@@ -259,6 +276,10 @@ class Router:
 
     def __len__(self) -> int:
         return len(self._routes)
+
+    def __repr__(self) -> str:
+        name = f"name={self.name!r}, " if self.name is not None else ""
+        return f"Router({name}routes={self._ordered()!r})"
 
 
 def _is_generic_type(value: Any) -> bool:

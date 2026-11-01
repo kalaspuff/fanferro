@@ -1371,3 +1371,17 @@ async fn earlier_receipt_handles_are_forgotten_with_their_message() {
     backend.sqs.purge_queue(&url).await.unwrap();
     assert_eq!(earlier_receipts(&broker), 0, "a purge forgets them too");
 }
+
+#[tokio::test]
+async fn resource_counts_count_every_kind_until_reset() {
+    let (broker, backend) = broker();
+    assert_eq!(broker.resource_counts(), ResourceCounts::default());
+    let topic = backend.sns.create_topic("orders", &StringMap::new(), &StringMap::new()).await.unwrap();
+    backend.sqs.create_queue("a", &StringMap::new(), &StringMap::new()).await.unwrap();
+    backend.sqs.create_queue("b", &StringMap::new(), &StringMap::new()).await.unwrap();
+    backend.sns.subscribe(&topic, "sqs", "arn:aws:sqs:us-east-1:000000000000:a", &StringMap::new()).await.unwrap();
+    backend.objects.create_bucket("payloads").await.unwrap();
+    assert_eq!(broker.resource_counts(), ResourceCounts { queues: 2, topics: 1, subscriptions: 1, buckets: 1 });
+    broker.reset();
+    assert_eq!(broker.resource_counts(), ResourceCounts::default());
+}

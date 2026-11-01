@@ -24,7 +24,7 @@ use pyo3::types::{PyDict, PyList, PyString};
 use pythonize::depythonize;
 
 use crate::consumer::PyConsumerEngine;
-use crate::convert::{attributes_to_py, seconds, string_map_to_py, time_to_py};
+use crate::convert::{Repr, attributes_to_py, seconds, string_map_to_py, time_to_py};
 use crate::errors::{ConfigurationError, ShutdownError, ValidationError, to_py_err, to_py_err_with};
 use crate::runtime::{convert, future_into_py, handle};
 use crate::types::PyWireMessage;
@@ -228,8 +228,8 @@ impl PyDestination {
         self.inner.address()
     }
 
-    fn __repr__(&self) -> String {
-        format!("Destination({:?})", self.inner.address())
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(Repr::new(py, "Destination").value(self.inner.address())?.finish())
     }
 }
 
@@ -310,6 +310,16 @@ impl PyMemoryBroker {
     /// Deletes every queue, topic, subscription and bucket.
     fn reset(&self) {
         self.inner.reset();
+    }
+
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        let counts = self.inner.resource_counts();
+        let repr =
+            Repr::new(py, "MemoryBroker").value(self.region.as_str())?.value(self.account_id.as_str())?.raw(&format!(
+                "<{} queues, {} topics, {} subscriptions, {} buckets>",
+                counts.queues, counts.topics, counts.subscriptions, counts.buckets
+            ));
+        Ok(if self.inner.options().orphaned_polls { repr.field("orphaned_polls", true)? } else { repr }.finish())
     }
 }
 
@@ -793,7 +803,10 @@ impl PyCoreClient {
         self.client.metrics().snapshot()
     }
 
-    fn __repr__(&self) -> String {
-        format!("CoreClient(backend={:?}, region={:?})", self.backend(), self.client.region())
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(Repr::new(py, "CoreClient")
+            .field("backend", self.backend())?
+            .field("region", self.client.region())?
+            .finish())
     }
 }

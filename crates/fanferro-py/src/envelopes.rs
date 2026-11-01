@@ -7,6 +7,7 @@ use std::sync::Arc;
 use fanferro_core::envelope::{CloudEventsJson, CloudEventsProtobuf, Envelope, IMPLICIT_CONTENT_TYPE, RawEnvelope};
 use pyo3::prelude::*;
 
+use crate::convert::Repr;
 use crate::errors::to_py_err;
 use crate::types::{PyPayload, PyWireMessage};
 
@@ -81,11 +82,12 @@ impl PyCloudEvents {
         unwrap(&self.inner, wire)
     }
 
-    fn __repr__(&self) -> String {
-        format!(
-            "CloudEventsEnvelope(content_type_attribute={}, type_attribute={:?}, default_source={:?})",
-            self.inner.content_type_attribute, self.inner.type_attribute, self.inner.default_source
-        )
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(Repr::new(py, "CloudEventsEnvelope")
+            .field("content_type_attribute", self.inner.content_type_attribute)?
+            .field("type_attribute", self.inner.type_attribute.as_deref())?
+            .field("default_source", self.inner.default_source.as_str())?
+            .finish())
     }
 }
 
@@ -132,11 +134,11 @@ impl PyCloudEventsProtobuf {
         unwrap(&self.inner, wire)
     }
 
-    fn __repr__(&self) -> String {
-        format!(
-            "CloudEventsProtobufEnvelope(type_attribute={:?}, default_source={:?})",
-            self.inner.type_attribute, self.inner.default_source
-        )
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(Repr::new(py, "CloudEventsProtobufEnvelope")
+            .field("type_attribute", self.inner.type_attribute.as_deref())?
+            .field("default_source", self.inner.default_source.as_str())?
+            .finish())
     }
 }
 
@@ -206,13 +208,12 @@ impl PyRaw {
         unwrap(&self.inner, wire)
     }
 
-    fn __repr__(&self) -> String {
-        format!(
-            "RawEnvelope(content_type_attribute={:?}, type_attribute={:?}, id_attribute={:?}, implicit_content_type={:?})",
-            self.inner.content_type_attribute,
-            self.inner.type_attribute,
-            self.inner.id_attribute,
-            self.inner.implicit_content_type
-        )
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(Repr::new(py, "RawEnvelope")
+            .field("content_type_attribute", self.inner.content_type_attribute.as_deref())?
+            .field("type_attribute", self.inner.type_attribute.as_deref())?
+            .field("id_attribute", self.inner.id_attribute.as_deref())?
+            .field("implicit_content_type", self.inner.implicit_content_type.as_deref())?
+            .finish())
     }
 }

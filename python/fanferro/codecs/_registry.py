@@ -131,6 +131,9 @@ class CodecRegistry:
         """Decodes ``data`` into ``target``."""
         return self.decoder_for(target, content_type).decode(data, target, content_type)
 
+    def __repr__(self) -> str:
+        return f"CodecRegistry({[codec.name for codec in self._codecs]!r})"
+
     def type_name(self, target: Any) -> str | None:
         """A canonical message type name for ``target`` provided by a codec, if any."""
         for codec in self._codecs:

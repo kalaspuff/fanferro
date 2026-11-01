@@ -250,3 +250,70 @@ pub fn seconds(value: Option<f64>, what: &str) -> PyResult<Option<std::time::Dur
         .map(Some)
         .map_err(|_| ValidationError::new_err(format!("{what} is out of range: {secs} seconds")))
 }
+
+/// Builds the `__repr__` of a native type in Python syntax: `Name(positional, field=repr(value))`.
+///
+/// Values are formatted with Python's own `repr()`, so strings read `'text'`, absent values
+/// `None` and flags `True`, as they would be written to construct the object.
+pub struct Repr<'py> {
+    py: Python<'py>,
+    text: String,
+    empty: bool,
+}
+
+impl<'py> Repr<'py> {
+    /// Starts the repr of a type called `name`.
+    pub fn new(py: Python<'py>, name: &str) -> Self {
+        Self { py, text: format!("{name}("), empty: true }
+    }
+
+    fn separate(&mut self) {
+        if !std::mem::take(&mut self.empty) {
+            self.text.push_str(", ");
+        }
+    }
+
+    /// Adds text as it is (such as `<12 bytes>` for a body that is not shown).
+    pub fn raw(mut self, text: &str) -> Self {
+        self.separate();
+        self.text.push_str(text);
+        self
+    }
+
+    /// Adds the Python repr of a positional value.
+    pub fn value(self, value: impl IntoPyObject<'py>) -> PyResult<Self> {
+        let text = py_repr(self.py, value)?;
+        Ok(self.raw(&text))
+    }
+
+    /// Adds `name=` and the Python repr of a value.
+    pub fn field(self, name: &str, value: impl IntoPyObject<'py>) -> PyResult<Self> {
+        let text = py_repr(self.py, value)?;
+        Ok(self.raw(&format!("{name}={text}")))
+    }
+
+    /// Adds `name=` and the Python repr of a value when there is one.
+    pub fn optional<T: IntoPyObject<'py>>(self, name: &str, value: Option<T>) -> PyResult<Self> {
+        match value {
+            Some(value) => self.field(name, value),
+            None => Ok(self),
+        }
+    }
+
+    /// The finished repr.
+    pub fn finish(mut self) -> String {
+        self.text.push(')');
+        self.text
+    }
+}
+
+/// `<1 byte>`, `<12 bytes>`: how a repr shows a body without showing it (bodies may hold personal data).
+pub fn size_repr(len: usize) -> String {
+    if len == 1 { "<1 byte>".to_owned() } else { format!("<{len} bytes>") }
+}
+
+/// Python's `repr()` of a value converted to Python.
+pub fn py_repr<'py>(py: Python<'py>, value: impl IntoPyObject<'py>) -> PyResult<String> {
+    let object = value.into_bound_py_any(py)?;
+    object.repr()?.extract()
+}
