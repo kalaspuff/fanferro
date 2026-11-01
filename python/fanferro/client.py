@@ -910,6 +910,8 @@ class Client:
             stop.set()
 
         self._stop_request = request_stop
+        # A consumer that stops by itself stops the others gracefully, never like a second signal.
+        self._stop_gracefully = stop.set
         self._run_targets = targets
         loop = asyncio.get_running_loop()
         installed: list[signal.Signals] = []
@@ -939,18 +941,24 @@ class Client:
                 for sig in installed:
                     loop.remove_signal_handler(sig)
                 self._stop_request = None
+                self._stop_gracefully = None
                 self._run_targets = []
         for consumer in started:
             if consumer._failure is not None:
                 raise consumer._failure
 
     _stop_request: Callable[[], None] | None = None
+    _stop_gracefully: Callable[[], None] | None = None
     _run_targets: list[Consumer] = []  # noqa: RUF012 - replaced, never mutated
 
     def _consumer_failed(self, consumer: Consumer) -> None:
-        """A consumer stopped by itself (``max_receive_failures``): :meth:`run` stops the others."""
-        if self._stop_request is not None and consumer in self._run_targets:
-            self._stop_request()
+        """A consumer stopped by itself (``max_receive_failures``): :meth:`run` stops the others.
+
+        Gracefully, also when another consumer failed or a signal arrived before: only a second
+        signal (or :meth:`stop`) skips the drain.
+        """
+        if self._stop_gracefully is not None and consumer in self._run_targets:
+            self._stop_gracefully()
 
     def stop(self) -> None:
         """Asks :meth:`run` to shut down."""

@@ -206,3 +206,29 @@ async def test_client_run_stops_every_consumer_and_raises_when_one_fails() -> No
         with pytest.raises(fanferro.ResourceNotFoundError):
             await asyncio.wait_for(run, 30)
     assert failing.state == healthy.state == "stopped"
+
+
+async def test_consumers_failing_one_after_the_other_let_the_others_drain() -> None:
+    client = testing.memory_client()
+    gone = client.queue("drain-gone")
+    other = client.queue("drain-other")
+    failing = [client.consumer(gone, _ignore, name=f"gone-{n}", wait_time=1, max_receive_failures=1) for n in range(2)]
+    started = asyncio.Event()
+    finished: list[int] = []
+    healthy = client.consumer(other, wait_time=1)
+
+    @healthy.default
+    async def slow(message: fanferro.Message[Any]) -> None:
+        started.set()
+        await asyncio.sleep(1.5)
+        finished.append(message.json()["n"])
+
+    async with client:
+        run = asyncio.ensure_future(client.run(install_signal_handlers=False))
+        await wait_for(lambda: all(consumer.health().last_receive_at is not None for consumer in failing))
+        await other.send({"n": 1})
+        await asyncio.wait_for(started.wait(), 15)
+        await gone.delete()
+        with pytest.raises(fanferro.ResourceNotFoundError):
+            await asyncio.wait_for(run, 30)
+    assert finished == [1], "the healthy consumer's handler must drain, not be cancelled"
