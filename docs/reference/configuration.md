@@ -27,7 +27,7 @@ each parameter and field listed here exists in the code and that every one in th
 | `provisioning` | `Provisioning.existing()` | Default provisioning policy |
 | `aws_retry` | `AwsRetry()` | SDK retries per AWS call |
 | `timeouts` | `Timeouts()` | AWS call timeouts |
-| `publish_retry_attempts` | `4` | Attempts for failed batch entries and checksum mismatches |
+| `publish_retry_attempts` | `4` | Attempts for batch entries the service reports as failed with a retryable error (or leaves out of its response), and for checksum mismatches; a batch call that fails as a whole is retried by the AWS SDK only (`aws_retry`) |
 | `verify_md5` | `False` | Verify SQS MD5 digests of sent and received messages (standard queues) |
 | `split_batches_by_trace_header` | `False` | Batch publishes to topics: one `PublishBatch` call per X-Ray trace header among the entries, so that each keeps its `X-Amzn-Trace-Id` (SNS takes one per call); off, a call with different headers sends none |
 | `publish_middleware` | `()` | Publish middleware |

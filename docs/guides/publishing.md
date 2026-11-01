@@ -55,8 +55,12 @@ result = await queue.send_batch([ResizeImage(id=i) for i in range(100)], attribu
 Batches are split into calls of up to 10 entries (and by size). Up to eight calls are in flight at
 once. On FIFO destinations the message groups are spread over up to eight lanes (one per ten
 entries, a group always in the same lane), and each lane sends its calls one after another, with
-the retries of a call before its next one, so that each message group keeps its order. Entries that fail with retryable errors are retried; if some still
-fail, `BatchPublishError` is raised after the others were sent (`error.result.failed` lists them).
+the retries of a call before its next one, so that each message group keeps its order. Entries the
+service reports as failed with retryable errors are retried, up to `publish_retry_attempts` in all.
+A call that fails as a whole (throttling, a timeout, a 5xx) has been retried by the AWS SDK already
+(`aws_retry`) and is not retried again: its error becomes the result of each of its entries, as
+`publish()` raises it. If some entries still fail, `BatchPublishError` is raised after the others
+were sent (`error.result.failed` lists them).
 Pass `raise_on_failure=False` to inspect `result.failed`.
 
 ## FIFO

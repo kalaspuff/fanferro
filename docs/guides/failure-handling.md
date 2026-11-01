@@ -149,8 +149,9 @@ dead-letter queue (rather than SQS's redrive policy) to their source has not bee
   (a dead connection) fails and is retried, instead of waiting for as long as the connection
   stays open. Long polls get at least their wait time plus 15 s, large uploads more time per
   64 KiB.
-* Failed batch entries are retried individually; MD5 digests of sent and received messages are
-  verified (standard queues).
+* Batch entries the service reports as failed are retried individually
+  (`publish_retry_attempts`); a batch call that fails as a whole is retried by the SDK only. MD5
+  digests of sent and received messages are verified (standard queues).
 * The receive loop backs off on errors (1 s → 30 s) and recovers by itself (`receive.failed`).
 * Settlement (deletes, visibility changes) is batched and retried; failures emit
   `message.ack_failed` (the message will be redelivered - handlers must be idempotent).

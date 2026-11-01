@@ -431,10 +431,13 @@ impl Client {
     }
 
     /// Sends many messages with batch calls (10 per call, split by size; up to
-    /// [`MAX_CONCURRENT_BATCH_CALLS`] at once), retrying failed entries that are retryable. FIFO
-    /// destinations send each message group's entries in one lane of calls made one after another,
-    /// with the retries of a call before the lane's next call, so that no message overtakes an
-    /// earlier one of its group; lanes run in parallel. Results are returned in input order.
+    /// [`MAX_CONCURRENT_BATCH_CALLS`] at once), retrying entries that the service reported as failed
+    /// with retryable errors, or did not report at all. FIFO destinations send each message group's
+    /// entries in one lane of calls made one after another, with the retries of a call before the
+    /// lane's next call, so that no message overtakes an earlier one of its group; lanes run in
+    /// parallel. Failed batch calls are not retried: the SDK has retried them already, so their
+    /// error is the result of each of their entries, as [`Client::publish`] passes it through.
+    /// Results are returned in input order.
     pub async fn publish_batch(
         &self,
         destination: &Destination,
@@ -519,6 +522,7 @@ impl Client {
 
     /// Sends `chunks` (up to `concurrency` batch calls at once), then retries the entries that
     /// failed with retryable errors, all of them together, until they succeed or run out of attempts.
+    /// Entries of a call that failed as a whole are not retried (the SDK's retries gave up on it).
     /// Returns the outcome of every entry by its input index.
     async fn send_with_retries(
         &self,
@@ -536,11 +540,11 @@ impl Client {
             while let Some(sent) = calls.next().await {
                 for (index, prepared, outcome) in sent {
                     match outcome {
-                        Ok(receipt) => results.push((index, Ok(receipt))),
-                        Err(err) if err.is_retryable() && attempt + 1 < retry.max_attempts => {
+                        Outcome::Sent(receipt) => results.push((index, Ok(receipt))),
+                        Outcome::EntryFailed(err) if err.is_retryable() && attempt + 1 < retry.max_attempts => {
                             failed.push((index, prepared, err));
                         }
-                        Err(err) => results.push((index, Err(err))),
+                        Outcome::EntryFailed(err) | Outcome::CallFailed(err) => results.push((index, Err(err))),
                     }
                 }
             }
@@ -567,7 +571,7 @@ impl Client {
         &self,
         destination: &Destination,
         chunk: Vec<(usize, Prepared)>,
-    ) -> Vec<(usize, Prepared, Result<Receipt>)> {
+    ) -> Vec<(usize, Prepared, Outcome)> {
         let service = destination.service();
         let call: Result<Vec<EntryOutcome>> = match destination {
             Destination::Queue { url, .. } => {
@@ -588,7 +592,9 @@ impl Client {
         };
         let operation = if service == "sqs" { "SendMessageBatch" } else { "PublishBatch" };
         match call {
-            Err(err) => chunk.into_iter().map(|(index, prepared)| (index, prepared, Err(err.clone()))).collect(),
+            Err(err) => {
+                chunk.into_iter().map(|(index, prepared)| (index, prepared, Outcome::CallFailed(err.clone()))).collect()
+            }
             Ok(outputs) => chunk
                 .into_iter()
                 .zip(outputs)
@@ -602,11 +608,22 @@ impl Client {
                         },
                         Err(entry) => Err(entry_error(service, operation, &entry)),
                     };
-                    (index, prepared, result)
+                    (index, prepared, result.map_or_else(Outcome::EntryFailed, Outcome::Sent))
                 })
                 .collect(),
         }
     }
+}
+
+/// What became of one entry of a batch call.
+enum Outcome {
+    /// Sent (and its checksums verified, if asked for).
+    Sent(Receipt),
+    /// The service reported this entry as failed (or did not report it), or its checksums did not
+    /// match: retried when the error is retryable.
+    EntryFailed(Error),
+    /// The whole call failed after the SDK's own retries: never retried.
+    CallFailed(Error),
 }
 
 /// Splits FIFO entries into lanes by a hash of their message group id, keeping input order within

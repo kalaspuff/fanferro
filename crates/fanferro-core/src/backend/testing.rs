@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use super::{
-    BatchResult, ObjectStoreApi, PublishOutput, PublishRequest, PutOptions, ReceiveRequest, ReceivedMessage,
-    SendOutput, SendRequest, SnsApi, SqsApi, StringMap, SubscriptionInfo, VisibilityChange,
+    BatchEntryError, BatchResult, ObjectStoreApi, PublishOutput, PublishRequest, PutOptions, ReceiveRequest,
+    ReceivedMessage, SendOutput, SendRequest, SnsApi, SqsApi, StringMap, SubscriptionInfo, VisibilityChange,
 };
 use crate::error::{AwsError, AwsErrorKind, Result};
 
@@ -264,16 +264,42 @@ impl SqsApi for SlowReceives {
     }
 }
 
-/// SQS whose first `failures` batch sends fail with a retryable (throttling) error.
+/// How a [`ThrottledBatches`] or [`ThrottledPublishBatches`] call fails.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BatchFailure {
+    /// The whole call fails with a throttling error (as after the SDK's own retries).
+    Call,
+    /// The call succeeds, but the service reports every entry as failed with a retryable
+    /// `InternalError`.
+    Entries,
+}
+
+fn failed_entries<T>(count: usize) -> BatchResult<T> {
+    (0..count)
+        .map(|_| {
+            Err(BatchEntryError {
+                code: "InternalError".into(),
+                message: Some("internal error".into()),
+                sender_fault: false,
+            })
+        })
+        .collect()
+}
+
+/// SQS whose first `failures` batch sends fail with a retryable error (`failure`), and that counts
+/// the batch sends it was asked for.
 #[derive(Debug)]
 pub(crate) struct ThrottledBatches {
     inner: Arc<dyn SqsApi>,
+    failure: BatchFailure,
     failures: parking_lot::Mutex<usize>,
+    /// `SendMessageBatch` calls made, failed ones included.
+    pub(crate) calls: parking_lot::Mutex<usize>,
 }
 
 impl ThrottledBatches {
-    pub(crate) fn new(inner: Arc<dyn SqsApi>, failures: usize) -> Self {
-        Self { inner, failures: parking_lot::Mutex::new(failures) }
+    pub(crate) fn new(inner: Arc<dyn SqsApi>, failure: BatchFailure, failures: usize) -> Self {
+        Self { inner, failure, failures: parking_lot::Mutex::new(failures), calls: parking_lot::Mutex::new(0) }
     }
 
     fn take_failure(&self) -> bool {
@@ -291,8 +317,14 @@ impl SqsApi for ThrottledBatches {
         self.inner.send_message(queue_url, request).await
     }
     async fn send_message_batch(&self, queue_url: &str, entries: Vec<SendRequest>) -> Result<BatchResult<SendOutput>> {
+        *self.calls.lock() += 1;
         if self.take_failure() {
-            return Err(AwsError::new("sqs", "SendMessageBatch", AwsErrorKind::Throttling, "Rate exceeded").into());
+            return match self.failure {
+                BatchFailure::Call => {
+                    Err(AwsError::new("sqs", "SendMessageBatch", AwsErrorKind::Throttling, "Rate exceeded").into())
+                }
+                BatchFailure::Entries => Ok(failed_entries(entries.len())),
+            };
         }
         self.inner.send_message_batch(queue_url, entries).await
     }
@@ -399,19 +431,20 @@ impl SqsApi for SlowBatches {
     }
 }
 
-/// SNS whose first `failures` batch publishes fail with a retryable (throttling) error, and that
+/// SNS whose first `failures` batch publishes fail with a retryable error (`failure`), and that
 /// records the trace header of every `PublishBatch` call that reached `inner`.
 #[derive(Debug)]
 pub(crate) struct ThrottledPublishBatches {
     inner: Arc<dyn SnsApi>,
+    failure: BatchFailure,
     failures: parking_lot::Mutex<usize>,
     /// The trace headers of the entries of each call that reached `inner`.
     pub(crate) calls: parking_lot::Mutex<Vec<Vec<Option<String>>>>,
 }
 
 impl ThrottledPublishBatches {
-    pub(crate) fn new(inner: Arc<dyn SnsApi>, failures: usize) -> Self {
-        Self { inner, failures: parking_lot::Mutex::new(failures), calls: parking_lot::Mutex::default() }
+    pub(crate) fn new(inner: Arc<dyn SnsApi>, failure: BatchFailure, failures: usize) -> Self {
+        Self { inner, failure, failures: parking_lot::Mutex::new(failures), calls: parking_lot::Mutex::default() }
     }
 }
 
@@ -429,7 +462,12 @@ impl SnsApi for ThrottledPublishBatches {
             }
         };
         if fail {
-            return Err(AwsError::new("sns", "PublishBatch", AwsErrorKind::Throttling, "Rate exceeded").into());
+            return match self.failure {
+                BatchFailure::Call => {
+                    Err(AwsError::new("sns", "PublishBatch", AwsErrorKind::Throttling, "Rate exceeded").into())
+                }
+                BatchFailure::Entries => Ok(failed_entries(entries.len())),
+            };
         }
         self.calls.lock().push(entries.iter().map(|entry| entry.trace_header.clone()).collect());
         self.inner.publish_batch(topic_arn, entries).await

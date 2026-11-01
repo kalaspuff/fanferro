@@ -173,7 +173,9 @@ class Client:
         provisioning: Default provisioning policy of declared resources.
         aws_retry: Retries of individual AWS calls.
         timeouts: Timeouts of AWS calls.
-        publish_retry_attempts: Attempts for failed batch entries and checksum mismatches.
+        publish_retry_attempts: Attempts for batch entries the service reports as failed with a
+            retryable error (or leaves out of its response), and for checksum mismatches. A batch
+            call that fails as a whole is retried by the AWS SDK only (``aws_retry``).
         verify_md5: Verify SQS MD5 digests of sent and received messages (opt-in; TLS already
             protects messages in transit).
         split_batches_by_trace_header: Send the entries of a batch publish to a topic in separate
