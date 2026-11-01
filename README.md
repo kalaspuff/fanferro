@@ -105,13 +105,6 @@ dead letters, and EventBridge events (decoded into your own class, or typed for 
 ECS tasks, Step Functions, EC2, Auto Scaling and AWS Health):
 [Notifications and events of AWS services](docs/guides/aws-notifications.md).
 
-## tomodachi services
-
-fanferro services exchange messages with [tomodachi](https://github.com/kalaspuff/tomodachi)
-services both ways: `fanferro.envelopes.compat` reads and writes tomodachi's envelopes
-(`TomodachiJSON`, `TomodachiProtobuf` and `MetadataProtobuf`) in Rust, and the data decodes into
-and encodes from your own models: [tomodachi services](docs/guides/message-formats.md#tomodachi-services).
-
 ## Testing
 
 Test routing and handlers without a broker: `fanferro.testing.dispatch` runs one message through
@@ -176,6 +169,13 @@ Neither emulator enforces SQS's 60 seconds between deleting a queue and creating
 between two purges, drops SNS deliveries to queues encrypted with `alias/aws/sqs` as AWS does, or
 refuses unknown credentials. Every finding, the recorded runs and how to probe an account of your
 own: [Parity with AWS](docs/parity/README.md).
+
+## tomodachi services
+
+fanferro services exchange messages with [tomodachi](https://github.com/kalaspuff/tomodachi)
+services both ways: `fanferro.envelopes.compat` reads and writes tomodachi's envelopes
+(`TomodachiJSON`, `TomodachiProtobuf` and `MetadataProtobuf`) in Rust, and the data decodes into
+and encodes from your own models: [tomodachi services](docs/guides/message-formats.md#tomodachi-services).
 
 ## Learn more
 
