@@ -1438,18 +1438,29 @@ async def sns_filter_policies(probe: Probe) -> None:
     client = probe.client(provisioning=Provisioning.ensure(on_error="log"))
     topic = client.topic(probe.name("filters"))
     canary = client.queue(probe.name("filters-all"))
-    client.subscription(topic, canary)
+    subscriptions = {"all": client.subscription(topic, canary)}
     queues: dict[str, fanferro.Queue] = {}
     for key, policy in attribute_policies.items():
         queues[key] = client.queue(probe.name(f"f-{key.replace('_', '-')}"))
-        client.subscription(topic, queues[key], filter_policy=policy)
+        subscriptions[key] = client.subscription(topic, queues[key], filter_policy=policy)
     for key, policy in body_policies.items():
         queues[key] = client.queue(probe.name(f"f-{key.replace('_', '-')}"))
-        client.subscription(topic, queues[key], filter_policy=policy, filter_policy_scope="MessageBody")
+        subscriptions[key] = client.subscription(
+            topic, queues[key], filter_policy=policy, filter_policy_scope="MessageBody"
+        )
     outcomes = await client.provision()
     probe.fact(
         "provisioning_errors",
         sorted(str(describe_error(o)) for o in outcomes if isinstance(o, BaseException)),
+    )
+    # The logged errors themselves (the outcomes only say that a subscription is not available).
+    probe.fact(
+        "provisioning_failures",
+        {
+            key: describe_report(subscription.last_report)
+            for key, subscription in subscriptions.items()
+            if subscription.last_report is not None and subscription.last_report.status != "created"
+        },
     )
     async with Collector(probe, client, [canary, *queues.values()]) as collector:
         await warm_up(probe, topic, collector, canary)
