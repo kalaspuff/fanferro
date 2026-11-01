@@ -144,6 +144,41 @@ pub(crate) fn upload_timeouts(configured: Option<&TimeoutConfig>, bytes: usize) 
     timeouts.has_timeouts().then_some(timeouts)
 }
 
+/// The buffer a payload is downloaded into: presized from the length the server announced, so
+/// that it is filled without growing (growing by doubling copied a 64 MiB payload about 64 MiB
+/// more and briefly needed close to twice its size), and refusing more than `max_bytes`.
+pub(crate) struct PayloadBuffer {
+    buffer: BytesMut,
+    max_bytes: usize,
+}
+
+impl PayloadBuffer {
+    /// A buffer for a payload of `content_length` bytes, if announced; refuses one over `max_bytes`.
+    pub(crate) fn new(content_length: Option<u64>, max_bytes: usize) -> Result<Self> {
+        if let Some(length) = content_length
+            && length > max_bytes as u64
+        {
+            return Err(Error::Payload(format!("payload of {length} bytes exceeds the limit of {max_bytes} bytes")));
+        }
+        let capacity = content_length.map_or(0, |length| usize::try_from(length).unwrap_or(max_bytes));
+        Ok(Self { buffer: BytesMut::with_capacity(capacity), max_bytes })
+    }
+
+    /// Appends a chunk of the payload.
+    pub(crate) fn push(&mut self, chunk: &[u8]) -> Result<()> {
+        if self.buffer.len() + chunk.len() > self.max_bytes {
+            return Err(Error::Payload(format!("payload exceeds the limit of {} bytes", self.max_bytes)));
+        }
+        self.buffer.extend_from_slice(chunk);
+        Ok(())
+    }
+
+    /// The payload.
+    pub(crate) fn finish(self) -> Bytes {
+        self.buffer.freeze()
+    }
+}
+
 /// How to connect to AWS (or an AWS-compatible emulator).
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -326,19 +361,11 @@ impl HttpFetch for ReqwestFetch {
                 Error::Http(format!("GET returned HTTP {status}"))
             });
         }
-        if let Some(length) = response.content_length()
-            && length > max_bytes as u64
-        {
-            return Err(Error::Payload(format!("payload of {length} bytes exceeds the limit of {max_bytes} bytes")));
-        }
-        let mut buffer = BytesMut::new();
+        let mut buffer = PayloadBuffer::new(response.content_length(), max_bytes)?;
         while let Some(chunk) = response.chunk().await.map_err(|err| Error::Http(redact_url_error(&err)))? {
-            if buffer.len() + chunk.len() > max_bytes {
-                return Err(Error::Payload(format!("payload exceeds the limit of {max_bytes} bytes")));
-            }
-            buffer.extend_from_slice(&chunk);
+            buffer.push(&chunk)?;
         }
-        Ok(buffer.freeze())
+        Ok(buffer.finish())
     }
 }
 
@@ -392,6 +419,31 @@ mod tests {
         assert_eq!(timeouts.connect_timeout(), Some(Duration::from_millis(3100)));
         let off = timeout_config(&TimeoutSettings { read: None, ..TimeoutSettings::default() }).unwrap();
         assert_eq!(off.read_timeout(), None);
+    }
+
+    #[test]
+    fn payload_buffers_are_presized_and_capped() {
+        let chunks = [vec![1u8; 300], vec![2u8; 700]];
+        let mut buffer = PayloadBuffer::new(Some(1000), 4096).unwrap();
+        let start = buffer.buffer.as_ptr();
+        for chunk in &chunks {
+            buffer.push(chunk).unwrap();
+        }
+        assert_eq!(buffer.buffer.as_ptr(), start, "filled without growing");
+        let payload = buffer.finish();
+        assert_eq!(payload.len(), 1000);
+        assert_eq!(&payload[..300], &chunks[0][..]);
+        // No announced length: the buffer grows as chunks arrive.
+        let mut growing = PayloadBuffer::new(None, 4096).unwrap();
+        growing.push(&chunks[1]).unwrap();
+        assert_eq!(&growing.finish()[..], &chunks[1][..]);
+        let error = PayloadBuffer::new(Some(4097), 4096).err().unwrap();
+        assert!(error.to_string().contains("payload of 4097 bytes exceeds the limit of 4096 bytes"), "{error}");
+        // A server that sends more than it announced is still cut off at the limit.
+        let mut lying = PayloadBuffer::new(Some(10), 500).unwrap();
+        lying.push(&chunks[0]).unwrap();
+        let error = lying.push(&chunks[0]).unwrap_err();
+        assert!(error.to_string().contains("payload exceeds the limit of 500 bytes"), "{error}");
     }
 
     #[test]

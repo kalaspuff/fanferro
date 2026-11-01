@@ -320,7 +320,7 @@ pub async fn offload(
     message_id: &str,
     data: Bytes,
 ) -> Result<PayloadPointer> {
-    let sha256 = hex::encode(Sha256::digest(&data));
+    let sha256 = sha256_hex(&data).await?;
     // The body's hash in the key: a message published again with the same id but other bytes
     // (CloudEvents stamp the time) must not replace the object an earlier copy points to, while
     // retries of the same bytes keep writing the same object.
@@ -374,7 +374,7 @@ pub async fn fetch(backend: &Backend, settings: &FetchSettings, pointer: &Payloa
             FetchPreference::S3 => continue,
         };
         match result {
-            Ok(data) => return verify(pointer, data, settings.verify_checksum),
+            Ok(data) => return verify(pointer, data, settings.verify_checksum).await,
             Err(err) if method == FetchPreference::S3 && is_missing_object(&err) => missing_object = Some(err),
             Err(err) => last_error = Some(err),
         }
@@ -402,14 +402,31 @@ pub(crate) fn expired_url_error(expired_at: OffsetDateTime) -> Error {
     ))
 }
 
-fn verify(pointer: &PayloadPointer, data: Bytes, verify_checksum: bool) -> Result<Bytes> {
+/// Payloads at least this large are hashed on Tokio's blocking thread pool: hashing 1 MiB takes
+/// about 0.5-2.5 ms, which would hold up the heartbeats, settlements and other tasks of the 2-4
+/// worker threads.
+pub const BLOCKING_HASH_THRESHOLD: usize = 1024 * 1024;
+
+/// The hex SHA-256 of `data`, computed on the blocking thread pool for payloads of at least
+/// [`BLOCKING_HASH_THRESHOLD`] bytes.
+pub async fn sha256_hex(data: &Bytes) -> Result<String> {
+    if data.len() < BLOCKING_HASH_THRESHOLD {
+        return Ok(hex::encode(Sha256::digest(data)));
+    }
+    let data = data.clone();
+    tokio::task::spawn_blocking(move || hex::encode(Sha256::digest(&data)))
+        .await
+        .map_err(|err| Error::Payload(format!("hashing the payload failed: {err}")))
+}
+
+async fn verify(pointer: &PayloadPointer, data: Bytes, verify_checksum: bool) -> Result<Bytes> {
     if let Some(size) = pointer.size
         && size != data.len() as u64
     {
         return Err(Error::PayloadIntegrity(format!("expected {size} bytes, fetched {}", data.len())));
     }
     if verify_checksum && let Some(expected) = &pointer.sha256 {
-        let actual = hex::encode(Sha256::digest(&data));
+        let actual = sha256_hex(&data).await?;
         if !actual.eq_ignore_ascii_case(expected) {
             return Err(Error::PayloadIntegrity("SHA-256 of the fetched payload does not match the pointer".into()));
         }
@@ -652,6 +669,21 @@ mod tests {
             fetch(&backend, &FetchSettings::default(), &wrong_size).await,
             Err(Error::PayloadIntegrity(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn large_payloads_are_hashed_and_verified_off_the_worker_threads() {
+        let broker = MemoryBroker::new("us-east-1", "000000000000");
+        let backend = broker.backend();
+        backend.objects.create_bucket("b").await.unwrap();
+        let data = Bytes::from((0..BLOCKING_HASH_THRESHOLD + 7).map(|i| (i % 251) as u8).collect::<Vec<u8>>());
+        let sha256 = hex::encode(Sha256::digest(&data));
+        assert_eq!(sha256_hex(&data).await.unwrap(), sha256);
+        let pointer = offload(&backend, &settings("b"), "big", data.clone()).await.unwrap();
+        assert_eq!(pointer.sha256.as_deref(), Some(sha256.as_str()));
+        assert_eq!(fetch(&backend, &FetchSettings::default(), &pointer).await.unwrap(), data);
+        let tampered = PayloadPointer { sha256: Some(hex::encode(Sha256::digest(b"other"))), ..pointer };
+        assert!(matches!(fetch(&backend, &FetchSettings::default(), &tampered).await, Err(Error::PayloadIntegrity(_))));
     }
 
     #[tokio::test]
