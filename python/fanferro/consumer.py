@@ -839,7 +839,7 @@ class Consumer:
                 self._release_waiting_messages()
             # Handlers keep running while a final long poll completes.
             await self._drain()
-            await stop_receiving
+            await self._wait_for_receiving(stop_receiving)
             buffered = engine.drain_buffered()
             deadline = self._drain_deadline
             if not policy.release_prefetched and (deadline is None or time.monotonic() < deadline):
@@ -866,6 +866,39 @@ class Consumer:
             self._client._unregister_consumer(self)
             self._client._release_pump()
             self._state = "stopped"
+
+    async def _wait_for_receiving(self, stop_receiving: asyncio.Future[None]) -> None:
+        """Waits for receiving to stop; past the drain deadline, aborts it.
+
+        A stop that does not abort receiving waits for a final long poll and for the payload
+        downloads of received messages, which can take minutes (#188): the drain deadline bounds
+        that too, and the messages still being decoded are released.
+        """
+        hurry = self._hurry
+        while not self._aborting and not stop_receiving.done():
+            # A later stop request may bring an earlier deadline (`_hurry_stop` sets `hurry`).
+            deadline = self._drain_deadline
+            if deadline is not None and time.monotonic() >= deadline:
+                if self._engine is not None:
+                    self._aborting = True
+                    self._abort_receiving = asyncio.ensure_future(self._engine.stop_receiving(True))
+                break
+            waiters: set[asyncio.Future[Any]] = {stop_receiving}
+            hurried = asyncio.ensure_future(hurry.wait()) if hurry is not None else None
+            if hurried is not None:
+                waiters.add(hurried)
+            try:
+                await asyncio.wait(
+                    waiters,
+                    timeout=None if deadline is None else deadline - time.monotonic(),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                if hurried is not None:
+                    hurried.cancel()
+            if hurry is not None:
+                hurry.clear()
+        await stop_receiving
 
     def _release_waiting_messages(self) -> None:
         """Releases the prefetched messages that wait for a handler slot (stopping: they never start)."""

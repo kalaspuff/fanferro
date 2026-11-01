@@ -184,7 +184,9 @@ class ShutdownPolicy:
        delayed, nothing is lost); messages released during shutdown stay invisible until the
        abandoned poll is over, so it cannot capture them. With ``abort_receives=False`` the poll is
        allowed to finish instead (at most the consumer's ``wait_time``, overlapping with step 2) and
-       whatever it returns is released immediately.
+       whatever it returns is released immediately. Messages whose payloads are still being
+       downloaded from S3 are released when receiving is aborted, and waited for otherwise, until
+       ``drain_timeout`` has passed: then the poll is aborted and they are released too.
        Prefetched messages that have not started are released (made visible) when
        ``release_prefetched`` is set, otherwise they are processed as part of the drain (those
        still waiting to be dispatched once ``drain_timeout`` has passed are handled like unfinished
