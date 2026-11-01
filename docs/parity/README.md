@@ -30,7 +30,7 @@ uv run python scripts/probe_backends.py compare docs/parity/2026-11-01/probe-aws
 | --- | --- | --- |
 | [2026-10-31](2026-10-31/) | AWS `eu-north-1`, LocalStack, MiniStack, memory | fanferro 0.6.0, AWS CLI v2, MiniStack 1.5.27, LocalStack 2026.x |
 | [2026-10-31-second](2026-10-31-second/) | AWS `eu-north-1` (with the cases of the open questions), memory | fanferro with #146-#154, AWS CLI v2 |
-| [2026-11-01](2026-11-01/) | AWS `eu-north-1`, LocalStack, MiniStack, memory (no AWS CLI run) | fanferro 0.7.0 with #163-#240, MiniStack 1.5.27, LocalStack pro 2026.10.4 |
+| [2026-11-01](2026-11-01/) | AWS `eu-north-1` (and four reruns of `sns.filter_policies`), LocalStack, MiniStack, memory (no AWS CLI run) | fanferro 0.7.0 with #163-#240, MiniStack 1.5.27, LocalStack pro 2026.10.4 |
 
 The second run used fanferro with the fixes of #146-#154. Where those changed fanferro itself (the 60
 second limits as throttling, FIFO ids refused before sending, payload buckets with unknown
@@ -111,7 +111,7 @@ quoted as the services return them; `<v>` stands for a value from the request.
 
 | ID | Real AWS | Differences | Status |
 | --- | --- | --- | --- |
-| R1 | In the third run, `client.provision()` (concurrent since #226) created a topic, 20 queues and their 20 subscriptions; one subscription (the `suffix` filter's, a filter AWS accepted in the earlier runs) failed, so it received nothing. The probe disabled logging, so the cause was not recorded | memory, emulators: every subscription is created | **Open** (#244): the probe now records the failed reports (`provisioning_failures`); suspected causes are SQS's eventual consistency right after `CreateQueue` (AWS asks to wait a second before using a new queue) and SNS throttling (`ListSubscriptionsByTopic` allows 30 calls a second) |
+| R1 | In the third run, `client.provision()` (concurrent since #226) created a topic, 20 queues and their 20 subscriptions; one subscription (the `suffix` filter's, a filter AWS accepted in the earlier runs) failed, so it received nothing. The probe disabled logging, so the cause was not recorded. Four reruns of the scenario (`probe-aws-filters-*.json`, recording failed reports in `provisioning_failures`) created every subscription: the failure is intermittent | memory, emulators: every subscription is created | **Open** (#244): the probe records the failed reports from now on; suspected causes are SQS's eventual consistency right after `CreateQueue` (AWS asks to wait a second before using a new queue) and SNS throttling (`ListSubscriptionsByTopic` allows 30 calls a second) |
 
 ### Credentials
 

@@ -1,0 +1,136 @@
+{
+  "probe_version": 1,
+  "target": "aws",
+  "fanferro": "0.7.0",
+  "python": "3.13.13",
+  "endpoint_version": null,
+  "region": "eu-north-1",
+  "started": "2026-11-01T00:55:59Z",
+  "scenarios": {
+    "sns.filter_policies": {
+      "status": "ok",
+      "doc": "Which messages SNS delivers for each filter policy operator (attributes and body).",
+      "seconds": 18.4,
+      "error": null,
+      "facts": {
+        "provisioning_errors": [],
+        "provisioning_failures": {},
+        "info.warm_up": {
+          "rounds": 1,
+          "seconds": "<1s",
+          "live": true
+        },
+        "publish.red": "ok",
+        "publish.blue": "ok",
+        "publish.green_10": "ok",
+        "publish.RED_20": "ok",
+        "publish.no_color": "ok",
+        "publish.array": "ok",
+        "publish.price_as_string": "ok",
+        "publish.decimal_price": "ok",
+        "all": [
+          "RED_20",
+          "array",
+          "blue",
+          "decimal_price",
+          "green_10",
+          "no_color",
+          "price_as_string",
+          "red"
+        ],
+        "matched.exact": [
+          "array",
+          "red"
+        ],
+        "matched.prefix": [
+          "blue",
+          "decimal_price"
+        ],
+        "matched.suffix": [
+          "blue",
+          "decimal_price"
+        ],
+        "matched.ignore_case": [
+          "RED_20",
+          "array",
+          "red"
+        ],
+        "matched.anything_but": [
+          "RED_20",
+          "array",
+          "blue",
+          "decimal_price",
+          "price_as_string"
+        ],
+        "matched.anything_but_prefix": [
+          "RED_20",
+          "red"
+        ],
+        "matched.numeric_range": [
+          "RED_20",
+          "decimal_price",
+          "no_color",
+          "red"
+        ],
+        "matched.numeric_equals": [
+          "decimal_price",
+          "red"
+        ],
+        "matched.exact_number": [
+          "decimal_price",
+          "red"
+        ],
+        "matched.exists": [
+          "RED_20",
+          "array",
+          "blue",
+          "decimal_price",
+          "green_10",
+          "price_as_string",
+          "red"
+        ],
+        "matched.not_exists": [
+          "no_color"
+        ],
+        "matched.wildcard": [
+          "red"
+        ],
+        "matched.cidr": [
+          "red"
+        ],
+        "matched.or": [
+          "blue",
+          "decimal_price",
+          "green_10",
+          "no_color"
+        ],
+        "matched.two_keys": [
+          "red"
+        ],
+        "matched.body_numeric": [
+          "decimal_price",
+          "green_10",
+          "red"
+        ],
+        "matched.body_ignore_case": [
+          "RED_20",
+          "blue",
+          "red"
+        ],
+        "matched.body_array": [
+          "array",
+          "red"
+        ],
+        "matched.body_not_exists": [
+          "RED_20",
+          "array",
+          "decimal_price",
+          "green_10",
+          "no_color",
+          "price_as_string",
+          "red"
+        ]
+      }
+    }
+  }
+}
