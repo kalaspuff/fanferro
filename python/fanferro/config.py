@@ -68,7 +68,7 @@ class Timeouts:
 
     Long polling receives get at least their wait time plus 15 seconds for ``read``, ``attempt``
     and ``operation``, and requests that upload a large body (offloaded payloads, big messages)
-    one more second per 64 KiB. Transfers that stall are cut off by the AWS SDK.
+    one more second per 64 KiB (rounded up to a power of two seconds). Transfers that stall are cut off by the AWS SDK.
 
     Attributes:
         connect: TCP/TLS connect timeout.
