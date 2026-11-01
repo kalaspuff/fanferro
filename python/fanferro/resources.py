@@ -916,7 +916,8 @@ class Subscription(_Resource):
             "dead_letter_queue_arn": dead_letter.arn if dead_letter else None,
             "policy": self.provisioning.to_core(),
         }
-        report = await self._client._ensure("subscription", spec)
+        async with self._client._queue_policy_turn(queue.arn, dead_letter.arn if dead_letter else None):
+            report = await self._client._ensure("subscription", spec)
         self.last_report = report
         return await self._client._settle_report(report, self.provisioning)  # type: ignore[return-value]
 

@@ -526,3 +526,52 @@ async def test_a_late_subscription_that_raises_fails_the_publish(memory_client: 
         memory_client.subscription(topic, queue, provisioning=EXISTING)
         with pytest.raises(fanferro.ProvisioningError):
             await topic.publish({"id": 1})
+
+
+async def test_late_subscriptions_of_one_queue_rewrite_its_policy_in_turn(
+    memory_client: fanferro.Client, name: Any
+) -> None:
+    topics = [memory_client.topic(name("topic")) for _ in range(2)]
+    dead_letter = memory_client.queue(name("dlq"))
+    queue = memory_client.queue(name("queue"))
+    other = memory_client.queue(name("other"))
+    async with memory_client:
+        # Declared after the client provisioned: each publish resolves its topic's subscriptions.
+        for topic in topics:
+            memory_client.subscription(topic, queue)
+        # Only the shared dead-letter queue in common with the first two.
+        memory_client.subscription(topics[1], other, dead_letter_queue=dead_letter)
+        memory_client.subscription(topics[0], dead_letter)
+        slow = _SlowEnsure(memory_client)
+        await asyncio.gather(*(topic.publish({"n": n}) for n, topic in enumerate(topics)))
+
+        assert len(slow.calls) == 4
+        assert slow.max_running > 1  # subscriptions of different queues still overlap
+        subscriptions = {s.name: s for s in memory_client.subscriptions}
+        for subscription_name, running in slow.overlapping:
+            mine = subscriptions[subscription_name]
+            for other_name in running:
+                theirs = subscriptions[other_name]
+                shared = {q.name for q in (mine.queue, mine.dead_letter_queue) if q is not None}
+                shared &= {q.name for q in (theirs.queue, theirs.dead_letter_queue) if q is not None}
+                assert not shared, f"{subscription_name} and {other_name} wrote the policy of {shared} at once"
+        assert (await queue.approximate_count())["visible"] == 2
+        assert (await other.approximate_count())["visible"] == 1
+        assert (await dead_letter.approximate_count())["visible"] == 1
+
+
+async def test_resolving_subscriptions_of_one_queue_at_once_keeps_every_topic_allowed(
+    memory_client: fanferro.Client, name: Any
+) -> None:
+    topics = [memory_client.topic(name("topic")) for _ in range(4)]
+    queue = memory_client.queue(name("queue"))
+    subscriptions = [memory_client.subscription(topic, queue) for topic in topics]
+    for resource in (*topics, queue):
+        await resource.resolve()
+    slow = _SlowEnsure(memory_client)
+    await asyncio.gather(*(subscription.resolve() for subscription in subscriptions))
+
+    assert slow.max_running == 1
+    for topic in topics:
+        await topic.publish({"n": 1})
+    assert (await queue.approximate_count())["visible"] == len(topics)

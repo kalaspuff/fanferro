@@ -35,7 +35,7 @@ from fanferro.routing import Router
 from fanferro.telemetry import Telemetry, TelemetryRuntime, monotonic
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping, Sequence
+    from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 
     from fanferro.consumer import Consumer
     from fanferro.middleware import ConsumeMiddleware, PublishMiddleware
@@ -258,6 +258,8 @@ class Client:
         self._telemetry = TelemetryRuntime(telemetry, _core.__version__)
         self._core_client: CoreClient | None = None
         self._connect_lock: LoopLocal[asyncio.Lock] = LoopLocal(asyncio.Lock)
+        self._queue_policy_locks: LoopLocal[dict[str, asyncio.Lock]] = LoopLocal(dict)
+        """One lock per queue ARN, held while a subscription rewrites that queue's policy."""
         self._topics: dict[str, Topic] = {}
         self._queues: dict[str, Queue] = {}
         self._subscriptions: list[Subscription] = []
@@ -748,9 +750,9 @@ class Client:
             for queue in queues:
                 queue._adopted = None
         _raise_first([*failed, *(outcomes[id(target)] for target in targets if id(target) in outcomes)])
-        # Subscriptions after the topics and queues they need. Each one rewrites the Policy of its
-        # queue (and of its own dead-letter queue) read-modify-write, so those sharing a queue run
-        # one after another, or one could drop the statement another has just added.
+        # Subscriptions after the topics and queues they need. Those sharing a queue would wait for
+        # each other's policy writes anyway (_queue_policy_turn), so they run one after another in
+        # declaration order, without taking the slots of subscriptions of other queues meanwhile.
         groups = _sharing_queues([target for target in targets if isinstance(target, Subscription)])
         for group, results in zip(groups, await asyncio.gather(*map(in_turn, groups)), strict=True):
             outcomes.update(zip(map(id, group), results, strict=True))
@@ -764,6 +766,20 @@ class Client:
             if subscription.queue is queue:
                 with contextlib.suppress(ResourceUnavailableError):
                     await subscription.resolve()
+
+    @contextlib.asynccontextmanager
+    async def _queue_policy_turn(self, *queue_arns: str | None) -> AsyncIterator[None]:
+        """Holds the locks of the given queues, so one subscription at a time rewrites each queue's policy.
+
+        Subscriptions write the ``Policy`` of their queue (and of their dead-letter queue)
+        read-modify-write: two at once could drop the statement the other has just added, and SNS
+        would then silently drop that topic's messages. The locks are taken in a fixed order.
+        """
+        locks = self._queue_policy_locks.get()
+        async with contextlib.AsyncExitStack() as stack:
+            for arn in sorted({arn for arn in queue_arns if arn}):
+                await stack.enter_async_context(locks.setdefault(arn, asyncio.Lock()))
+            yield
 
     async def _ensure(
         self, kind: Literal["queue", "topic", "subscription"], spec: Mapping[str, Any]
