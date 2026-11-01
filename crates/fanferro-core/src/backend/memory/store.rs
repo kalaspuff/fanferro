@@ -149,7 +149,7 @@ impl Messages {
     }
 
     /// Receives a visible message at `now`: counts the receive and hides it, in flight until
-    /// `until`, with a new receipt handle. Returns the message and the handle it replaced.
+    /// `until`, with a new receipt handle; the handle it replaces joins `earlier_receipts`.
     pub fn receive(&mut self, sequence: u64, now: Instant, until: Instant) -> Option<&StoredMessage> {
         let message = self.by_sequence.get_mut(&sequence)?;
         self.visible.remove(&sequence);
