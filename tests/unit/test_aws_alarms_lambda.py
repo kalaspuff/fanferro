@@ -112,3 +112,55 @@ async def test_lambda_dead_letters() -> None:
     assert event.records[0].object.key == "HappyFace.jpg"
     assert failure == aws.LambdaDeadLetter(request_id="e4b46cbf", error_code=200, error_message="Process exited")
     assert aws.LambdaDeadLetter.of(testing.build_message({"a": 1})) is None
+
+
+def test_published_records_have_the_type_of_their_kind() -> None:
+    failure = aws.LambdaInvocationRecord.from_json(LAMBDA_FAILURE)
+    success = aws.LambdaInvocationRecord.from_json(
+        {**LAMBDA_FAILURE, "requestContext": {**LAMBDA_FAILURE["requestContext"], "condition": "Success"}}
+    )
+    assert testing.build_message(failure).type == "aws.lambda.invocation_failure"
+    assert testing.build_message(success).type == "aws.lambda.invocation_success"
+    launching = aws.AutoScalingLifecycleAction(
+        lifecycle_transition="autoscaling:EC2_INSTANCE_LAUNCHING", auto_scaling_group_name="asg", ec2_instance_id="i-1"
+    )
+    terminating = aws.AutoScalingLifecycleAction(
+        lifecycle_transition="autoscaling:EC2_INSTANCE_TERMINATING",
+        auto_scaling_group_name="asg",
+        ec2_instance_id="i-1",
+    )
+    assert testing.build_message(launching).type == "aws.autoscaling.ec2_instance_launch_lifecycle_action"
+    assert testing.build_message(terminating).type == "aws.autoscaling.ec2_instance_terminate_lifecycle_action"
+    change = aws.CloudWatchAlarmStateChange.from_json(CLOUDWATCH_ALARM_STATE_CHANGE)
+    assert testing.build_message(change).type == "aws.cloudwatch.alarm_state_change"
+    contributor = aws.CloudWatchAlarmStateChange.from_json(
+        {**CLOUDWATCH_ALARM_STATE_CHANGE, "alarmContributor": {"id": "6d44", "attributes": {"TableName": "t"}}}
+    )
+    assert testing.build_message(contributor).type == "aws.cloudwatch.alarm_contributor_state_change"
+    # A name registered for the class still wins.
+    types = fanferro.MessageTypes()
+    types.register(aws.LambdaInvocationRecord, "lambda.record")
+    assert types.name_of(success) == "lambda.record"
+
+
+async def test_a_published_success_record_reaches_success_routes() -> None:
+    routed: list[str] = []
+    router = fanferro.Router()
+
+    @router.route("aws.lambda.invocation_success")
+    async def on_success(record: aws.LambdaInvocationRecord) -> None:
+        routed.append("success")
+
+    @router.route("aws.lambda.invocation_failure")
+    async def on_failure(record: aws.LambdaInvocationRecord) -> None:
+        routed.append("failure")
+
+    success = aws.LambdaInvocationRecord.from_json(
+        {**LAMBDA_FAILURE, "requestContext": {**LAMBDA_FAILURE["requestContext"], "condition": "Success"}}
+    )
+    client = testing.memory_client()
+    queue = client.queue("records")
+    async with client:
+        await queue.send(success)  # the raw envelope: the type travels in fanferro.type
+        await client.consumer(queue, router, wait_time=1).run_until_idle(idle_for=0.3, timeout=10)
+    assert routed == ["success"]

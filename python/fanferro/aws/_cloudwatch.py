@@ -125,3 +125,9 @@ class CloudWatchAlarmStateChange(AwsDocument):
     def ok(self) -> bool:
         """Whether the alarm went back to ``OK``."""
         return self.state.value == "OK"
+
+    def __fanferro_message_type__(self) -> str:
+        """The message type of this change: of the alarm, or of one of its contributors."""
+        if self.alarm_contributor is not None:
+            return "aws.cloudwatch.alarm_contributor_state_change"
+        return "aws.cloudwatch.alarm_state_change"

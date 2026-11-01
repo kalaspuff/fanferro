@@ -261,6 +261,12 @@ class AutoScalingLifecycleAction(AwsDocument):
         """Whether the instance is terminating."""
         return self.lifecycle_transition == "autoscaling:EC2_INSTANCE_TERMINATING"
 
+    def __fanferro_message_type__(self) -> str:
+        """The message type of this action: of a launching or a terminating instance."""
+        if self.terminating:
+            return "aws.autoscaling.ec2_instance_terminate_lifecycle_action"
+        return "aws.autoscaling.ec2_instance_launch_lifecycle_action"
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AutoScalingTestNotification(AwsDocument):

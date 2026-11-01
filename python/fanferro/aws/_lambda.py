@@ -41,9 +41,11 @@ class LambdaResponseContext(AwsDocument):
 class LambdaInvocationRecord(AwsDocument):
     """The record of an asynchronous invocation sent to a destination (SQS, SNS or EventBridge).
 
-    Message types ``aws.lambda.invocation_failure`` and ``aws.lambda.invocation_success``. The
-    on-failure destinations of event source mappings (Kinesis, DynamoDB, Kafka) send records of
-    the same shape, with the batch in :attr:`batch_info`.
+    Message types ``aws.lambda.invocation_failure`` and ``aws.lambda.invocation_success`` (a
+    record published by fanferro gets the one of its ``condition``). The on-failure destinations
+    of Kinesis and DynamoDB stream event source mappings send records of the same shape, with the
+    batch in :attr:`kinesis_batch_info` or :attr:`ddb_stream_batch_info`; other fields are in
+    ``message.json()``.
     """
 
     aws_message_type: ClassVar[str | None] = "aws.lambda.invocation_failure"
@@ -63,6 +65,10 @@ class LambdaInvocationRecord(AwsDocument):
     def succeeded(self) -> bool:
         """Whether the invocation succeeded."""
         return self.request_context.condition == "Success"
+
+    def __fanferro_message_type__(self) -> str:
+        """The message type of this record: ``aws.lambda.invocation_success`` or ``..._failure``."""
+        return "aws.lambda.invocation_success" if self.succeeded else "aws.lambda.invocation_failure"
 
     @property
     def error_message(self) -> str | None:

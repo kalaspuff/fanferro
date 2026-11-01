@@ -217,8 +217,11 @@ EventBridge) receive a record of each invocation: `aws.lambda.invocation_success
 `aws.lambda.invocation_failure`, decoded into `aws.LambdaInvocationRecord` (`succeeded`,
 `request_context` with `function_arn`, `condition` and `approximate_invoke_count`,
 `request_payload`, the event, `response_payload` and `error_message`). The on-failure
-destinations of event source mappings (Kinesis, DynamoDB streams, Kafka) send records of the same
-shape, with the batch in `kinesis_batch_info` or `ddb_stream_batch_info`.
+destinations of Kinesis and DynamoDB stream event source mappings send records of the same shape,
+with the batch in `kinesis_batch_info` or `ddb_stream_batch_info`. A record, lifecycle action or
+alarm state change that fanferro publishes (in a test, say) gets the message type of its own kind:
+`aws.lambda.invocation_success` for a successful invocation, `..._terminate_lifecycle_action` for a
+terminating instance.
 
 A function's dead-letter queue (or topic) receives the event itself, with the `RequestID`,
 `ErrorCode` and `ErrorMessage` attributes Lambda adds. Such messages are `aws.lambda.dead_letter`
