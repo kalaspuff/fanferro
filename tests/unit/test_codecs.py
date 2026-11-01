@@ -309,7 +309,7 @@ def test_encoders_are_cached_per_type_only_for_builtin_codecs() -> None:
 
 def test_registry_order_and_helpers() -> None:
     names = [codec.name for codec in CodecRegistry().codecs]
-    assert names == ["protobuf", "pydantic", "msgspec", "dataclass", "bytes", "text", "json"]
+    assert names == ["protobuf", "pydantic", "msgspec", "aws", "dataclass", "bytes", "text", "json"]
     assert is_json_content_type("application/vnd.api+json")
     assert not is_json_content_type(None)
     assert to_jsonable({"d": decimal.Decimal("1.1"), "e": Color.RED, "t": datetime.date(2026, 1, 1)}) == {

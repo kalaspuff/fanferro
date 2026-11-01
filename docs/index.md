@@ -6,6 +6,7 @@
 * [Failure handling](guides/failure-handling.md) - retries, dead-letter queues, requeue, poison messages
 * [Provisioning](guides/provisioning.md) - declaring resources, policies, failure modes, IAM
 * [Message formats](guides/message-formats.md) - codecs, envelopes, protobuf, interoperability
+* [AWS notifications](guides/aws-notifications.md) - S3 events and SES bounces, complaints and deliveries as typed messages
 * [Large payloads](guides/large-payloads.md) - claim checks with S3 and presigned URLs
 * [Observability](guides/observability.md) - events, logging, hooks, OpenTelemetry, metrics
 * [Patterns](guides/patterns.md) - transactional outbox, inbox, fan-out, versioning, ordering

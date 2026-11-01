@@ -5,8 +5,8 @@
 use std::sync::Arc;
 
 use fanferro_core::envelope::{
-    CloudEventsJson, CloudEventsProtobuf, Envelope, IMPLICIT_CONTENT_TYPE, RawEnvelope, TOMODACHI_COMPRESS_THRESHOLD,
-    TomodachiDestination, TomodachiJson, TomodachiProtobuf,
+    AwsNotifications, CloudEventsJson, CloudEventsProtobuf, Envelope, IMPLICIT_CONTENT_TYPE, RawEnvelope,
+    TOMODACHI_COMPRESS_THRESHOLD, TomodachiDestination, TomodachiJson, TomodachiProtobuf,
 };
 use pyo3::prelude::*;
 
@@ -38,6 +38,9 @@ pub fn builtin(envelope: &Bound<'_, PyAny>) -> Option<Arc<dyn Envelope>> {
     }
     if let Ok(envelope) = envelope.cast::<PyTomodachiProtobuf>() {
         return Some(Arc::new(envelope.get().inner.clone()));
+    }
+    if envelope.cast::<PyAwsNotifications>().is_ok() {
+        return Some(Arc::new(AwsNotifications));
     }
     None
 }
@@ -359,3 +362,38 @@ tomodachi_envelope!(
     "The protobuf envelope of tomodachi services (`tomodachi.envelope.ProtobufBase`).",
     "tomodachi-protobuf"
 );
+
+/// Notifications of AWS services (S3 events, SES notifications), recognised by their body.
+#[pyclass(name = "AwsNotificationsEnvelope", module = "fanferro._core", frozen, eq, hash)]
+#[derive(PartialEq, Eq, Hash)]
+pub struct PyAwsNotifications {
+    inner: AwsNotifications,
+}
+
+#[pymethods]
+impl PyAwsNotifications {
+    #[new]
+    fn new() -> Self {
+        Self { inner: AwsNotifications }
+    }
+
+    /// `"aws"`.
+    #[getter]
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    /// Wraps a payload as AWS services send their notifications: the document, without attributes.
+    fn wrap(&self, payload: &Bound<'_, PyPayload>) -> PyResult<PyWireMessage> {
+        wrap(&self.inner, payload)
+    }
+
+    /// Unwraps a wire message if it is an S3 event or SES notification, giving it its message type.
+    fn unwrap(&self, wire: &Bound<'_, PyWireMessage>) -> PyResult<Option<PyPayload>> {
+        unwrap(&self.inner, wire)
+    }
+
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(Repr::new(py, "AwsNotificationsEnvelope").finish())
+    }
+}

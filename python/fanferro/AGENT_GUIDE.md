@@ -30,7 +30,10 @@ compact reference for writing applications with it. Print it with `fanferro guid
    use `fanferro.envelopes.compat.TomodachiJSON()`/`TomodachiProtobuf()` (envelope of their
    topics and queues, and in `accept_envelopes` before `Raw`); the tomodachi topic is the message
    type (`@fanferro.message_type("order-created")` on the model), and the data decodes into and
-   encodes from models like any payload.
+   encodes from models like any payload. S3 event and SES email notifications (from SNS or
+   straight to SQS) are recognised and typed by default: annotate handlers with
+   `fanferro.aws.S3Event`, `SesBounceNotification`, `SesComplaintNotification` or
+   `SesDeliveryNotification` (types `aws.s3.event`, `aws.ses.bounce`...).
 10. **Test with `fanferro.testing.memory_client()`**, end to end with MiniStack.
 
 ## Minimal service

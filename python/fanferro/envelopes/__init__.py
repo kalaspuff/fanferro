@@ -8,10 +8,14 @@ Built-in envelopes are implemented in Rust:
 * :class:`CloudEvents` - CloudEvents 1.0 structured JSON. JSON payloads are embedded verbatim,
   text as a string, binary as ``data_base64``. Headers become CloudEvents extension attributes.
 * :class:`CloudEventsProtobuf` - CloudEvents 1.0 protobuf format (compact binary).
+* :class:`AwsNotifications` - notifications of AWS services (S3 events, SES email notifications),
+  recognised by their body and given a message type (``aws.s3.event``, ``aws.ses.bounce``...); the
+  typed bodies are in :mod:`fanferro.aws`.
 
 :mod:`fanferro.envelopes.compat` holds the envelopes of other frameworks' services (tomodachi).
 
-Consumers try their envelopes in order (default: CloudEvents, CloudEventsProtobuf, Raw), so a
+Consumers try their envelopes in order (default: CloudEvents, CloudEventsProtobuf, AwsNotifications,
+Raw), so a
 queue can receive a mix of formats. Custom envelopes implement the :class:`Envelope` protocol::
 
     class LegacyEnvelope:
@@ -33,10 +37,18 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from typing import Protocol, runtime_checkable
 
-from fanferro._core import CloudEventsEnvelope, CloudEventsProtobufEnvelope, Payload, RawEnvelope, WireMessage
+from fanferro._core import (
+    AwsNotificationsEnvelope,
+    CloudEventsEnvelope,
+    CloudEventsProtobufEnvelope,
+    Payload,
+    RawEnvelope,
+    WireMessage,
+)
 from fanferro.errors import EnvelopeError
 
 __all__ = [
+    "AwsNotifications",
     "CloudEvents",
     "CloudEventsProtobuf",
     "Envelope",
@@ -55,6 +67,9 @@ CloudEventsProtobuf = CloudEventsProtobufEnvelope
 
 Raw = RawEnvelope
 """No envelope (the default): payload bytes as the body, metadata in attributes."""
+
+AwsNotifications = AwsNotificationsEnvelope
+"""Notifications of AWS services (S3 events, SES notifications), recognised by their body."""
 
 
 @runtime_checkable
@@ -80,7 +95,7 @@ class Envelope(Protocol):
 
 def default_envelopes() -> tuple[Envelope, ...]:
     """The envelopes consumers accept by default, in detection order."""
-    return (CloudEvents(), CloudEventsProtobuf(), Raw())
+    return (CloudEvents(), CloudEventsProtobuf(), AwsNotifications(), Raw())
 
 
 def supports_headers(envelope: Envelope) -> bool:

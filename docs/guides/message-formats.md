@@ -10,7 +10,8 @@ A message passes through two independent layers:
 Built in, tried in this order: protobuf messages, pydantic models (and `list[Model]`, discriminated
 unions, `TypedDict` through `TypeAdapter`; bodies use field names unless the model serializes by
 alias or `PydanticCodec(by_alias=True)`, and decoding accepts names and aliases with pydantic 2.11
-or later), `msgspec.Struct`, dataclasses (nested, typed: enums, datetimes, UUIDs, Decimals,
+or later), `msgspec.Struct`, the S3 and SES notifications of `fanferro.aws` ([AWS
+notifications](aws-notifications.md)), dataclasses (nested, typed: enums, datetimes, UUIDs, Decimals,
 optionals, literals of values or enum members, `type` aliases, generic dataclasses, named tuples
 from objects or arrays, `TypedDict` fields, bare `tuple` and `set`, dicts with int, float, bool or
 enum keys...), `bytes`, `str`, JSON data. Library codecs only activate when the library is imported by
@@ -58,6 +59,7 @@ crossing service boundaries.
 | `envelopes.Raw()` (default) | the payload bytes (e.g. the JSON document) | `fanferro.id`, `fanferro.type` (typed messages), `content-type` (non-JSON payloads) |
 | `envelopes.CloudEvents()` | CloudEvents 1.0 JSON; JSON data embedded verbatim | `content-type`, `fanferro.type` |
 | `envelopes.CloudEventsProtobuf()` | CloudEvents 1.0 protobuf (base64 on the wire) | `content-type`, `fanferro.type`, `fanferro.encoding` |
+| `envelopes.AwsNotifications()` | the document of an AWS service's notification (S3 events, SES email; see [AWS notifications](aws-notifications.md)) | none |
 | `envelopes.compat.TomodachiJSON()`, `TomodachiProtobuf()` | tomodachi's envelopes (see [tomodachi services](#tomodachi-services)) | `fanferro.type` |
 
 ```python
@@ -83,8 +85,11 @@ all (message ids then fall back to the SQS message id).
 extension attributes, trace context via the distributed tracing extension) and interoperable with
 CloudEvents SDKs, at the cost of a larger body and an extra attribute.
 
-Consumers try envelopes in order (default: CloudEvents JSON, CloudEvents protobuf, raw), so a
-queue can receive a mix of formats, including CloudEvents from fanferro 0.1 producers. CloudEvents
+Consumers try envelopes in order (default: CloudEvents JSON, CloudEvents protobuf, AWS
+notifications, raw), so a queue can receive a mix of formats, including CloudEvents from fanferro
+0.1 producers and the notifications of S3 and SES, which get a message type (`aws.s3.event`,
+`aws.ses.bounce`...) and decode into the classes of `fanferro.aws` ([AWS
+notifications](aws-notifications.md)). CloudEvents
 are recognised by their `content-type` attribute or, without it, a `specversion` key (except in
 messages with the raw envelope's `fanferro.id` attribute, whose body may be a relayed event); `Raw`
 accepts anything, so messages from producers that do not use fanferro (boto3, the console, other

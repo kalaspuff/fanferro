@@ -7,6 +7,7 @@
 //! |------------------------|---------------------------------------|---------------------------------------------|
 //! | `cloudevents`          | CloudEvents 1.0 structured JSON       | `content-type` attribute or JSON sniffing    |
 //! | `cloudevents-protobuf` | CloudEvents 1.0 protobuf (binary)     | `content-type` attribute                     |
+//! | `aws`                  | S3 and SES notification documents     | the document's fields                        |
 //! | `raw`                  | payload bytes as-is                   | always matches (use last)                    |
 //! | `tomodachi-json`       | tomodachi's `JsonBase` envelope       | `metadata.protocol_version` in the body      |
 //! | `tomodachi-protobuf`   | tomodachi's `ProtobufBase` (base64)   | `metadata.protocol_version` in the body      |
@@ -15,6 +16,7 @@
 //! `Ok(Some(payload))` wins. Custom envelopes implemented in Python follow the same
 //! protocol (see `python/fanferro/envelopes/__init__.py`).
 
+mod aws;
 mod cloudevents_json;
 mod cloudevents_proto;
 mod raw;
@@ -23,6 +25,7 @@ mod tomodachi;
 use std::fmt::Debug;
 use std::sync::Arc;
 
+pub use aws::{AWS_S3_EVENT_TYPE, AWS_SES_TYPE_PREFIX, AwsNotifications};
 pub use cloudevents_json::{CLOUDEVENTS_JSON_CONTENT_TYPE, CloudEventsJson};
 pub use cloudevents_proto::{CLOUDEVENTS_PROTOBUF_CONTENT_TYPE, CloudEventsProtobuf};
 pub use raw::{IMPLICIT_CONTENT_TYPE, RawEnvelope};
@@ -68,11 +71,12 @@ impl EnvelopeSet {
         Self { envelopes }
     }
 
-    /// The default consumer set: CloudEvents JSON, CloudEvents protobuf, raw.
+    /// The default consumer set: CloudEvents JSON, CloudEvents protobuf, AWS notifications, raw.
     pub fn default_set() -> Self {
         Self::new(vec![
             Arc::new(CloudEventsJson::default()),
             Arc::new(CloudEventsProtobuf::default()),
+            Arc::new(AwsNotifications),
             Arc::new(RawEnvelope::default()),
         ])
     }
@@ -217,7 +221,7 @@ mod tests {
         let set = EnvelopeSet::default_set();
         let wire =
             RawEnvelope::default().wrap(&Payload { data: Bytes::from_static(b"x"), ..Payload::default() }).unwrap();
-        assert_eq!(set.unwrap_indexed(&wire).unwrap().unwrap().1, 2);
-        assert_eq!(set.envelopes()[2].name(), "raw");
+        assert_eq!(set.unwrap_indexed(&wire).unwrap().unwrap().1, 3);
+        assert_eq!(set.envelopes()[3].name(), "raw");
     }
 }

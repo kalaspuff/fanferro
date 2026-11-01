@@ -145,6 +145,16 @@ class CloudEventsProtobufEnvelope:
     def __hash__(self) -> int: ...
 
 @final
+class AwsNotificationsEnvelope:
+    def __init__(self) -> None: ...
+    @property
+    def name(self) -> str: ...
+    def wrap(self, payload: Payload) -> WireMessage: ...
+    def unwrap(self, wire: WireMessage) -> Payload | None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
 class RawEnvelope:
     def __init__(
         self,
@@ -321,6 +331,7 @@ class CoreClient:
         envelopes: Sequence[
             CloudEventsEnvelope
             | CloudEventsProtobufEnvelope
+            | AwsNotificationsEnvelope
             | RawEnvelope
             | TomodachiJSONEnvelope
             | TomodachiProtobufEnvelope

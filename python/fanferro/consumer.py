@@ -39,7 +39,15 @@ from fanferro._core import (
 from fanferro._utils import Duration, optional_seconds, seconds
 from fanferro.actions import Discard, HandlerAction, Reject, Requeue, Retry
 from fanferro.codecs import is_json_content_type, media_type
-from fanferro.envelopes import CloudEvents, CloudEventsProtobuf, Envelope, Raw, default_envelopes, unwrap_first
+from fanferro.envelopes import (
+    AwsNotifications,
+    CloudEvents,
+    CloudEventsProtobuf,
+    Envelope,
+    Raw,
+    default_envelopes,
+    unwrap_first,
+)
 from fanferro.errors import (
     ConfigurationError,
     ConsumerStateError,
@@ -74,7 +82,14 @@ _MAX_HANDED_BACK = 10_000
 """Messages whose hand-backs a consumer remembers (the oldest are forgotten first)."""
 _DELIVERY_WAIT = 0.5
 """Seconds the dispatcher waits for deliveries per call (stopping wakes it at once)."""
-_BUILTIN_ENVELOPES = (CloudEvents, CloudEventsProtobuf, Raw, TomodachiJSONEnvelope, TomodachiProtobufEnvelope)
+_BUILTIN_ENVELOPES = (
+    CloudEvents,
+    CloudEventsProtobuf,
+    AwsNotifications,
+    Raw,
+    TomodachiJSONEnvelope,
+    TomodachiProtobufEnvelope,
+)
 
 
 class Duplicate(Discard):

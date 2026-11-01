@@ -164,8 +164,9 @@ class Client:
             is the body, the message id and type travel in attributes). Pass
             ``fanferro.envelopes.CloudEvents()`` for self-describing CloudEvents.
         accept_envelopes: Envelopes consumers try, in order (default: CloudEvents JSON,
-            CloudEvents protobuf, raw).
-        codecs: Codec registry (default: protobuf, pydantic, msgspec, dataclass, bytes, text, JSON).
+            CloudEvents protobuf, AWS notifications, raw).
+        codecs: Codec registry (default: protobuf, pydantic, msgspec, AWS notifications, dataclass, bytes, text,
+            JSON).
         naming: Fallback function naming message classes (default: ``cls.__name__``).
         large_payloads: Claim-check offloading of large messages to S3.
         payload_fetch: How consumers download offloaded payloads.

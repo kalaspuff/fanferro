@@ -19,3 +19,4 @@ Status values: Accepted, Superseded by NNNN, Deprecated.
 | [0011](0011-real-aws-is-the-reference.md) | Real AWS is the reference for the in-memory broker and the error mapping (amends 0005, 0006) |
 | [0012](0012-receives-follow-the-backlog.md) | Receives in flight follow the backlog: extra receive loops while receives come back full |
 | [0013](0013-tomodachi-envelopes.md) | Envelopes of tomodachi services: opt-in, in Rust, destination-aware wrapping, the topic as the message type |
+| [0014](0014-aws-service-notifications.md) | Notifications of AWS services (S3 events, SES email) are recognised and typed by default |
