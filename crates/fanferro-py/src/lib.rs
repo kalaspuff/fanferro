@@ -85,6 +85,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<envelopes::PyCloudEvents>()?;
     m.add_class::<envelopes::PyCloudEventsProtobuf>()?;
     m.add_class::<envelopes::PyRaw>()?;
+    m.add_class::<envelopes::PyTomodachiJson>()?;
+    m.add_class::<envelopes::PyTomodachiProtobuf>()?;
     m.add_class::<client::PyCoreClient>()?;
     m.add_class::<client::PyTransport>()?;
     m.add_class::<client::PyDestination>()?;

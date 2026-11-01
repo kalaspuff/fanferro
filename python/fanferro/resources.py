@@ -13,7 +13,15 @@ import time
 from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Literal, Unpack
 
-from fanferro._core import AttributeValue, Payload, Transport, is_sqs_safe_text, validate_wire
+from fanferro._core import (
+    AttributeValue,
+    Payload,
+    TomodachiJSONEnvelope,
+    TomodachiProtobufEnvelope,
+    Transport,
+    is_sqs_safe_text,
+    validate_wire,
+)
 from fanferro._utils import Duration, LoopLocal, optional_seconds, seconds
 from fanferro.errors import ConfigurationError, ResourceUnavailableError, ValidationError
 from fanferro.events import EventKind
@@ -58,6 +66,8 @@ _UNSET: Any = object()
 _RETRY_AFTER_FAILURE = (1.0, 60.0)
 _MAX_ATTRIBUTES = 10
 """Message attributes SQS and SNS accept per message."""
+_DESTINATION_ENVELOPES = (TomodachiJSONEnvelope, TomodachiProtobufEnvelope)
+"""Envelopes whose layout depends on the destination (``wrap_for(payload, kind, name)``)."""
 
 type GroupId = str | Callable[[OutgoingMessage], str]
 """A FIFO message group id, or a function deriving it from the message."""
@@ -192,6 +202,11 @@ class _Destination(_Resource):
         self._pending_subscriptions = [s for s in self._pending_subscriptions if not s.resolved]
 
     @property
+    def kind(self) -> Literal["queue", "topic"]:  # pragma: no cover - implemented by subclasses
+        """The resource kind."""
+        raise NotImplementedError
+
+    @property
     def envelope(self) -> Envelope:
         """The envelope used for publishing."""
         return self._envelope or self._client.envelope
@@ -301,7 +316,11 @@ class _Destination(_Resource):
             data_schema=message.data_schema,
             headers=message.headers,
         )
-        wire = envelope.wrap(payload)
+        if isinstance(envelope, _DESTINATION_ENVELOPES):
+            # The topic as tomodachi names it: without the prefix (its aws_sns_sqs.topic_prefix).
+            wire = envelope.wrap_for(payload, self.kind, self.name.removeprefix(client.topic_prefix))
+        else:
+            wire = envelope.wrap(payload)
         if message.attributes or trace_attributes:
             attributes = dict(wire.attributes)
             for name, value in message.attributes.items():

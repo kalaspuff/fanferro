@@ -9,6 +9,8 @@ Built-in envelopes are implemented in Rust:
   text as a string, binary as ``data_base64``. Headers become CloudEvents extension attributes.
 * :class:`CloudEventsProtobuf` - CloudEvents 1.0 protobuf format (compact binary).
 
+:mod:`fanferro.envelopes.compat` holds the envelopes of other frameworks' services (tomodachi).
+
 Consumers try their envelopes in order (default: CloudEvents, CloudEventsProtobuf, Raw), so a
 queue can receive a mix of formats. Custom envelopes implement the :class:`Envelope` protocol::
 
@@ -39,6 +41,7 @@ __all__ = [
     "CloudEventsProtobuf",
     "Envelope",
     "Raw",
+    "compat",
     "default_envelopes",
     "supports_headers",
     "unwrap_first",
@@ -115,3 +118,6 @@ def as_tuple(envelopes: Sequence[Envelope] | Envelope | None) -> tuple[Envelope,
     if isinstance(envelopes, Sequence):
         return tuple(envelopes)
     return (envelopes,)
+
+
+from fanferro.envelopes import compat  # noqa: E402 - fanferro.envelopes.compat without importing it

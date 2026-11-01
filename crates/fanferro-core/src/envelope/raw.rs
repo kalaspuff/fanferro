@@ -5,10 +5,9 @@
 //! without a content-type attribute (it is implied, see [`RawEnvelope::implicit_content_type`]).
 //! Because it recognises any message it must be the last envelope in a consumer's list.
 
-use super::{Envelope, default_type_attribute, insert_envelope_attributes, text_attribute};
+use super::{Envelope, default_type_attribute, header_attributes, insert_envelope_attributes, text_attribute};
 use crate::error::Result;
-use crate::types::attributes::validate_attribute_name;
-use crate::types::{AttributeValue, HeaderValue, Headers, MessageAttributes, Payload, WireMessage, reserved};
+use crate::types::{AttributeValue, Headers, Payload, WireMessage, reserved};
 
 /// Content type of payloads sent without a content-type attribute by default.
 pub const IMPLICIT_CONTENT_TYPE: &str = "application/json";
@@ -55,16 +54,8 @@ impl Envelope for RawEnvelope {
     }
 
     fn wrap(&self, payload: &Payload) -> Result<WireMessage> {
-        let mut attributes = MessageAttributes::new();
         // Headers have nowhere else to go without an envelope: send them as attributes.
-        for (name, value) in &payload.headers {
-            validate_attribute_name(name)?;
-            let attribute = match value {
-                HeaderValue::Integer(number) => AttributeValue::number(number.to_string()),
-                other => AttributeValue::string(other.to_text()),
-            };
-            attributes.insert(name.clone(), attribute);
-        }
+        let mut attributes = header_attributes(&payload.headers)?;
         let content_type = match (&self.content_type_attribute, &payload.content_type) {
             (Some(_), Some(value)) if self.implicit_content_type.as_deref() == Some(value.as_str()) => None,
             (Some(name), Some(value)) => Some((name.as_str(), value.as_str())),
@@ -111,6 +102,7 @@ mod tests {
     use bytes::Bytes;
 
     use super::*;
+    use crate::types::{HeaderValue, MessageAttributes};
 
     #[test]
     fn roundtrip_with_metadata_attributes() {

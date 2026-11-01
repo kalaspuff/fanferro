@@ -4,11 +4,14 @@
 
 use std::sync::Arc;
 
-use fanferro_core::envelope::{CloudEventsJson, CloudEventsProtobuf, Envelope, IMPLICIT_CONTENT_TYPE, RawEnvelope};
+use fanferro_core::envelope::{
+    CloudEventsJson, CloudEventsProtobuf, Envelope, IMPLICIT_CONTENT_TYPE, RawEnvelope, TOMODACHI_COMPRESS_THRESHOLD,
+    TomodachiDestination, TomodachiJson, TomodachiProtobuf,
+};
 use pyo3::prelude::*;
 
 use crate::convert::Repr;
-use crate::errors::to_py_err;
+use crate::errors::{ConfigurationError, to_py_err};
 use crate::types::{PyPayload, PyWireMessage};
 
 fn wrap(envelope: &dyn Envelope, payload: &Bound<'_, PyPayload>) -> PyResult<PyWireMessage> {
@@ -28,6 +31,12 @@ pub fn builtin(envelope: &Bound<'_, PyAny>) -> Option<Arc<dyn Envelope>> {
         return Some(Arc::new(envelope.get().inner.clone()));
     }
     if let Ok(envelope) = envelope.cast::<PyRaw>() {
+        return Some(Arc::new(envelope.get().inner.clone()));
+    }
+    if let Ok(envelope) = envelope.cast::<PyTomodachiJson>() {
+        return Some(Arc::new(envelope.get().inner.clone()));
+    }
+    if let Ok(envelope) = envelope.cast::<PyTomodachiProtobuf>() {
         return Some(Arc::new(envelope.get().inner.clone()));
     }
     None
@@ -217,3 +226,136 @@ impl PyRaw {
             .finish())
     }
 }
+
+/// The destination `kind` and `name` of `wrap_for`.
+fn tomodachi_destination<'a>(kind: &str, name: &'a str) -> PyResult<TomodachiDestination<'a>> {
+    match kind {
+        "topic" => Ok(TomodachiDestination::Topic(name)),
+        "queue" => Ok(TomodachiDestination::Queue),
+        _ => Err(ConfigurationError::new_err(format!("destination kind must be 'topic' or 'queue', not {kind:?}"))),
+    }
+}
+
+/// Default `type_attribute` of the tomodachi envelopes.
+fn type_attr() -> Option<String> {
+    Some("fanferro.type".to_string())
+}
+
+/// Default `compress_threshold` of the tomodachi envelopes.
+fn threshold() -> Option<i64> {
+    i64::try_from(TOMODACHI_COMPRESS_THRESHOLD).ok()
+}
+
+/// Checks the compression threshold of a tomodachi envelope.
+fn checked_compress_threshold(envelope: &str, threshold: Option<i64>) -> PyResult<Option<usize>> {
+    threshold
+        .map(|threshold| {
+            usize::try_from(threshold).map_err(|_| {
+                ConfigurationError::new_err(format!(
+                    "{envelope} compress_threshold must be 0 or more bytes (None never compresses), not {threshold}"
+                ))
+            })
+        })
+        .transpose()
+}
+
+macro_rules! tomodachi_envelope {
+    ($py_name:literal, $rust:ident, $inner:ident, $doc:literal, $format:literal) => {
+        #[doc = $doc]
+        #[pyclass(name = $py_name, module = "fanferro._core", frozen, eq, hash)]
+        #[derive(PartialEq, Eq, Hash)]
+        pub struct $rust {
+            inner: $inner,
+        }
+
+        #[pymethods]
+        impl $rust {
+            #[new]
+            #[pyo3(signature = (*, service_name=None, service_uuid=None, type_attribute=type_attr(), compress_threshold=threshold()))]
+            fn new(
+                service_name: Option<String>,
+                service_uuid: Option<String>,
+                type_attribute: Option<String>,
+                compress_threshold: Option<i64>,
+            ) -> PyResult<Self> {
+                let compress_threshold = checked_compress_threshold($py_name, compress_threshold)?;
+                Ok(Self { inner: $inner { service_name, service_uuid, type_attribute, compress_threshold } })
+            }
+
+            #[doc = concat!("`\"", $format, "\"`.")]
+            #[getter]
+            fn name(&self) -> &str {
+                self.inner.name()
+            }
+
+            /// `service.name` of published messages (`None`: the message's source).
+            #[getter]
+            fn service_name(&self) -> Option<&str> {
+                self.inner.service_name.as_deref()
+            }
+
+            /// `service.uuid` of published messages (`None`: one generated per process).
+            #[getter]
+            fn service_uuid(&self) -> Option<&str> {
+                self.inner.service_uuid.as_deref()
+            }
+
+            /// Attribute the message type is promoted to (`None` disables it).
+            #[getter]
+            fn type_attribute(&self) -> Option<&str> {
+                self.inner.type_attribute.as_deref()
+            }
+
+            /// Size in bytes from which data is compressed like tomodachi does (`None`: never).
+            #[getter]
+            fn compress_threshold(&self) -> Option<usize> {
+                self.inner.compress_threshold
+            }
+
+            /// Wraps a payload (as published to a topic, without naming it).
+            fn wrap(&self, payload: &Bound<'_, PyPayload>) -> PyResult<PyWireMessage> {
+                wrap(&self.inner, payload)
+            }
+
+            /// Wraps a payload for a destination: a topic (named in `metadata.topic`) or a queue
+            /// (in tomodachi's queue message document).
+            fn wrap_for(&self, payload: &Bound<'_, PyPayload>, kind: &str, name: &str) -> PyResult<PyWireMessage> {
+                let destination = tomodachi_destination(kind, name)?;
+                self.inner
+                    .wrap_for(&payload.get().inner, destination)
+                    .map(|inner| PyWireMessage { inner })
+                    .map_err(to_py_err)
+            }
+
+            /// Unwraps a wire message if it is in this tomodachi envelope format.
+            fn unwrap(&self, wire: &Bound<'_, PyWireMessage>) -> PyResult<Option<PyPayload>> {
+                unwrap(&self.inner, wire)
+            }
+
+            fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+                Ok(Repr::new(py, $py_name)
+                    .field("service_name", self.inner.service_name.as_deref())?
+                    .field("service_uuid", self.inner.service_uuid.as_deref())?
+                    .field("type_attribute", self.inner.type_attribute.as_deref())?
+                    .field("compress_threshold", self.inner.compress_threshold)?
+                    .finish())
+            }
+        }
+    };
+}
+
+tomodachi_envelope!(
+    "TomodachiJSONEnvelope",
+    PyTomodachiJson,
+    TomodachiJson,
+    "The JSON envelope of tomodachi services (`tomodachi.envelope.JsonBase`).",
+    "tomodachi-json"
+);
+
+tomodachi_envelope!(
+    "TomodachiProtobufEnvelope",
+    PyTomodachiProtobuf,
+    TomodachiProtobuf,
+    "The protobuf envelope of tomodachi services (`tomodachi.envelope.ProtobufBase`).",
+    "tomodachi-protobuf"
+);

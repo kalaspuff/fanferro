@@ -27,7 +27,7 @@ options shared by several calls: `options: fanferro.ConsumerOptions = {"concurre
 | `bucket_prefix` | `""` | Prepended to the bucket of every `LargePayloads`, the client's and those of topics and queues (lowercase letters, digits, `-`, `.`) |
 | `source` | `"fanferro"` | CloudEvents `source` of published messages (e.g. `urn:service:orders`) |
 | `envelope` | `Raw()` | Envelope for publishing (`CloudEvents()` for CloudEvents) |
-| `accept_envelopes` | CloudEvents, CloudEventsProtobuf, Raw | Envelopes consumers try, in order |
+| `accept_envelopes` | CloudEvents, CloudEventsProtobuf, Raw | Envelopes consumers try, in order (add `envelopes.compat.TomodachiJSON()`/`TomodachiProtobuf()` before Raw for [tomodachi services](../guides/message-formats.md#tomodachi-services)) |
 | `codecs` | `CodecRegistry()` | Codec registry or list of codecs |
 | `naming` | class name | Fallback `(cls) -> str` for message type names |
 | `large_payloads` | `None` | `LargePayloads(...)` claim-check offloading |

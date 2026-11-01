@@ -8,14 +8,17 @@
 //! | `cloudevents`          | CloudEvents 1.0 structured JSON       | `content-type` attribute or JSON sniffing    |
 //! | `cloudevents-protobuf` | CloudEvents 1.0 protobuf (binary)     | `content-type` attribute                     |
 //! | `raw`                  | payload bytes as-is                   | always matches (use last)                    |
+//! | `tomodachi-json`       | tomodachi's `JsonBase` envelope       | `metadata.protocol_version` in the body      |
+//! | `tomodachi-protobuf`   | tomodachi's `ProtobufBase` (base64)   | `metadata.protocol_version` in the body      |
 //!
 //! Consumers try their configured envelopes in order; the first that returns
 //! `Ok(Some(payload))` wins. Custom envelopes implemented in Python follow the same
-//! protocol (see `python/fanferro/envelopes.py`).
+//! protocol (see `python/fanferro/envelopes/__init__.py`).
 
 mod cloudevents_json;
 mod cloudevents_proto;
 mod raw;
+mod tomodachi;
 
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -23,9 +26,14 @@ use std::sync::Arc;
 pub use cloudevents_json::{CLOUDEVENTS_JSON_CONTENT_TYPE, CloudEventsJson};
 pub use cloudevents_proto::{CLOUDEVENTS_PROTOBUF_CONTENT_TYPE, CloudEventsProtobuf};
 pub use raw::{IMPLICIT_CONTENT_TYPE, RawEnvelope};
+pub use tomodachi::{
+    TOMODACHI_COMPRESS_THRESHOLD, TOMODACHI_JSON_PROTOCOL_VERSION, TOMODACHI_PROTOBUF_PROTOCOL_VERSION,
+    TomodachiDestination, TomodachiJson, TomodachiProtobuf, decode_tomodachi_topic,
+};
 
 use crate::error::{Error, Result};
-use crate::types::{AttributeValue, MessageAttributes, Payload, WireMessage, reserved};
+use crate::types::attributes::validate_attribute_name;
+use crate::types::{AttributeValue, HeaderValue, Headers, MessageAttributes, Payload, WireMessage, reserved};
 
 /// Message type used when a payload has none (CloudEvents requires a type).
 pub const DEFAULT_MESSAGE_TYPE: &str = "message";
@@ -140,6 +148,20 @@ pub(crate) fn insert_envelope_attributes(
     {
         attributes.insert(name.to_string(), AttributeValue::string(message_type));
     }
+}
+
+/// Message attributes carrying payload headers, for envelopes without room for them in the body.
+pub(crate) fn header_attributes(headers: &Headers) -> Result<MessageAttributes> {
+    let mut attributes = MessageAttributes::new();
+    for (name, value) in headers {
+        validate_attribute_name(name)?;
+        let attribute = match value {
+            HeaderValue::Integer(number) => AttributeValue::number(number.to_string()),
+            other => AttributeValue::string(other.to_text()),
+        };
+        attributes.insert(name.clone(), attribute);
+    }
+    Ok(attributes)
 }
 
 /// Default name of the promoted message type attribute.

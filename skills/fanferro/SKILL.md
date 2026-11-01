@@ -27,7 +27,9 @@ in code: `await dlq.peek()`, `await dlq.redrive()`).
 7. Business events from DB writes go through the transactional outbox (`topic.prepare()` + `fanferro.outbox.OutboxRelay`).
 8. ≤ 10 message attributes (fanferro uses 1-2, +1-2 for tracing); `fanferro.*` names are reserved.
    Messages are raw JSON bodies by default; opt into CloudEvents with
-   `Client(envelope=fanferro.envelopes.CloudEvents())`.
+   `Client(envelope=fanferro.envelopes.CloudEvents())`. tomodachi services: envelopes
+   `fanferro.envelopes.compat.TomodachiJSON()`/`TomodachiProtobuf()` (also in `accept_envelopes`,
+   before `Raw`); the tomodachi topic is the message type.
 9. Tests: `fanferro.testing.memory_client()` + `consumer.run_until_idle()`; handler unit tests with
    `fanferro.testing.build_message(obj, attempt=..., topic=...)`, routers and outcomes with
    `await fanferro.testing.dispatch(router, obj)`; end-to-end against MiniStack (`endpoint_url=http://localhost:4566`).

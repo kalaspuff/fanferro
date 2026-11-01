@@ -58,6 +58,7 @@ crossing service boundaries.
 | `envelopes.Raw()` (default) | the payload bytes (e.g. the JSON document) | `fanferro.id`, `fanferro.type` (typed messages), `content-type` (non-JSON payloads) |
 | `envelopes.CloudEvents()` | CloudEvents 1.0 JSON; JSON data embedded verbatim | `content-type`, `fanferro.type` |
 | `envelopes.CloudEventsProtobuf()` | CloudEvents 1.0 protobuf (base64 on the wire) | `content-type`, `fanferro.type`, `fanferro.encoding` |
+| `envelopes.compat.TomodachiJSON()`, `TomodachiProtobuf()` | tomodachi's envelopes (see [tomodachi services](#tomodachi-services)) | `fanferro.type` |
 
 ```python
 client = fanferro.Client(envelope=fanferro.envelopes.CloudEvents())                  # publish default
@@ -95,6 +96,72 @@ A custom envelope implements `name`, `wrap(payload) -> WireMessage` and
 `examples/custom_envelope_and_codec.py`. When a consumer uses only built-in envelopes, the Rust
 engine unwraps messages while it decodes them, off the event loop; with a custom envelope among
 them, the consumer tries them in Python, in the same order.
+
+## tomodachi services
+
+[tomodachi](https://github.com/kalaspuff/tomodachi) services wrap what they publish to SNS and
+send to SQS in an envelope of their own: `tomodachi.envelope.JsonBase` (a JSON document with the
+service, metadata and the data) or `tomodachi.envelope.ProtobufBase` (the same as a protobuf
+message, base64-encoded). `fanferro.envelopes.compat` has both, implemented in Rust like the
+built-in envelopes (consumers unwrap them in the engine, off the event loop):
+
+| Envelope | tomodachi envelope | Data | Message type |
+| --- | --- | --- | --- |
+| `compat.TomodachiJSON()` | `JsonBase` | JSON (text payloads become JSON strings) | the tomodachi topic |
+| `compat.TomodachiProtobuf()` | `ProtobufBase` | a serialized protobuf message (`application/x-protobuf`) | the tomodachi topic |
+
+```python
+from fanferro.envelopes import default_envelopes
+from fanferro.envelopes.compat import TomodachiJSON, TomodachiProtobuf
+
+client = fanferro.Client(
+    topic_prefix="production-",  # tomodachi's aws_sns_sqs.topic_prefix, if it has one
+    # Before Raw, which accepts any message.
+    accept_envelopes=[TomodachiJSON(), TomodachiProtobuf(), *default_envelopes()],
+)
+client.types.register(OrderCreated, "order-created")  # the tomodachi topic is the message type
+client.types.register(orders_pb2.OrderShipped, "order-shipped")
+
+# A queue of this service, subscribed to the topics tomodachi publishes to.
+client.subscription("order-created", "billing-orders")
+client.subscription("order-shipped", "billing-orders")
+
+# Publishing to topics tomodachi services subscribe to, and to queues they consume.
+invoiced = client.topic("invoice-created", envelope=TomodachiJSON(service_name="billing"))
+legacy_inbox = client.queue("legacy-inbox", envelope=TomodachiJSON(service_name="billing"))
+```
+
+**Consuming.** Both envelopes recognise their messages by `metadata.protocol_version` in the body,
+whether tomodachi published them to a topic (delivered with or without raw message delivery) or
+sent them to a queue (`aws_sns_sqs_send_message`, which wraps the envelope in a document shaped
+like an SNS notification), and read data tomodachi compressed (`base64_gzip_json`, `gzip_proto`,
+and the older `base64` and `base64_gzip_proto`). A message's type is its `metadata.topic`, so
+routes are declared for the topic name (`client.types.register(cls, "topic")` or
+`@fanferro.message_type("topic")`); messages tomodachi sent straight to a queue have no topic and
+reach the default route. `message.id` is the `message_uuid` without the service uuid in front,
+`message.source` the producing service's name and `message.time` its timestamp.
+
+**Publishing.** Messages are written as tomodachi 0.29 writes them: `service` (`service_name`,
+default the message's source, and `service_uuid`, default a UUID per process like a tomodachi
+service's), `message_uuid` (the service uuid, `.` and the fanferro message id, so a fanferro
+consumer reads the same id back), the topic without the client's `topic_prefix` in
+`metadata.topic`, and data of 60,000 bytes or more compressed like tomodachi does
+(`compress_threshold`, `None` to never compress). Messages sent to a queue are wrapped in the
+document tomodachi's consumer expects there. The type is promoted to `fanferro.type`
+(`type_attribute`) for fanferro consumers and SNS filter policies; tomodachi ignores the
+attribute. `TomodachiJSON` refuses binary payloads and `TomodachiProtobuf` JSON and text ones
+(`EnvelopeError`), so a message is not published in a form the other side cannot parse.
+
+* tomodachi reads the body of SNS notifications: queues tomodachi subscribes to a topic have no raw
+  message delivery, and a queue fanferro subscribes on a tomodachi service's behalf must have none
+  either (`raw_message_delivery=False`). fanferro consumers read both.
+* Topic names: tomodachi 0.29 allows letters, digits, `-` and `_` only, which are the same on
+  SNS. Older versions accepted other characters and encoded them (`order.created` is the topic
+  `order___2e_created`): `compat.tomodachi_topic("order.created")` gives that name.
+* Trace context travels in the `traceparent` message attribute, which tomodachi's OpenTelemetry
+  instrumentation reads and writes too.
+* tomodachi does not read claim checks: do not offload payloads (`large_payloads`) of messages for
+  tomodachi services; compression keeps most of them within the SNS limit.
 
 ## Binary data on SQS
 
