@@ -83,10 +83,9 @@ import fanferro
 from fanferro import aws
 
 client = fanferro.Client()
-events = client.queue("aws-events")
-client.subscription("bucket-events", events)   # the topic S3 sends bucket notifications to
-client.subscription("ses-feedback", events)    # the topic SES sends notifications and events to
-consumer = client.consumer(events)
+# The queue is assumed to be subscribed to the topics S3 and SES send to by your
+# infrastructure as code (Terraform, say).
+consumer = client.consumer(client.queue("aws-events"))
 
 
 @consumer.route
