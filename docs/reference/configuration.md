@@ -170,7 +170,7 @@ envelope, AWS trace header), `attribute_keys` (`traceparent`, `tracestate`), `pr
 `AwsRetry`: `max_attempts` (5), `mode` (`"standard"`), `initial_backoff` (0.2), `max_backoff` (20.0).
 
 `Timeouts`: `connect` (3.1), `read` (10.0: until the response starts; long polls get at least
-their wait time plus 15 s, large uploads one more second per 64 KiB), `operation`, `attempt`
+their wait time plus 15 s, large uploads one more second per 64 KiB, rounded up to a power of two seconds), `operation`, `attempt`
 (`None`: none).
 
 ## Environment variables
