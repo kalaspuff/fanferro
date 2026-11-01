@@ -5,8 +5,8 @@
 use std::sync::Arc;
 
 use fanferro_core::envelope::{
-    AwsNotifications, CloudEventsJson, CloudEventsProtobuf, Envelope, IMPLICIT_CONTENT_TYPE, RawEnvelope,
-    TOMODACHI_COMPRESS_THRESHOLD, TomodachiDestination, TomodachiJson, TomodachiProtobuf,
+    AwsNotifications, CloudEventsJson, CloudEventsProtobuf, Envelope, IMPLICIT_CONTENT_TYPE, MetadataProtobuf,
+    RawEnvelope, TOMODACHI_COMPRESS_THRESHOLD, TomodachiDestination, TomodachiJson, TomodachiProtobuf,
 };
 use pyo3::prelude::*;
 
@@ -37,6 +37,9 @@ pub fn builtin(envelope: &Bound<'_, PyAny>) -> Option<Arc<dyn Envelope>> {
         return Some(Arc::new(envelope.get().inner.clone()));
     }
     if let Ok(envelope) = envelope.cast::<PyTomodachiProtobuf>() {
+        return Some(Arc::new(envelope.get().inner.clone()));
+    }
+    if let Ok(envelope) = envelope.cast::<PyMetadataProtobuf>() {
         return Some(Arc::new(envelope.get().inner.clone()));
     }
     if envelope.cast::<PyAwsNotifications>().is_ok() {
@@ -362,6 +365,162 @@ tomodachi_envelope!(
     "The protobuf envelope of tomodachi services (`tomodachi.envelope.ProtobufBase`).",
     "tomodachi-protobuf"
 );
+
+/// A protobuf envelope of data and a metadata message, for tomodachi services that use one.
+///
+/// Equal when the settings are equal and the `correlation_id` function is the same object.
+#[pyclass(name = "MetadataProtobufEnvelope", module = "fanferro._core", frozen)]
+pub struct PyMetadataProtobuf {
+    inner: MetadataProtobuf,
+    correlation_id: Option<Py<PyAny>>,
+}
+
+#[pymethods]
+impl PyMetadataProtobuf {
+    #[new]
+    #[pyo3(signature = (envelope, *, version=None, service_name=None, correlation_id=None, generate_missing_correlation_id=true, type_attribute=type_attr(), compress_threshold=threshold()))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        envelope: String,
+        version: Option<String>,
+        service_name: Option<String>,
+        correlation_id: Option<Bound<'_, PyAny>>,
+        generate_missing_correlation_id: bool,
+        type_attribute: Option<String>,
+        compress_threshold: Option<i64>,
+    ) -> PyResult<Self> {
+        let compress_threshold = checked_compress_threshold("MetadataProtobufEnvelope", compress_threshold)?;
+        if let Some(function) = &correlation_id
+            && !function.is_callable()
+        {
+            return Err(ConfigurationError::new_err(format!(
+                "correlation_id must be a function returning the correlation id of a message being published (or \
+                 None), not {}",
+                function.get_type().name()?
+            )));
+        }
+        let inner = MetadataProtobuf {
+            envelope,
+            version,
+            service_name,
+            type_attribute,
+            compress_threshold,
+            generate_missing_correlation_id,
+        };
+        inner.validate().map_err(|err| ConfigurationError::new_err(err.to_string()))?;
+        Ok(Self { inner, correlation_id: correlation_id.map(Bound::unbind) })
+    }
+
+    /// `"metadata-protobuf"`.
+    #[getter]
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    /// The name incoming messages are recognised by (`metadata.envelope` begins with it).
+    #[getter]
+    fn envelope(&self) -> &str {
+        &self.inner.envelope
+    }
+
+    /// Written after the name and `--` in `metadata.envelope` of published messages.
+    #[getter]
+    fn version(&self) -> Option<&str> {
+        self.inner.version.as_deref()
+    }
+
+    /// `metadata.envelope` of published messages.
+    #[getter]
+    fn marker(&self) -> String {
+        self.inner.marker().into_owned()
+    }
+
+    /// `metadata.origin` of published messages (`None`: the message's source).
+    #[getter]
+    fn service_name(&self) -> Option<&str> {
+        self.inner.service_name.as_deref()
+    }
+
+    /// The function giving the correlation id of a message being published (`None`: none).
+    #[getter]
+    fn correlation_id(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.correlation_id.as_ref().map(|function| function.clone_ref(py))
+    }
+
+    /// Whether incoming messages without a correlation id get one derived from their uuid.
+    #[getter]
+    fn generate_missing_correlation_id(&self) -> bool {
+        self.inner.generate_missing_correlation_id
+    }
+
+    /// Attribute the message type is promoted to (`None` disables it).
+    #[getter]
+    fn type_attribute(&self) -> Option<&str> {
+        self.inner.type_attribute.as_deref()
+    }
+
+    /// Data of more than this many bytes is compressed (`None`: never).
+    #[getter]
+    fn compress_threshold(&self) -> Option<usize> {
+        self.inner.compress_threshold
+    }
+
+    /// Wraps a payload (as published to a topic, without naming it).
+    fn wrap(&self, payload: &Bound<'_, PyPayload>) -> PyResult<PyWireMessage> {
+        wrap(&self.inner, payload)
+    }
+
+    /// Wraps a payload for a destination: a topic (named in `metadata.topic`) or a queue (in
+    /// tomodachi's queue message document).
+    fn wrap_for(&self, payload: &Bound<'_, PyPayload>, kind: &str, name: &str) -> PyResult<PyWireMessage> {
+        let destination = tomodachi_destination(kind, name)?;
+        self.inner.wrap_for(&payload.get().inner, destination).map(|inner| PyWireMessage { inner }).map_err(to_py_err)
+    }
+
+    /// Unwraps a wire message if it is in this envelope's format.
+    fn unwrap(&self, wire: &Bound<'_, PyWireMessage>) -> PyResult<Option<PyPayload>> {
+        unwrap(&self.inner, wire)
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        let Ok(other) = other.cast::<Self>() else {
+            return false;
+        };
+        let other = other.get();
+        let same_function = match (&self.correlation_id, &other.correlation_id) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.is(b),
+            _ => false,
+        };
+        self.inner == other.inner && same_function
+    }
+
+    fn __hash__(&self) -> u64 {
+        let mut hasher = std::hash::DefaultHasher::new();
+        std::hash::Hash::hash(&self.inner, &mut hasher);
+        std::hash::Hasher::finish(&hasher)
+    }
+
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if let Some(function) = &self.correlation_id {
+            visit.call(function)?;
+        }
+        Ok(())
+    }
+
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        let correlation_id = self.correlation_id.as_ref().map(|function| function.bind(py).clone());
+        Ok(Repr::new(py, "MetadataProtobufEnvelope")
+            .field("envelope", self.inner.envelope.as_str())?
+            .field("version", self.inner.version.as_deref())?
+            .field("service_name", self.inner.service_name.as_deref())?
+            .field("correlation_id", correlation_id)?
+            .field("generate_missing_correlation_id", self.inner.generate_missing_correlation_id)?
+            .field("type_attribute", self.inner.type_attribute.as_deref())?
+            .field("compress_threshold", self.inner.compress_threshold)?
+            .finish())
+    }
+}
 
 /// Notifications of AWS services (S3 events, SES notifications), recognised by their body.
 #[pyclass(name = "AwsNotificationsEnvelope", module = "fanferro._core", frozen, eq, hash)]

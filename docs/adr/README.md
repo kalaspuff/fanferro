@@ -21,3 +21,4 @@ Status values: Accepted, Superseded by NNNN, Deprecated.
 | [0013](0013-tomodachi-envelopes.md) | Envelopes of tomodachi services: opt-in, in Rust, destination-aware wrapping, the topic as the message type |
 | [0014](0014-aws-service-notifications.md) | Notifications of AWS services (S3 events, SES email) are recognised and typed by default |
 | [0015](0015-eventbridge-events-are-an-envelope.md) | EventBridge events are unwrapped like an envelope: the detail is the body, the type follows the source |
+| [0016](0016-metadata-protobuf-envelope.md) | A metadata protobuf envelope for tomodachi services with envelopes of their own: the name is a setting, correlation ids are headers |
