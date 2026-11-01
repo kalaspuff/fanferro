@@ -28,7 +28,7 @@ use bytes::Bytes;
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
-use super::{AWS_SES_TYPE_PREFIX, parse_timestamp, snake_case};
+use super::{AWS_SES_TYPE_PREFIX, lambda_invocation_type, parse_timestamp, snake_case};
 use crate::envelope::share;
 use crate::types::{HeaderValue, Headers, Payload};
 
@@ -82,6 +82,14 @@ fn words(text: &str) -> String {
 
 /// The message type of an event of `source` and `detail_type`.
 pub fn message_type(source: &str, detail_type: &str, detail: &str) -> String {
+    // Lambda's destinations send their records with the source `lambda`.
+    if source == "lambda" {
+        match detail_type {
+            "Lambda Function Invocation Result - Success" => return lambda_invocation_type(true).to_string(),
+            "Lambda Function Invocation Result - Failure" => return lambda_invocation_type(false).to_string(),
+            _ => {}
+        }
+    }
     if source == "aws.ses"
         && let Ok(SesDetail { event_type: Some(event_type) }) = serde_json::from_str::<SesDetail<'_>>(detail)
         && !event_type.is_empty()

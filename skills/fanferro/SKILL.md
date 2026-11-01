@@ -34,7 +34,9 @@ in code: `await dlq.peek()`, `await dlq.redrive()`).
    `SesBounceNotification`, `SesComplaintNotification`, `SesDeliveryNotification`. EventBridge
    events: the body is the `detail`; type `aws.<service>.<event>`, or the `detail-type` for other
    sources. Typed: `ScheduledEvent`, `EcsTaskStateChange`, `StepFunctionsExecutionStatusChange`,
-   EC2 Spot/state events, `AutoScalingLifecycleAction`, `HealthEvent`.
+   EC2 Spot/state events, `AutoScalingLifecycleAction`, `HealthEvent`, `CloudWatchAlarm`,
+   `CloudWatchAlarmStateChange`, `LambdaInvocationRecord`; Lambda dead letters are
+   `aws.lambda.dead_letter`.
 9. Tests: `fanferro.testing.memory_client()` + `consumer.run_until_idle()`; handler unit tests with
    `fanferro.testing.build_message(obj, attempt=..., topic=...)`, routers and outcomes with
    `await fanferro.testing.dispatch(router, obj)`; end-to-end against MiniStack (`endpoint_url=http://localhost:4566`).

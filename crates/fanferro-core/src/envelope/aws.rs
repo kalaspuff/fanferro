@@ -14,6 +14,12 @@
 //! events (`aws.autoscaling.ec2_instance_launch_lifecycle_action`, `..._terminate_...`; the hook's
 //! test notification `aws.autoscaling.test_notification`).
 //!
+//! CloudWatch alarms that notify SNS are `aws.cloudwatch.alarm`; the records of asynchronous Lambda
+//! invocations that a destination receives are `aws.lambda.invocation_success` and
+//! `aws.lambda.invocation_failure` (through EventBridge too), and events a Lambda function sent to
+//! its dead-letter queue (recognised by the `RequestID`, `ErrorCode` and `ErrorMessage`
+//! attributes Lambda adds) `aws.lambda.dead_letter`.
+//!
 //! SES types are `aws.ses.` and the snake-cased event type: `aws.ses.complaint`,
 //! `aws.ses.delivery`, `aws.ses.delivery_delay`, `aws.ses.rendering_failure`, `aws.ses.received`...
 //! The body is the payload as it is (JSON); the event time is the message time.
@@ -38,6 +44,15 @@ pub const AWS_S3_EVENT_TYPE: &str = "aws.s3.event";
 /// Prefix of the message types of SES notifications (`aws.ses.bounce`, ...).
 pub const AWS_SES_TYPE_PREFIX: &str = "aws.ses.";
 
+/// Message type of CloudWatch alarm notifications sent to SNS.
+pub const AWS_CLOUDWATCH_ALARM_TYPE: &str = "aws.cloudwatch.alarm";
+
+/// Message type of events an asynchronously invoked Lambda function sent to its dead-letter queue.
+pub const AWS_LAMBDA_DEAD_LETTER_TYPE: &str = "aws.lambda.dead_letter";
+
+/// Message attributes Lambda adds to the events it sends to a dead-letter queue.
+const LAMBDA_DEAD_LETTER_ATTRIBUTES: [&str; 3] = ["RequestID", "ErrorCode", "ErrorMessage"];
+
 const JSON_CONTENT_TYPE: &str = "application/json";
 
 /// Recognises notifications that AWS services send to SNS and SQS (S3 events, SES notifications).
@@ -55,14 +70,15 @@ fn parse_time(value: Option<&Value>) -> Option<OffsetDateTime> {
     parse_timestamp(value?.as_str()?)
 }
 
-/// An RFC 3339 timestamp, or one in SES's `2018-10-08T14:05:45 +0000` format.
+/// An RFC 3339 timestamp, or one with an offset without a colon, as SES
+/// (`2018-10-08T14:05:45 +0000`) and CloudWatch (`2019-10-02T17:04:40.989+0000`) write them.
 pub(crate) fn parse_timestamp(text: &str) -> Option<OffsetDateTime> {
     OffsetDateTime::parse(text, &Rfc3339).ok().or_else(|| {
-        let (stamp, offset) = text.rsplit_once(' ')?;
-        let offset =
-            offset.strip_prefix('+').map(|o| ('+', o)).or_else(|| offset.strip_prefix('-').map(|o| ('-', o)))?;
-        let (hours, minutes) = (offset.1.get(..2)?, offset.1.get(2..)?);
-        OffsetDateTime::parse(&format!("{stamp}{}{hours}:{minutes}", offset.0), &Rfc3339).ok()
+        let split = text.len().checked_sub(5)?;
+        let (stamp, offset) = (text.get(..split)?.trim_end(), text.get(split..)?);
+        let sign = offset.chars().next().filter(|c| matches!(c, '+' | '-'))?;
+        let (hours, minutes) = (offset.get(1..3)?, offset.get(3..)?);
+        OffsetDateTime::parse(&format!("{stamp}{sign}{hours}:{minutes}"), &Rfc3339).ok()
     })
 }
 
@@ -149,6 +165,35 @@ fn autoscaling_notification(document: &Value) -> Option<Notification> {
     })
 }
 
+/// A CloudWatch alarm's notification to an SNS topic.
+fn cloudwatch_alarm(document: &Value) -> Option<Notification> {
+    document.get("AlarmName")?.as_str()?;
+    document.get("NewStateValue")?.as_str()?;
+    Some(Notification {
+        message_type: AWS_CLOUDWATCH_ALARM_TYPE.to_string(),
+        source: "aws.cloudwatch",
+        time: parse_time(document.get("StateChangeTime")),
+    })
+}
+
+/// The record of an asynchronous Lambda invocation that a destination (SQS or SNS) received, or
+/// of a batch an event source mapping's on-failure destination received.
+fn lambda_invocation_record(document: &Value) -> Option<Notification> {
+    let context = document.get("requestContext")?;
+    context.get("functionArn")?.as_str()?;
+    let condition = context.get("condition")?.as_str()?;
+    Some(Notification {
+        message_type: lambda_invocation_type(condition == "Success").to_string(),
+        source: "aws.lambda",
+        time: parse_time(document.get("timestamp")),
+    })
+}
+
+/// The message type of Lambda invocation records.
+pub(crate) fn lambda_invocation_type(success: bool) -> &'static str {
+    if success { "aws.lambda.invocation_success" } else { "aws.lambda.invocation_failure" }
+}
+
 fn ses_notification(document: &Value) -> Option<Notification> {
     let mail = document.get("mail").filter(|mail| mail.is_object())?;
     let kind = document
@@ -188,6 +233,22 @@ impl Envelope for AwsNotifications {
         if wire.attributes.contains_key(reserved::MESSAGE_ID) || wire.attributes.contains_key(reserved::MESSAGE_TYPE) {
             return Ok(None);
         }
+        // An event a Lambda function failed to process, as it was sent to the function: its body
+        // is whatever the function received (even an S3 notification), its type says it failed.
+        if LAMBDA_DEAD_LETTER_ATTRIBUTES.iter().all(|name| wire.attributes.contains_key(*name)) {
+            let json = serde_json::from_slice::<serde::de::IgnoredAny>(&wire.body).is_ok();
+            return Ok(Some(Payload {
+                data: Bytes::clone(&wire.body),
+                content_type: json.then(|| JSON_CONTENT_TYPE.to_string()),
+                message_type: Some(AWS_LAMBDA_DEAD_LETTER_TYPE.to_string()),
+                id: None,
+                time: None,
+                source: Some("aws.lambda".to_string()),
+                subject: None,
+                data_schema: None,
+                headers: Headers::new(),
+            }));
+        }
         let body = wire.body.trim_ascii_start();
         if !body.starts_with(b"{") {
             return Ok(None);
@@ -201,7 +262,9 @@ impl Envelope for AwsNotifications {
         let s3 = (find(b"\"Records\"") && find(b"\"aws:s3\"")) || find(b"\"s3:TestEvent\"");
         let ses = find(b"\"mail\"") && (find(b"\"notificationType\"") || find(b"\"eventType\""));
         let autoscaling = find(b"\"AWS Auto Scaling\"");
-        if !s3 && !ses && !autoscaling {
+        let alarm = find(b"\"NewStateValue\"") && find(b"\"AlarmName\"");
+        let lambda = find(b"\"requestContext\"") && find(b"\"functionArn\"");
+        if !s3 && !ses && !autoscaling && !alarm && !lambda {
             return Ok(None);
         }
         let Ok(document) = serde_json::from_slice::<Value>(&wire.body) else {
@@ -209,7 +272,9 @@ impl Envelope for AwsNotifications {
         };
         let notification = if s3 { s3_notification(&document) } else { None }
             .or_else(|| if ses { ses_notification(&document) } else { None })
-            .or_else(|| if autoscaling { autoscaling_notification(&document) } else { None });
+            .or_else(|| if autoscaling { autoscaling_notification(&document) } else { None })
+            .or_else(|| if alarm { cloudwatch_alarm(&document) } else { None })
+            .or_else(|| if lambda { lambda_invocation_record(&document) } else { None });
         Ok(notification.map(|notification| Payload {
             data: Bytes::clone(&wire.body),
             content_type: Some(JSON_CONTENT_TYPE.to_string()),

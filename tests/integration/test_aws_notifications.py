@@ -17,6 +17,7 @@ from fanferro import aws
 from fanferro.envelopes import AwsNotifications
 from tests.aws_samples import (
     BOUNCE,
+    CLOUDWATCH_ALARM,
     COMPLAINT,
     DELIVERY,
     EVENTBRIDGE_S3_CREATED,
@@ -164,3 +165,45 @@ async def test_eventbridge_events_reach_handlers_of_their_detail(client_factory:
     assert {message.type for message in uploads} == {"aws.s3.object_created"}
     assert uploads[0].body.object.key == "example-key"
     assert all(notification.bounce.permanent for notification in bounces)
+
+
+async def test_alarms_and_lambda_dead_letters(client_factory: ClientFactory, name: Any) -> None:
+    """An alarm's notification through SNS, and Lambda's dead letters with their attributes."""
+    client = client_factory()
+    topic_name, queue_name = name("alarms"), name("alarms-dlq")
+    topic = client.topic(topic_name)
+    queue = client.queue(queue_name)
+    client.subscription(topic_name, queue_name, raw_message_delivery=False)
+    alarms: list[aws.CloudWatchAlarm] = []
+    failures: list[tuple[InvoicePaid, aws.LambdaDeadLetter | None]] = []
+    router = fanferro.Router()
+
+    @router.route
+    async def on_alarm(alarm: aws.CloudWatchAlarm) -> None:
+        alarms.append(alarm)
+
+    @router.route("aws.lambda.dead_letter")
+    async def on_failed(message: fanferro.Message[InvoicePaid]) -> None:
+        failures.append((message.body, aws.LambdaDeadLetter.of(message)))
+
+    dead_letter = {"RequestID": "e4b46cbf", "ErrorCode": 200, "ErrorMessage": "Process exited"}
+    async with client:
+        await topic.publish(json.dumps(CLOUDWATCH_ALARM), envelope=AwsNotifications())
+        # A dead-letter topic's subscriber gets the attributes inside the SNS notification.
+        await topic.publish(
+            json.dumps({"invoice_id": "i-2", "amount": 1.0}), envelope=AwsNotifications(), attributes=dead_letter
+        )
+        await queue.send(
+            json.dumps({"invoice_id": "i-1", "amount": 9.5}), envelope=AwsNotifications(), attributes=dead_letter
+        )
+        await consume_until(
+            client.consumer(queue, router, wait_time=1), lambda: len(alarms) == 1 and len(failures) == 2
+        )
+
+    assert alarms[0].alarming
+    assert alarms[0].trigger is not None
+    assert alarms[0].trigger.metric_name == "CPUUtilization"
+    assert sorted(body.invoice_id for body, _ in failures) == ["i-1", "i-2"]
+    assert {failure for _, failure in failures} == {
+        aws.LambdaDeadLetter(request_id="e4b46cbf", error_code=200, error_message="Process exited")
+    }

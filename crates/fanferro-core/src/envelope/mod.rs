@@ -25,7 +25,9 @@ mod tomodachi;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-pub use aws::{AWS_S3_EVENT_TYPE, AWS_SES_TYPE_PREFIX, AwsNotifications};
+pub use aws::{
+    AWS_CLOUDWATCH_ALARM_TYPE, AWS_LAMBDA_DEAD_LETTER_TYPE, AWS_S3_EVENT_TYPE, AWS_SES_TYPE_PREFIX, AwsNotifications,
+};
 pub use cloudevents_json::{CLOUDEVENTS_JSON_CONTENT_TYPE, CloudEventsJson};
 pub use cloudevents_proto::{CLOUDEVENTS_PROTOBUF_CONTENT_TYPE, CloudEventsProtobuf};
 pub use raw::{IMPLICIT_CONTENT_TYPE, RawEnvelope};
