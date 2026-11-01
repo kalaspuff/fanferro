@@ -839,7 +839,7 @@ class Consumer:
                 self._release_waiting_messages()
             # Handlers keep running while a final long poll completes.
             await self._drain()
-            await stop_receiving
+            await self._wait_for_receiving(stop_receiving)
             buffered = engine.drain_buffered()
             deadline = self._drain_deadline
             if not policy.release_prefetched and (deadline is None or time.monotonic() < deadline):
@@ -866,6 +866,21 @@ class Consumer:
             self._client._unregister_consumer(self)
             self._client._release_pump()
             self._state = "stopped"
+
+    async def _wait_for_receiving(self, stop_receiving: asyncio.Future[None]) -> None:
+        """Waits for receiving to stop; past the drain deadline, aborts it.
+
+        A stop that does not abort receiving waits for a final long poll and for the payload
+        downloads of received messages, which can take minutes (#188): the drain deadline bounds
+        that too, and the messages still being decoded are released.
+        """
+        deadline = self._drain_deadline
+        if not self._aborting and deadline is not None and not stop_receiving.done():
+            done, _pending = await asyncio.wait({stop_receiving}, timeout=max(deadline - time.monotonic(), 0))
+            if not done and not self._aborting and self._engine is not None:
+                self._aborting = True
+                self._abort_receiving = asyncio.ensure_future(self._engine.stop_receiving(True))
+        await stop_receiving
 
     def _release_waiting_messages(self) -> None:
         """Releases the prefetched messages that wait for a handler slot (stopping: they never start)."""

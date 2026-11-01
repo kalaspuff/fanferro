@@ -74,6 +74,43 @@ impl ObjectStoreApi for SlowUploads {
     }
 }
 
+/// S3 whose downloads take `delay` each (a large payload over a slow link).
+#[derive(Debug)]
+pub(crate) struct SlowDownloads {
+    inner: Arc<dyn ObjectStoreApi>,
+    delay: Duration,
+    /// `GetObject` calls.
+    pub(crate) gets: Overlap,
+}
+
+impl SlowDownloads {
+    pub(crate) fn new(inner: Arc<dyn ObjectStoreApi>, delay: Duration) -> Self {
+        Self { inner, delay, gets: Overlap::default() }
+    }
+}
+
+#[async_trait]
+impl ObjectStoreApi for SlowDownloads {
+    async fn put_object(&self, bucket: &str, key: &str, data: Bytes, options: &PutOptions) -> Result<()> {
+        self.inner.put_object(bucket, key, data, options).await
+    }
+    async fn get_object(&self, bucket: &str, key: &str, max_bytes: usize) -> Result<Bytes> {
+        self.gets.around(self.delay, self.inner.get_object(bucket, key, max_bytes)).await
+    }
+    async fn delete_object(&self, bucket: &str, key: &str) -> Result<()> {
+        self.inner.delete_object(bucket, key).await
+    }
+    async fn presign_get(&self, bucket: &str, key: &str, ttl: Duration) -> Result<String> {
+        self.inner.presign_get(bucket, key, ttl).await
+    }
+    async fn bucket_exists(&self, bucket: &str) -> Result<bool> {
+        self.inner.bucket_exists(bucket).await
+    }
+    async fn create_bucket(&self, bucket: &str) -> Result<()> {
+        self.inner.create_bucket(bucket).await
+    }
+}
+
 /// SQS whose first `stuck` visibility changes never complete (a connection that stopped
 /// answering), or complete only after a delay (a slow connection: the change still applies).
 #[derive(Debug)]

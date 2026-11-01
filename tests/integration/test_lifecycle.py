@@ -965,3 +965,44 @@ async def test_a_message_sent_after_an_aborted_poll_waits_for_its_visibility_tim
         await consume_until(second, lambda: len(received) == 1, timeout=15)
     assert time.monotonic() - started >= 1.5, "taken by the aborted poll, then visible again"
     assert received[0].receive_count == 2
+
+
+class _SlowDecodingEngine:
+    """Delegates to a consumer's engine, but a stop that does not abort receiving hangs (a payload
+    download that takes minutes) until a stop that aborts comes."""
+
+    def __init__(self, engine: Any) -> None:
+        self._engine = engine
+        self.calls: list[bool] = []
+        self._aborted = asyncio.Event()
+
+    def __getattr__(self, attribute: str) -> Any:
+        return getattr(self._engine, attribute)
+
+    async def stop_receiving(self, abort: bool) -> None:
+        self.calls.append(abort)
+        if abort:
+            self._aborted.set()
+        else:
+            await self._aborted.wait()
+        await self._engine.stop_receiving(abort)
+
+
+async def test_the_drain_deadline_cuts_short_a_stop_waiting_for_downloads(
+    memory_client: fanferro.Client, name: Any
+) -> None:
+    # #188: a stop without abort_receives waited for claim-check downloads without a bound.
+    queue = memory_client.queue(name("slow-downloads"))
+    consumer = memory_client.consumer(queue, wait_time=1, shutdown=fanferro.ShutdownPolicy(abort_receives=False))
+
+    @consumer.route(OrderCreated)
+    async def handle(order: OrderCreated) -> None: ...
+
+    async with memory_client:
+        await consumer.start()
+        engine = consumer._engine = _SlowDecodingEngine(consumer._engine)
+        try:
+            await asyncio.wait_for(asyncio.shield(consumer.stop(drain_timeout=0.2)), timeout=5)
+        finally:
+            engine._aborted.set()  # lets a stop that waits forever end, so that the test fails
+    assert engine.calls == [False, True], "the drain deadline aborted receiving"

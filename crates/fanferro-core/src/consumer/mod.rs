@@ -444,7 +444,16 @@ impl EngineInner {
         self.decoders.spawn(async move {
             // Decoded concurrently (claim-check downloads overlap), handed over in order and
             // together, so the dispatcher sees the whole receive batch at once.
-            let decoded = futures::future::join_all(leased.into_iter().map(|lease| inner.decode(lease))).await;
+            let decode = futures::future::join_all(leased.into_iter().map(|lease| inner.decode(lease)));
+            // A stop that aborts receiving does not wait for downloads (which may take minutes,
+            // past a container's grace period, #188): dropping the decodes drops their leases,
+            // which releases the messages (or leaves them, after `leave_unsettled`).
+            let abort = inner.abort_token.clone();
+            let decoded = tokio::select! {
+                biased;
+                decoded = decode => decoded,
+                () = abort.cancelled() => return,
+            };
             let deliveries: Vec<Delivery> = decoded.into_iter().flatten().collect();
             if deliveries.is_empty() {
                 return;
@@ -809,7 +818,8 @@ impl ConsumerEngine {
     }
 
     /// Stops receiving and waits until every received message has been decoded into the
-    /// delivery buffer.
+    /// delivery buffer (with `abort`, messages still being decoded, such as payloads being
+    /// downloaded, are released instead).
     ///
     /// By default a long poll that is in flight is allowed to finish (at most `wait_time`) and
     /// whatever it returns is released immediately. Aborting it instead (`abort = true`) stops

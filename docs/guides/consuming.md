@@ -214,7 +214,11 @@ Shutdown follows `ShutdownPolicy`:
    shutdown stay invisible until SQS ended the abandoned poll, so it cannot capture them (SQS may
    still hand that poll up to `batch_size` new messages; they are redelivered after their
    visibility timeout). With `abort_receives=False` the poll may finish instead (≤ `wait_time`) and
-   its messages are released right away - slower to stop, nothing delayed (ADR 0007, ADR 0008);
+   its messages are released right away - slower to stop, nothing delayed (ADR 0007, ADR 0008).
+   Messages whose payloads are still being downloaded from S3 are released when the poll is
+   aborted; otherwise the stop waits for their downloads until `drain_timeout` has passed, then
+   aborts receiving and releases them, so that a large payload cannot outlast a container's grace
+   period;
 2. prefetched messages are released at once (`release_prefetched`), also those that wait for a
    handler slot (with `release_prefetched=False` they are processed during the drain, and those
    not dispatched yet when `drain_timeout` has passed count as unfinished); in-flight handlers get `drain_timeout` seconds (`None` = forever) with

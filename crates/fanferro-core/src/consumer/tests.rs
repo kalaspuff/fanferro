@@ -6,7 +6,7 @@ use bytes::Bytes;
 
 use super::*;
 use crate::backend::memory::MemoryBroker;
-use crate::backend::testing::{SlowBatches, SlowReceives, StuckVisibility};
+use crate::backend::testing::{SlowBatches, SlowDownloads, SlowReceives, StuckVisibility};
 use crate::backend::{SendRequest, StringMap};
 use crate::client::ClientConfig;
 use crate::events::EventKind;
@@ -1346,6 +1346,107 @@ async fn unwraps_sns_notifications_and_resolves_claim_checks() {
     assert!(delivery.sns.as_ref().unwrap().topic_arn.ends_with(":events"));
     delivery.lease.ack().await.unwrap();
     engine.close(true).await;
+}
+
+/// A client whose payload downloads take two minutes, with one offloaded message in `work`.
+async fn slow_download_fixture() -> (Fixture, Arc<SlowDownloads>) {
+    let broker = MemoryBroker::new("us-east-1", "000000000000");
+    let mut backend = broker.backend();
+    let slow = Arc::new(SlowDownloads::new(backend.objects.clone(), Duration::from_secs(120)));
+    backend.objects = slow.clone();
+    let offload = OffloadSettings {
+        bucket: "payloads".into(),
+        key_prefix: "p/".into(),
+        threshold: 64,
+        always: true,
+        reference: ReferenceMode::S3,
+        presign_ttl: 60.0,
+        format: PointerFormat::Fanferro,
+        encryption: EncryptionSettings::BucketDefault,
+        storage_class: None,
+    };
+    let client =
+        Client::with_backend(backend, ClientConfig { offload: Some(offload), ..ClientConfig::default() }).unwrap();
+    client.backend().objects.create_bucket("payloads").await.unwrap();
+    let url = client.backend().sqs.create_queue("work", &StringMap::new(), &StringMap::new()).await.unwrap();
+    client
+        .publish(
+            &Destination::Queue {
+                url: url.clone(),
+                fifo: false,
+                content_based_deduplication: false,
+                max_message_size: None,
+            },
+            OutgoingMessage {
+                wire: WireMessage::new(Bytes::from("large".repeat(100)), MessageAttributes::new()),
+                message_id: "m1".into(),
+                ..OutgoingMessage::default()
+            },
+        )
+        .await
+        .unwrap();
+    (Fixture { broker, client, url }, slow)
+}
+
+/// Waits until a download started.
+async fn download_started(slow: &SlowDownloads) {
+    for _ in 0..100 {
+        if slow.gets.active() > 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("no download started");
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_aborting_stop_releases_messages_whose_payload_is_still_downloading() {
+    // #188: stop_receiving waited for every download, also when it aborted receiving.
+    let (fx, slow) = slow_download_fixture().await;
+    let engine = fx.engine(|_| {});
+    download_started(&slow).await;
+    let started = tokio::time::Instant::now();
+    engine.stop_receiving(true).await;
+    assert!(started.elapsed() < Duration::from_secs(1), "stopped after {:?}", started.elapsed());
+    assert!(engine.drain_buffered().is_empty());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let stored = fx.stored();
+    assert_eq!(stored.len(), 1);
+    assert!(!stored[0].in_flight, "the message is visible again");
+    engine.close(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_graceful_stop_waits_for_downloads_and_hands_the_message_over() {
+    let (fx, slow) = slow_download_fixture().await;
+    let engine = fx.engine(|_| {});
+    download_started(&slow).await;
+    let started = tokio::time::Instant::now();
+    engine.stop_receiving(false).await;
+    assert!(started.elapsed() >= Duration::from_secs(100));
+    let buffered = engine.drain_buffered();
+    assert_eq!(buffered.len(), 1);
+    assert_eq!(body(&buffered[0]), "large".repeat(100));
+    buffered[0].lease.ack().await.unwrap();
+    engine.close(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_abort_cuts_short_a_graceful_stop_waiting_for_a_download() {
+    let (fx, slow) = slow_download_fixture().await;
+    let engine = Arc::new(fx.engine(|_| {}));
+    download_started(&slow).await;
+    let graceful = tokio::spawn({
+        let engine = engine.clone();
+        async move { engine.stop_receiving(false).await }
+    });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(!graceful.is_finished());
+    engine.stop_receiving(true).await;
+    tokio::time::timeout(Duration::from_secs(1), graceful).await.unwrap().unwrap();
+    assert!(engine.drain_buffered().is_empty());
+    engine.close(true).await;
+    assert!(!fx.stored()[0].in_flight, "the message is visible again");
 }
 
 #[tokio::test(start_paused = true)]
