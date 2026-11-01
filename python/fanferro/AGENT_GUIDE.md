@@ -94,6 +94,7 @@ result = await events.publish(InvoicePaid(invoice_id="inv-1", amount_cents=1299)
 | Settle manually | `await message.ack() / retry(delay=) / requeue() / dead_letter(reason) / release() / discard(reason)` (settles when called; await the returned `Settlement` for SQS's confirmation) |
 | Dead-letter queue | `await queue.dead_letter_queue.peek(limit=20)` (`message.dead_letter_info`, `message.source`), `await dlq.redrive(max_per_second=50)` back to each message's source with a fresh retry budget (`to=`, `limit=`, `reset_attempts=False`); shell: `fanferro dlq stats\|peek\|redrive --queue-url URL` |
 | Observe | `client.on("message.*", hook)`, `LoggingConfig(...)`, `Telemetry(...)`, `client.metrics().consumers[name].engine.messages_acked`, `consumer.stats().processed`, `(await queue.approximate_count()).visible` (typed objects; `.as_dict()` for a dict) |
+| Health checks | `client.health().healthy()` (liveness), `.ready()` (readiness), `.problems()` (why not); `consumer.health().last_error`, `.receive_gap`; `max_receive_failures=N` makes `run()` raise a receive error that is not retryable instead of retrying forever |
 | Test | `fanferro.testing.memory_client()`, `fanferro.testing.build_message(obj)`, `consumer.run_until_idle()` |
 | Consume in AWS Lambda | `handler = fanferro.aws_lambda.sqs_handler(client, router, queue=queue)` (SQS event source mapping with `ReportBatchItemFailures`); test with `fanferro.testing.invoke_sqs_handler(handler, queue)` |
 
@@ -105,7 +106,7 @@ Consumer options: `concurrency`, `prefetch`, `batch_size`, `min_receive_batch`,
 `receive_batch_wait`, `wait_time`, `pollers`, `max_pollers`, `rate_limit`, `visibility_timeout`,
 `heartbeat`, `retry`, `dead_letter`, `shutdown`, `handler_timeout`, `ordering`, `strict_ordering`,
 `envelopes`, `middleware`, `auto_ack`, `settle_linger`, `sns_unwrap`, `auto_confirm_subscriptions`,
-`delete_offloaded_payloads`, `name`. For throughput, raise `concurrency`: receives follow (extra
+`delete_offloaded_payloads`, `max_receive_failures`, `name`. For throughput, raise `concurrency`: receives follow (extra
 receive loops run while receives come back full), so `pollers` rarely needs changing. Options and policy fields in seconds (and `delay=` in
 publishes, `Retry`, `Requeue` and settlements) also take a `timedelta`.
 

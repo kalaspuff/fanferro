@@ -32,7 +32,7 @@ from fanferro.provisioning import (
 )
 from fanferro.resources import _UNSET, GroupId, Queue, Subscription, Topic
 from fanferro.routing import Router
-from fanferro.stats import ClientCounters, ClientMetrics
+from fanferro.stats import ClientCounters, ClientHealth, ClientMetrics, ConsumerHealth
 from fanferro.telemetry import Telemetry, TelemetryRuntime, monotonic
 
 if TYPE_CHECKING:
@@ -863,7 +863,7 @@ class Client:
                 ``retry``, ``dead_letter``, ``shutdown``, ``handler_timeout``, ``ordering``,
                 ``strict_ordering``, ``envelopes``, ``middleware``, ``auto_ack``, ``settle_linger``,
                 ``sns_unwrap``, ``auto_confirm_subscriptions``, ``delete_offloaded_payloads``,
-                ``name``.
+                ``max_receive_failures``, ``name``.
         """
         from fanferro.consumer import Consumer
 
@@ -894,7 +894,9 @@ class Client:
         """Runs consumers until SIGINT/SIGTERM or :meth:`stop`, then shuts them down gracefully.
 
         Runs every consumer created by this client unless consumers are given. A second signal (or
-        a second :meth:`stop`) skips the drain: handlers are cancelled and long polls aborted.
+        a second :meth:`stop`) skips the drain: handlers are cancelled and long polls aborted. A
+        consumer that stops by itself because its receives keep failing (``max_receive_failures``)
+        stops the others too, and ``run()`` raises its receive error.
         """
         targets = list(consumers) or list(self._consumers)
         if not targets:
@@ -912,6 +914,9 @@ class Client:
             stop.set()
 
         self._stop_request = request_stop
+        # A consumer that stops by itself stops the others gracefully, never like a second signal.
+        self._stop_gracefully = stop.set
+        self._run_targets = targets
         loop = asyncio.get_running_loop()
         installed: list[signal.Signals] = []
         if install_signal_handlers:
@@ -940,8 +945,24 @@ class Client:
                 for sig in installed:
                     loop.remove_signal_handler(sig)
                 self._stop_request = None
+                self._stop_gracefully = None
+                self._run_targets = []
+        for consumer in started:
+            if consumer._failure is not None:
+                raise consumer._failure
 
     _stop_request: Callable[[], None] | None = None
+    _stop_gracefully: Callable[[], None] | None = None
+    _run_targets: list[Consumer] = []  # noqa: RUF012 - replaced, never mutated
+
+    def _consumer_failed(self, consumer: Consumer) -> None:
+        """A consumer stopped by itself (``max_receive_failures``): :meth:`run` stops the others.
+
+        Gracefully, also when another consumer failed or a signal arrived before: only a second
+        signal (or :meth:`stop`) skips the drain.
+        """
+        if self._stop_gracefully is not None and consumer in self._run_targets:
+            self._stop_gracefully()
 
     def stop(self) -> None:
         """Asks :meth:`run` to shut down."""
@@ -1095,6 +1116,23 @@ class Client:
             client=ClientCounters._from_core(self._core_client.metrics() if self._core_client is not None else None),
             consumers={consumer.name: consumer.stats() for consumer in self._consumers},
         )
+
+    def health(self) -> ClientHealth:
+        """Liveness and readiness of every consumer this client created, for health checks.
+
+        ``client.health().healthy()`` (liveness), ``ready()`` (readiness) and ``problems()`` (what
+        is wrong); see :class:`~fanferro.stats.ClientHealth`. Cheap: no AWS call; safe to call from
+        another thread.
+        """
+        consumers: dict[str, ConsumerHealth] = {}
+        for consumer in self._consumers:
+            # Names need not be unique (they default to the queue's): none may hide another.
+            key, count = consumer.name, 1
+            while key in consumers:
+                count += 1
+                key = f"{consumer.name}#{count}"
+            consumers[key] = consumer.health()
+        return ClientHealth(consumers=consumers)
 
     async def account(self) -> str:
         """The AWS account id of the configured credentials."""

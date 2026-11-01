@@ -25,6 +25,9 @@ pub(crate) async fn poll_loop(slot: PollerSlot, extra: bool) {
     let mut consecutive_failures: u32 = 0;
     loop {
         inner.trim_permits();
+        // Waiting for a resume, free slots or the rate limiter: the engine does not want messages
+        // then, which the receive gap leaves out (extra loops wait briefly, if at all).
+        let waiting = (!extra).then(|| inner.not_receiving());
         let permits = if extra {
             if inner.receive_token.is_cancelled() || inner.is_paused() {
                 break;
@@ -46,6 +49,7 @@ pub(crate) async fn poll_loop(slot: PollerSlot, extra: bool) {
                 None => break,
             }
         }
+        drop(waiting);
         let requested = permits.len();
         if inner.is_paused() {
             // Paused while waiting for free slots (or for the rate limiter): wait for the resume.
@@ -93,6 +97,7 @@ pub(crate) async fn poll_loop(slot: PollerSlot, extra: bool) {
         match result {
             Ok(mut messages) => {
                 consecutive_failures = 0;
+                inner.receive_succeeded();
                 if let Some(limiter) = &inner.rate_limiter {
                     limiter.refund(u32::try_from(requested.saturating_sub(messages.len())).unwrap_or(0));
                 }
@@ -138,6 +143,7 @@ pub(crate) async fn poll_loop(slot: PollerSlot, extra: bool) {
                     limiter.refund(u32::try_from(requested).unwrap_or(0));
                 }
                 inner.metrics.receive_errors.inc();
+                inner.receive_failed(&error);
                 let delay = inner.settings.receive_backoff.delay(consecutive_failures);
                 consecutive_failures = consecutive_failures.saturating_add(1);
                 inner.client.events().emit(EventKind::ReceiveFailed, || {

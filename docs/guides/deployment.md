@@ -25,6 +25,77 @@ client.consumer(queue, wait_time=10, shutdown=fanferro.ShutdownPolicy(drain_time
 Kubernetes: set the grace period above that, and avoid sending traffic during termination
 (preStop hooks are not needed for queue consumers).
 
+## Health checks
+
+`consumer.health()` and `client.health()` (every consumer of the client) tell liveness and readiness
+probes, and dashboards, how consumers are doing, without an AWS call:
+
+```python
+health = client.health()            # fanferro.ClientHealth; consumer.health() is a ConsumerHealth
+health.healthy()                    # liveness: restart the process while this stays False
+health.ready()                      # readiness: running, not paused, healthy
+health.problems()                   # why not, e.g. ("consumer orders has received nothing from queue orders for 75 s: 9 receives failed (last: ResourceNotFoundError AWS.SimpleQueueService.NonExistentQueue)",)
+health.consumers["orders"].last_error   # fanferro.ReceiveFailure: error_type, category, code, retryable, at
+json.dumps(health.as_dict())        # times as ISO 8601 strings
+```
+
+A consumer is **healthy** while it is starting, running or stopping and, while it runs:
+
+* a receive succeeded (an empty long poll counts) within `max_receive_gap` (60 s by default). The
+  time it waits for free in-flight slots (handlers keep it busy), the rate limiter or a resume does
+  not count, so busy and paused consumers stay healthy. Receives that keep failing (a deleted
+  queue, revoked credentials, a missing `sqs:ReceiveMessage` permission) make it unhealthy.
+* its dispatcher, which hands messages to handlers on the event loop, ran within `max_dispatch_gap`
+  (30 s by default). It runs at least twice a second while the loop is responsive; a blocking or
+  CPU-bound handler holds it up.
+
+A consumer that was never started, or has stopped, is not healthy. A paused or stopping consumer is
+healthy but not **ready**. Both limits are arguments of `healthy()`, `ready()` and `problems()`.
+
+An HTTP endpoint for Kubernetes or ECS probes needs no web framework:
+
+```python
+async def serve_health(client: fanferro.Client, port: int = 8080) -> asyncio.Server:
+    async def respond(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        request = await reader.readline()                      # b"GET /livez HTTP/1.1"
+        health = client.health()
+        ok = health.ready() if b" /readyz" in request else health.healthy()
+        body = json.dumps({"ok": ok, "problems": health.problems()}).encode()
+        status = b"200 OK" if ok else b"503 Service Unavailable"
+        writer.write(b"HTTP/1.1 " + status + b"\r\nContent-Type: application/json\r\nContent-Length: %d"
+                     b"\r\nConnection: close\r\n\r\n" % len(body) + body)
+        await writer.drain()
+        writer.close()
+
+    return await asyncio.start_server(respond, "0.0.0.0", port)
+```
+
+It answers on the event loop, so a loop blocked for longer than the probe's timeout fails the probe
+by not answering. Where probes run a command instead (ECS container health checks), touch a file
+from a thread while the client is healthy and check its age: `health()` is safe to call from
+another thread, and a thread notices a blocked loop through the dispatch gap.
+
+```python
+def touch_while_healthy(client: fanferro.Client, path: str, stop: threading.Event) -> None:
+    while not stop.wait(5):
+        if client.health().healthy():
+            pathlib.Path(path).touch()
+# healthCheck: ["CMD-SHELL", "test $(( $(date +%s) - $(stat -c %Y /tmp/healthy) )) -lt 30"]
+```
+
+By default a consumer whose receives fail keeps retrying (with backoff up to 30 s), since a queue
+may be recreated or a permission granted, and a probe decides when to restart. To have the process
+end instead, set `max_receive_failures`: after that many failed receives in a row, the last of which
+is not retryable (the queue does not exist, access is denied; throttling and network errors are
+retryable), the consumer emits `consumer.error`, stops gracefully, and `consumer.run()` and
+`client.run()` (which stops its other consumers) raise that error, so the orchestrator restarts the
+task:
+
+```python
+consumer = client.consumer(queue, router, max_receive_failures=5)
+await consumer.run()   # raises fanferro.ResourceNotFoundError once the queue is gone for 5 receives
+```
+
 ## Visibility timeout and heartbeats
 
 Choose a visibility timeout that covers retry delays you want SQS to apply (30-60 s is typical);

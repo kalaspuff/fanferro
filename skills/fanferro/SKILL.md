@@ -36,6 +36,10 @@ in code: `await dlq.peek()`, `await dlq.redrive()`).
     `subscription`/`consumer`/`DeadLetterQueue` get it too); `prefixed=False` for shared resources, passed
     as handles; `queue.name` and events carry the prefixed name. `bucket_prefix=f"{env}-"` prefixes
     `LargePayloads` buckets the same way.
+11. Long-running consumers get liveness/readiness probes from `client.health().healthy()` / `.ready()`
+    (`.problems()` says why not; see the deployment guide's health checks), or
+    `client.consumer(..., max_receive_failures=N)` so `run()` raises once receives keep failing with an
+    error that is not retryable (deleted queue, denied access) and the orchestrator restarts the task.
 
 ## Skeleton
 

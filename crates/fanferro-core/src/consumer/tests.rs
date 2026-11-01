@@ -1845,3 +1845,67 @@ async fn decoding_keeps_the_body_intact_and_shares_a_raw_one() {
     }
     engine.close(true).await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn receive_health_counts_failures_and_resets_on_success() {
+    let fx = fixture(ClientConfig::default()).await;
+    let engine = fx.engine(|_| {});
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let health = engine.receive_health();
+    let first_success = health.last_receive_at.expect("an empty receive is a successful one");
+    assert_eq!(health.consecutive_failures, 0);
+    assert!(health.last_error.is_none());
+    assert!(health.receive_gap <= Duration::from_secs(1), "{:?}", health.receive_gap);
+
+    // The queue is deleted under the running engine: every receive fails.
+    fx.client.backend().sqs.delete_queue(&fx.url).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let health = engine.receive_health();
+    assert!(health.consecutive_failures >= 3, "{}", health.consecutive_failures);
+    assert_eq!(i64::from(health.consecutive_failures), engine.stats().metrics["receive_errors"]);
+    let failure = health.last_error.expect("the last receive error");
+    assert!(failure.error.is_not_found(), "{}", failure.error);
+    assert!(!failure.error.is_retryable());
+    assert!(health.receive_gap >= Duration::from_secs(9), "{:?}", health.receive_gap);
+    assert!(health.last_receive_at.is_some_and(|at| at <= failure.at));
+
+    // Recreated (SQS refuses the name for 60 seconds): the next receive succeeds again.
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    fx.client.backend().sqs.create_queue("work", &StringMap::new(), &StringMap::new()).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(35)).await;
+    let health = engine.receive_health();
+    assert_eq!(health.consecutive_failures, 0);
+    assert!(health.last_receive_at.is_some_and(|at| at > first_success));
+    assert!(health.receive_gap <= Duration::from_secs(1), "{:?}", health.receive_gap);
+    assert!(health.last_error.is_some(), "the last error stays known");
+    engine.close(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn receive_gap_leaves_out_waiting_for_slots_and_pauses() {
+    let fx = fixture(ClientConfig::default()).await;
+    for i in 0..3 {
+        fx.send(&format!("m{i}")).await;
+    }
+    // Every in-flight slot taken by messages that are not settled: no receive while they are.
+    let engine = fx.engine(|config| config.max_in_flight = 3);
+    let deliveries = collect(&engine, 3).await;
+    assert_eq!(deliveries.len(), 3);
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    let health = engine.receive_health();
+    assert!(health.receive_gap <= Duration::from_secs(1), "{:?}", health.receive_gap);
+    for delivery in &deliveries {
+        delivery.lease.mark_active();
+        delivery.lease.ack().await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(engine.receive_health().receive_gap <= Duration::from_secs(1));
+
+    engine.pause();
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    assert!(engine.receive_health().receive_gap <= Duration::from_secs(1));
+    engine.resume();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(engine.receive_health().receive_gap <= Duration::from_secs(1));
+    engine.close(true).await;
+}

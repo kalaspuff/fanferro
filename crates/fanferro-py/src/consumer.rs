@@ -171,6 +171,27 @@ impl PyConsumerEngine {
         dict.set_item("metrics", stats.metrics)?;
         Ok(dict)
     }
+
+    /// How receiving goes: `last_receive_at`, `receive_gap` (seconds), `consecutive_failures`,
+    /// `last_error` (the exception) and `last_error_at`.
+    fn receive_health<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let health = self.engine.receive_health();
+        let dict = PyDict::new(py);
+        dict.set_item("last_receive_at", health.last_receive_at.map(|at| time_to_py(py, at)).transpose()?)?;
+        dict.set_item("receive_gap", health.receive_gap.as_secs_f64())?;
+        dict.set_item("consecutive_failures", health.consecutive_failures)?;
+        match health.last_error {
+            Some(failure) => {
+                dict.set_item("last_error", to_py_err_with(py, &failure.error).into_value(py))?;
+                dict.set_item("last_error_at", time_to_py(py, failure.at)?)?;
+            }
+            None => {
+                dict.set_item("last_error", py.None())?;
+                dict.set_item("last_error_at", py.None())?;
+            }
+        }
+        Ok(dict)
+    }
 }
 
 /// A received message and its lease.

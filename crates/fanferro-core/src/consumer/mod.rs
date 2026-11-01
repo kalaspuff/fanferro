@@ -240,6 +240,83 @@ pub(crate) struct EngineInner {
     /// Receipt handles of messages settled with a delete, which an engine with
     /// `external` messages records instead of sending (see [`ConsumerEngine::take_deleted`]).
     pub(crate) deleted: Mutex<Vec<String>>,
+    /// How receiving goes (see [`ConsumerEngine::receive_health`]).
+    health: Mutex<HealthState>,
+}
+
+/// How the receive loops are doing (see [`ConsumerEngine::receive_health`]).
+#[derive(Clone, Debug)]
+pub struct ReceiveHealth {
+    /// When a receive last succeeded (an empty one included).
+    pub last_receive_at: Option<OffsetDateTime>,
+    /// How long the engine has been receiving without a success: the time since the last
+    /// successful receive (or the start), leaving out the time its receive loops waited for free
+    /// in-flight slots, the rate limiter or a resume, when it did not want messages. Zero for an
+    /// engine that does not receive itself (`external`).
+    pub receive_gap: Duration,
+    /// Receives that failed since the last one that succeeded.
+    pub consecutive_failures: u32,
+    /// The latest failed receive (also after later receives succeeded).
+    pub last_error: Option<ReceiveFailure>,
+}
+
+/// A failed receive (see [`ReceiveHealth::last_error`]).
+#[derive(Clone, Debug)]
+pub struct ReceiveFailure {
+    /// Why the receive failed.
+    pub error: Error,
+    /// When it failed.
+    pub at: OffsetDateTime,
+}
+
+/// What [`ReceiveHealth`] is made of.
+#[derive(Debug)]
+struct HealthState {
+    last_success: Option<OffsetDateTime>,
+    /// Where the receive gap starts (moved forward by the time spent waiting, see
+    /// [`EngineInner::not_receiving`]).
+    gap_since: Instant,
+    /// Receive loops waiting for capacity, and since when at least one did.
+    waiting: usize,
+    waiting_since: Instant,
+    consecutive_failures: u32,
+    last_error: Option<ReceiveFailure>,
+}
+
+impl HealthState {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            last_success: None,
+            gap_since: now,
+            waiting: 0,
+            waiting_since: now,
+            consecutive_failures: 0,
+            last_error: None,
+        }
+    }
+
+    fn gap(&self, now: Instant) -> Duration {
+        let until = if self.waiting > 0 { self.waiting_since } else { now };
+        until.saturating_duration_since(self.gap_since)
+    }
+}
+
+/// A receive loop waiting for capacity (see [`EngineInner::not_receiving`]); ends the wait when
+/// dropped.
+pub(crate) struct NotReceiving<'a>(&'a EngineInner);
+
+impl Drop for NotReceiving<'_> {
+    fn drop(&mut self) {
+        let mut health = self.0.health.lock();
+        health.waiting -= 1;
+        if health.waiting == 0 {
+            // The time every waiting loop spent does not count: the engine did not want messages.
+            let now = Instant::now();
+            let from = health.waiting_since.max(health.gap_since);
+            health.gap_since += now.saturating_duration_since(from);
+        }
+    }
 }
 
 /// The receive loops: `pollers` that always run, and extra ones while the queue keeps receives
@@ -615,6 +692,32 @@ impl EngineInner {
         *self.paused.borrow()
     }
 
+    /// Marks a receive loop as waiting for capacity (free in-flight slots, the rate limiter, a
+    /// resume) until the returned guard is dropped: that time does not count in the receive gap.
+    pub(crate) fn not_receiving(&self) -> NotReceiving<'_> {
+        let mut health = self.health.lock();
+        if health.waiting == 0 {
+            health.waiting_since = Instant::now();
+        }
+        health.waiting += 1;
+        NotReceiving(self)
+    }
+
+    /// Records a receive that succeeded (also an empty one).
+    pub(crate) fn receive_succeeded(&self) {
+        let mut health = self.health.lock();
+        health.last_success = Some(OffsetDateTime::now_utc());
+        health.gap_since = Instant::now();
+        health.consecutive_failures = 0;
+    }
+
+    /// Records a receive that failed.
+    pub(crate) fn receive_failed(&self, error: &Error) {
+        let mut health = self.health.lock();
+        health.consecutive_failures = health.consecutive_failures.saturating_add(1);
+        health.last_error = Some(ReceiveFailure { error: error.clone(), at: OffsetDateTime::now_utc() });
+    }
+
     pub(crate) async fn wait_unpaused(&self) -> bool {
         let mut receiver = self.paused.subscribe();
         loop {
@@ -743,6 +846,7 @@ impl ConsumerEngine {
                 orphaned_receives_until: Mutex::new(None),
                 envelopes,
                 deleted: Mutex::new(Vec::new()),
+                health: Mutex::new(HealthState::new()),
                 settings,
             }),
         })
@@ -780,6 +884,8 @@ impl ConsumerEngine {
             },
             queue,
         ));
+        // The receive gap starts now.
+        inner.health.lock().gap_since = Instant::now();
         let mut background = vec![settle_task];
         if inner.settings.heartbeat_enabled {
             background.push(inner.runtime.spawn(heartbeat::heartbeat_loop(inner.clone())));
@@ -1035,6 +1141,19 @@ impl ConsumerEngine {
             leases: self.inner.leases.lock().len(),
             available_permits: self.inner.permits.available_permits(),
             metrics: self.inner.metrics.snapshot(),
+        }
+    }
+
+    /// How receiving goes: when a receive last succeeded, for how long none has, the failures
+    /// since and the latest one. Readiness and liveness probes build on it.
+    pub fn receive_health(&self) -> ReceiveHealth {
+        let health = self.inner.health.lock();
+        let receive_gap = if self.inner.settings.external { Duration::ZERO } else { health.gap(Instant::now()) };
+        ReceiveHealth {
+            last_receive_at: health.last_success,
+            receive_gap,
+            consecutive_failures: health.consecutive_failures,
+            last_error: health.last_error.clone(),
         }
     }
 

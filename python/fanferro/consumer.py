@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import datetime
 import functools
 import signal
 import time
@@ -37,7 +38,7 @@ from fanferro.events import EventKind
 from fanferro.messages import Message, Outcome
 from fanferro.middleware import ConsumeMiddleware, chain_consume
 from fanferro.policies import DeadLetterPolicy, FailureAction, Heartbeat, RateLimit, RetryPolicy, ShutdownPolicy
-from fanferro.stats import ConsumerStats, EngineStats
+from fanferro.stats import ConsumerHealth, ConsumerStats, EngineStats, ReceiveFailure
 from fanferro.telemetry import monotonic
 
 if TYPE_CHECKING:
@@ -379,6 +380,7 @@ class Consumer:
         sns_unwrap: bool = True,
         auto_confirm_subscriptions: bool = False,
         delete_offloaded_payloads: bool = False,
+        max_receive_failures: int | None = None,
     ) -> None:
         if concurrency < 1:
             raise ValueError("concurrency must be at least 1")
@@ -407,6 +409,8 @@ class Consumer:
         settle_linger = seconds(settle_linger, "settle_linger")
         if settle_linger > 1:
             raise ValueError(f"settle_linger must be between 0 and 1 second, got {settle_linger}")
+        if max_receive_failures is not None and max_receive_failures < 1:
+            raise ValueError(f"max_receive_failures must be at least 1 (or None), got {max_receive_failures}")
         self._client = client
         self.queue = queue
         self.router = router
@@ -438,6 +442,7 @@ class Consumer:
         self.sns_unwrap = sns_unwrap
         self.auto_confirm_subscriptions = auto_confirm_subscriptions
         self.delete_offloaded_payloads = delete_offloaded_payloads
+        self.max_receive_failures = max_receive_failures
         self._state: ConsumerState = "created"
         self._engine: Any = None
         self._dispatcher: asyncio.Task[None] | None = None
@@ -462,6 +467,8 @@ class Consumer:
         self._blocked = 0  # handlers waiting for a settlement they requested
         self._group_waits = 0  # settlements of sequenced messages whose group's next message waits
         self._last_activity = 0.0
+        self._dispatched: tuple[float, float] | None = None  # when the dispatcher last ran: monotonic, wall
+        self._failure: BaseException | None = None  # the receive error that stopped the consumer
         self._starting: asyncio.Future[None] | None = None  # resolved when a start ends
         self._stopped: asyncio.Future[None] | None = None  # the stop in progress (or the last one)
         self._drain_deadline: float | None = None  # when the stop in progress stops waiting for handlers
@@ -524,6 +531,37 @@ class Consumer:
             engine=EngineStats._from_core(self._engine.stats() if self._engine is not None else None),
         )
 
+    def health(self) -> ConsumerHealth:
+        """Liveness and readiness: receive failures, the receive and dispatch gaps, the state.
+
+        ``consumer.health().healthy()`` is the liveness verdict, ``ready()`` the readiness verdict
+        and ``problems()`` says what is wrong (see :class:`~fanferro.stats.ConsumerHealth`). Cheap:
+        no AWS call; safe to call from another thread.
+        """
+        engine = self._engine
+        raw: Mapping[str, Any] = engine.receive_health() if engine is not None else {}
+        error = raw.get("last_error")
+        dispatched = self._dispatched
+        in_flight = 0
+        if engine is not None:
+            in_flight = int(engine.stats().get("metrics", {}).get("in_flight", 0))
+        return ConsumerHealth(
+            name=self.name,
+            queue=self.queue.name,
+            state=self._state,
+            paused=bool(engine.paused) if engine is not None else False,
+            last_receive_at=raw.get("last_receive_at"),
+            receive_gap=float(raw.get("receive_gap", 0.0)),
+            consecutive_receive_failures=int(raw.get("consecutive_failures", 0)),
+            last_error=ReceiveFailure._from_error(error, raw["last_error_at"]) if error is not None else None,
+            last_dispatch_at=(
+                datetime.datetime.fromtimestamp(dispatched[1], datetime.UTC) if dispatched is not None else None
+            ),
+            dispatch_gap=round(time.monotonic() - dispatched[0], 6) if dispatched is not None else None,
+            active=self._active,
+            in_flight=in_flight,
+        )
+
     def pause(self) -> None:
         """Stops receiving new messages (in-flight messages continue)."""
         if self._engine is not None:
@@ -550,6 +588,8 @@ class Consumer:
         if not len(self.router):
             raise ConsumerStateError(f"consumer {self.name!r} has no routes; add a handler or routes")
         self._state = "starting"
+        self._failure = None
+        self._dispatched = None
         starting = self._starting = asyncio.get_running_loop().create_future()
         # Registered right away: closing the client meanwhile stops the consumer once it started.
         self._client._register_consumer(self)
@@ -761,7 +801,10 @@ class Consumer:
         """Starts the consumer and processes messages until stopped, then shuts down gracefully.
 
         Stops on :meth:`request_stop`, :meth:`stop` or SIGINT/SIGTERM (a second signal skips the
-        drain).
+        drain). With ``max_receive_failures``, a consumer whose receives keep failing with an error
+        that is not retryable stops by itself and ``run()`` raises that error (a
+        :class:`~fanferro.errors.ResourceNotFoundError` for a deleted queue,
+        :class:`~fanferro.errors.AccessDeniedError`...), so that the process ends and is restarted.
         """
         await self.start()
         loop = asyncio.get_running_loop()
@@ -786,6 +829,8 @@ class Consumer:
             finally:
                 for sig in installed:
                     loop.remove_signal_handler(sig)
+        if self._failure is not None:
+            raise self._failure
 
     async def run_until_idle(self, *, idle_for: Duration = 0.3, timeout: Duration = 30.0) -> None:
         """Processes messages until nothing has happened for ``idle_for`` seconds, then stops.
@@ -1003,6 +1048,9 @@ class Consumer:
     async def _dispatch_loop(self) -> None:
         engine = self._engine
         while not self._stopping:
+            self._dispatched = (time.monotonic(), time.time())
+            if self.max_receive_failures is not None and self._stop_after_receive_failures(engine):
+                return
             try:
                 deliveries = await engine.next_batch(self.concurrency + self.prefetch, _DELIVERY_WAIT)
             except asyncio.CancelledError:
@@ -1021,6 +1069,28 @@ class Consumer:
             # Not kept across the next wait for deliveries: a delivery nothing else holds must be
             # dropped (released) when its task ends.
             del deliveries
+
+    def _stop_after_receive_failures(self, engine: Any) -> bool:
+        """Stops the consumer after ``max_receive_failures`` failed receives in a row.
+
+        Only when the last one failed with an error that is not retryable; ``True`` if it stopped.
+        """
+        assert self.max_receive_failures is not None
+        health = engine.receive_health()
+        failures = int(health["consecutive_failures"])
+        error = health["last_error"]
+        if failures < self.max_receive_failures or error is None or getattr(error, "retryable", True):
+            return False
+        self._failure = error
+        self._emit(
+            EventKind.CONSUMER_ERROR,
+            f"consumer {self.name} stops: {failures} receives in a row failed with an error that is not retryable",
+            exception=error,
+            consecutive_failures=failures,
+        )
+        self._begin_stop(..., None)
+        self._client._consumer_failed(self)
+        return True
 
     def _schedule_all(self, deliveries: list[Delivery]) -> None:
         for delivery in deliveries:
