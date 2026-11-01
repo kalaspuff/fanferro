@@ -10,6 +10,10 @@
 //! | S3 `{"Records": [{"eventSource": "aws:s3", ...}]}` and the `s3:TestEvent` message | `aws.s3.event` |
 //! | SES `{"notificationType" or "eventType": "Bounce", "mail": {...}, ...}` | `aws.ses.bounce` |
 //!
+//! Auto Scaling lifecycle hooks that notify SNS or SQS directly are typed like their EventBridge
+//! events (`aws.autoscaling.ec2_instance_launch_lifecycle_action`, `..._terminate_...`; the hook's
+//! test notification `aws.autoscaling.test_notification`).
+//!
 //! SES types are `aws.ses.` and the snake-cased event type: `aws.ses.complaint`,
 //! `aws.ses.delivery`, `aws.ses.delivery_delay`, `aws.ses.rendering_failure`, `aws.ses.received`...
 //! The body is the payload as it is (JSON); the event time is the message time.
@@ -123,6 +127,28 @@ fn s3_notification(document: &Value) -> Option<Notification> {
     None
 }
 
+/// Notifications Auto Scaling sends to SNS and SQS: lifecycle hooks (and their test notification)
+/// and the notifications of an Auto Scaling group.
+fn autoscaling_notification(document: &Value) -> Option<Notification> {
+    if document.get("Service").and_then(Value::as_str) != Some("AWS Auto Scaling") {
+        return None;
+    }
+    let event = match document.get("LifecycleTransition").and_then(Value::as_str) {
+        Some("autoscaling:EC2_INSTANCE_LAUNCHING") => "ec2_instance_launch_lifecycle_action".to_string(),
+        Some("autoscaling:EC2_INSTANCE_TERMINATING") => "ec2_instance_terminate_lifecycle_action".to_string(),
+        Some(transition) => transition.trim_start_matches("autoscaling:").to_ascii_lowercase(),
+        None => document.get("Event")?.as_str()?.trim_start_matches("autoscaling:").to_ascii_lowercase(),
+    };
+    if event.is_empty() {
+        return None;
+    }
+    Some(Notification {
+        message_type: format!("aws.autoscaling.{event}"),
+        source: "aws.autoscaling",
+        time: parse_time(document.get("Time")),
+    })
+}
+
 fn ses_notification(document: &Value) -> Option<Notification> {
     let mail = document.get("mail").filter(|mail| mail.is_object())?;
     let kind = document
@@ -174,14 +200,16 @@ impl Envelope for AwsNotifications {
         }
         let s3 = (find(b"\"Records\"") && find(b"\"aws:s3\"")) || find(b"\"s3:TestEvent\"");
         let ses = find(b"\"mail\"") && (find(b"\"notificationType\"") || find(b"\"eventType\""));
-        if !s3 && !ses {
+        let autoscaling = find(b"\"AWS Auto Scaling\"");
+        if !s3 && !ses && !autoscaling {
             return Ok(None);
         }
         let Ok(document) = serde_json::from_slice::<Value>(&wire.body) else {
             return Ok(None);
         };
         let notification = if s3 { s3_notification(&document) } else { None }
-            .or_else(|| if ses { ses_notification(&document) } else { None });
+            .or_else(|| if ses { ses_notification(&document) } else { None })
+            .or_else(|| if autoscaling { autoscaling_notification(&document) } else { None });
         Ok(notification.map(|notification| Payload {
             data: Bytes::clone(&wire.body),
             content_type: Some(JSON_CONTENT_TYPE.to_string()),

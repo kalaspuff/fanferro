@@ -80,7 +80,7 @@ class TestS3:
     def test_invalid_documents(self) -> None:
         with pytest.raises(fanferro.DecodeError, match=r"Records\.0\.s3\.bucket: missing required field"):
             aws.S3Event.from_json({"Records": [{"eventName": "x", "eventTime": "2026-01-01T00:00:00Z"}]})
-        with pytest.raises(fanferro.DecodeError, match="expected an ISO 8601 time"):
+        with pytest.raises(fanferro.DecodeError, match="expected a time"):
             aws.S3Event.from_json({"Records": [{**json.loads(S3_PUT)["Records"][0], "eventTime": "yesterday"}]})
         with pytest.raises(fanferro.DecodeError, match="expected a list"):
             aws.S3Event.from_json({"Records": {}})

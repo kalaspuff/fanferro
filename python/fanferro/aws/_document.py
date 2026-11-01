@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import email.utils
 import functools
 import re
 import types
@@ -10,7 +11,7 @@ import typing
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, ClassVar, Self
+from typing import Any, ClassVar, Literal, Self
 from urllib.parse import quote_plus, unquote_plus
 
 from fanferro.errors import DecodeError
@@ -21,15 +22,23 @@ _INTEGER = re.compile(r"-?[0-9]+")
 """An integer as a string (ASCII digits only: ``str.isdigit()`` accepts ``²``, which ``int()`` rejects)."""
 
 
+type _TimeFormat = Literal["iso", "rfc2822", "millis"]
+
+
 @dataclass(frozen=True, slots=True)
 class _Key:
     path: tuple[str, ...]
     url_encoded: bool = False
+    time_format: _TimeFormat = "iso"
 
 
-def _at(*path: str, url_encoded: bool = False) -> dict[str, Any]:
-    """Field metadata: where the field is in AWS's document (default: its name in camel case)."""
-    return {_METADATA: _Key(path, url_encoded)}
+def _at(*path: str, url_encoded: bool = False, time_format: _TimeFormat = "iso") -> dict[str, Any]:
+    """Field metadata: where the field is in AWS's document (default: its name in camel case).
+
+    ``time_format`` is how a time is written: ISO 8601 (read in any format AWS uses), RFC 2822
+    (``Fri, 27 Jan 2023 06:02:51 GMT``, AWS Health) or epoch milliseconds (Step Functions).
+    """
+    return {_METADATA: _Key(path, url_encoded, time_format)}
 
 
 _SKIP: dict[str, Any] = {_METADATA: None}
@@ -125,11 +134,7 @@ def _convert(value: Any, hint: Any, path: tuple[str, ...]) -> Any:
         item = typing.get_args(hint)[1]
         return {str(name): _convert(entry, item, (*path, str(name))) for name, entry in value.items()}
     if hint is datetime:
-        try:
-            parsed = datetime.fromisoformat(value)
-        except (TypeError, ValueError):
-            raise DecodeError(f"{_render(path)}: expected an ISO 8601 time, got {value!r}") from None
-        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+        return _time(value, path)
     if hint is bool:
         if isinstance(value, bool):
             return value
@@ -148,6 +153,23 @@ def _convert(value: Any, hint: Any, path: tuple[str, ...]) -> Any:
     raise DecodeError(f"{_render(path)}: expected {getattr(hint, '__name__', hint)}, got {value!r}")
 
 
+def _time(value: Any, path: tuple[str, ...]) -> datetime:
+    """A time in any format AWS writes: ISO 8601, RFC 2822 or epoch milliseconds."""
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return datetime.fromtimestamp(value / 1000, UTC)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            try:
+                parsed = email.utils.parsedate_to_datetime(value)
+            except (TypeError, ValueError):
+                parsed = None
+        if parsed is not None:
+            return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    raise DecodeError(f"{_render(path)}: expected a time, got {value!r}")
+
+
 def _dump(document: AwsDocument) -> dict[str, Any]:
     custom = getattr(document, "_to_document", None)
     return custom() if custom is not None else _dump_fields(document)
@@ -161,6 +183,12 @@ def _dump_fields(document: AwsDocument) -> dict[str, Any]:
             continue
         if key.url_encoded and isinstance(value, str):
             value = quote_plus(value, safe="/")
+        elif isinstance(value, datetime) and key.time_format != "iso":
+            value = (
+                round(value.timestamp() * 1000)
+                if key.time_format == "millis"
+                else email.utils.format_datetime(value.astimezone(UTC), usegmt=True)
+            )
         target = result
         for part in key.path[:-1]:
             target = target.setdefault(part, {})
