@@ -73,6 +73,45 @@ handler = fanferro.aws_lambda.sqs_handler(client, router, queue=billing)   # han
 Turn on `ReportBatchItemFailures` on the event source mapping. Permissions, outcomes and testing
 with `fanferro.testing.invoke_sqs_handler`: [Deployment → Lambda](docs/guides/deployment.md#lambda).
 
+## Events of AWS services
+
+Notifications and events that AWS services send to SNS and SQS are recognised by their body and
+decoded into typed classes of `fanferro.aws`: annotate a handler with one and it is routed there.
+
+```python
+from fanferro import aws
+
+
+@consumer.route
+async def on_upload(event: aws.S3Event) -> None:                       # an S3 event notification
+    for record in event.records:                                       # none in S3's test event
+        if record.created:
+            await index(record.bucket.name, record.object.key, record.object.size)  # key URL-decoded
+
+
+@consumer.route
+async def on_bounce(notification: aws.SesBounceNotification) -> None:  # an SES identity's notification
+    if notification.bounce.permanent:
+        await suppress([r.email_address for r in notification.bounce.bounced_recipients])
+
+
+@consumer.route("aws.ses.open")                                        # an SES configuration set's event
+async def on_open(message: fanferro.Message[aws.SesNotification]) -> None:
+    await record_open(message.body.mail.message_id, message.json()["open"]["ipAddress"])
+```
+
+Also typed: SES complaints and deliveries, CloudWatch alarms, Lambda destination records and
+dead letters, and EventBridge events (decoded into your own class, or typed for scheduled rules,
+ECS tasks, Step Functions, EC2, Auto Scaling and AWS Health):
+[Notifications and events of AWS services](docs/guides/aws-notifications.md).
+
+## tomodachi services
+
+fanferro services exchange messages with [tomodachi](https://github.com/kalaspuff/tomodachi)
+services both ways: `fanferro.envelopes.compat` reads and writes tomodachi's envelopes
+(`TomodachiJSON`, `TomodachiProtobuf` and `MetadataProtobuf`) in Rust, and the data decodes into
+and encodes from your own models: [tomodachi services](docs/guides/message-formats.md#tomodachi-services).
+
 ## Testing
 
 Test routing and handlers without a broker: `fanferro.testing.dispatch` runs one message through
@@ -100,6 +139,8 @@ Flows run on an in-memory broker (`fanferro.testing.memory_client()`) or an emul
 * **Safe by default.** Heartbeats, retries with backoff, dead-letter queues, graceful shutdown.
 * **Infrastructure in code.** Declared queues, topics and subscriptions are checked or created.
 * **Long-running workers or AWS Lambda.** The same handlers and policies for SQS event sources.
+* **AWS's events, typed.** S3, SES, CloudWatch alarms, Lambda and EventBridge events, decoded.
+* **Talks to tomodachi services.** Their envelopes, read and written in Rust.
 * **Tests without AWS or Docker.** An in-memory broker runs the same engine you deploy.
 * **Mistakes caught early.** Bad names, sizes and signatures fail before any network call.
 * **Observable.** Typed events, structured logs, hooks and OpenTelemetry.
@@ -144,7 +185,8 @@ own: [Parity with AWS](docs/parity/README.md).
 | [Publishing](docs/guides/publishing.md) · [Consuming](docs/guides/consuming.md) | Options, batches, FIFO, routing, concurrency, shutdown |
 | [Failure handling](docs/guides/failure-handling.md) | Retries, dead-letter queues, poison messages |
 | [Provisioning](docs/guides/provisioning.md) | Declaring resources, failure modes, IAM permissions |
-| [Message formats](docs/guides/message-formats.md) · [Large payloads](docs/guides/large-payloads.md) | Codecs, envelopes, claim checks |
+| [Message formats](docs/guides/message-formats.md) · [Large payloads](docs/guides/large-payloads.md) | Codecs, envelopes, tomodachi services, claim checks |
+| [AWS notifications](docs/guides/aws-notifications.md) | S3, SES, CloudWatch, Lambda and EventBridge events as typed messages |
 | [Observability](docs/guides/observability.md) | Events, logging, hooks, OpenTelemetry, metrics |
 | [Patterns](docs/guides/patterns.md) | Transactional outbox, inbox, fan-out, versioning, ordering |
 | [Testing](docs/guides/testing.md) · [Deployment](docs/guides/deployment.md) | In-memory broker, MiniStack, production setup |
