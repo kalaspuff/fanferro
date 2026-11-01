@@ -66,7 +66,9 @@ and does not end the round. A row may be marked published more than once.
 
 Delivery is at least once (a crash between publish and mark republishes). The message id is
 stable: FIFO destinations deduplicate it; standard destinations need idempotent consumers
-(below). FIFO rows are relayed one by one in order and a failure holds back the rest of its group.
+(below). Rows for standard destinations go out in one batch per destination, the destinations at
+once. FIFO rows are relayed one by one in order within their message group, up to eight groups at
+once, and a failure holds back the rest of its group. The relay calls the store one call at a time.
 A row that cannot be published (its topic was deleted, the destination refuses it) is given up
 after `OutboxRelay(max_attempts=10)` attempts that failed for good, with `mark_abandoned`, so that
 it does not hold back the rows behind it; a FIFO group then continues with its next row. Errors
@@ -102,8 +104,14 @@ counts every receive toward `max_receive_count`. A handler that hands its messag
 `requeue()`, `release()` or `dead_letter()`) leaves the id unclaimed, so the next delivery runs it
 again. When the store fails to mark an id completed after the handler succeeded, the message is
 still acknowledged and the error reported (`consumer.error`): its claim then expires after
-`lock_ttl`. `InMemoryIdempotencyStore` forgets expired ids; it suits tests and single-process
-workers.
+`lock_ttl`. `InMemoryIdempotencyStore` suits tests and single-process workers. It forgets
+expired ids (a sweep at most once per `sweep_interval`, 60 s, touches only the expired ones) and
+keeps at most `max_entries` ids (100,000 by default; beyond it the oldest completed ids are
+forgotten first, which only weakens deduplication of old messages). Each id takes about 200 bytes,
+and the store holds every id of the last `ttl` seconds up to that bound: at 100 messages per
+second, the default `ttl` of 7 days would be 60 million ids (about 12 GB) with `max_entries=None`.
+Give the in-memory store a shorter `ttl`, such as `idempotent(ttl=timedelta(hours=1))`: duplicates
+from publishers and redeliveries after a lost delete usually arrive within minutes.
 
 ## Fan-out with filtering
 

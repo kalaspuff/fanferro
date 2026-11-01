@@ -238,6 +238,20 @@ class CoreClient:
     def unsubscribe(self, arn: str) -> Awaitable[None]: ...
     def purge_queue(self, url: str) -> Awaitable[None]: ...
     def queue_attributes(self, url: str) -> Awaitable[dict[str, str]]: ...
+    def peek(
+        self, url: str, *, limit: int = 10, visibility_timeout: float = 30.0, wait_time: float = 1.0
+    ) -> Awaitable[list[dict[str, Any]]]: ...
+    def redrive(
+        self,
+        url: str,
+        *,
+        to: str | None = None,
+        limit: int | None = None,
+        max_per_second: float | None = None,
+        reset_attempts: bool = True,
+        visibility_timeout: float = 60.0,
+        wait_time: float = 1.0,
+    ) -> Awaitable[dict[str, Any]]: ...
     def topic_attributes(self, arn: str) -> Awaitable[dict[str, str]]: ...
     def receive_records(
         self,

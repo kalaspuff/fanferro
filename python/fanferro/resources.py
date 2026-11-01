@@ -14,7 +14,7 @@ from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Literal
 
 from fanferro._core import AttributeValue, Payload, Transport, is_sqs_safe_text, validate_wire
-from fanferro._utils import LoopLocal, optional_seconds
+from fanferro._utils import Duration, LoopLocal, optional_seconds, seconds
 from fanferro.errors import ConfigurationError, ResourceUnavailableError, ValidationError
 from fanferro.events import EventKind
 from fanferro.messages import (
@@ -38,10 +38,12 @@ from fanferro.provisioning import (
     TopicInfo,
     attributes_to_aws,
 )
+from fanferro.redrive import PeekedMessage, RedriveResult
 from fanferro.stats import QueueCounts
 from fanferro.telemetry import monotonic
 
 if TYPE_CHECKING:
+    from fanferro._core import WireMessage
     from fanferro.client import Client
     from fanferro.codecs import Codec
     from fanferro.consumer import Consumer
@@ -247,6 +249,23 @@ class _Destination(_Resource):
         return self._encode_now(context.message, info)
 
     def _encode_now(self, message: OutgoingMessage, info: Any) -> PreparedMessage:
+        wire, message_type = self._encode_wire(message)
+        return PreparedMessage(
+            destination=self._destination_for(info),
+            destination_name=self.name,
+            wire=wire,
+            message_id=message.id,
+            message_type=message_type,
+            group_id=message.group_id,
+            deduplication_id=message.deduplication_id,
+            # Middleware may have set a timedelta after the message was created.
+            delay=optional_seconds(message.delay, "delay"),
+            sns_subject=message.sns_subject,
+            trace_header=message.trace_header,
+        )
+
+    def _encode_wire(self, message: OutgoingMessage) -> tuple[WireMessage, str | None]:
+        """Encodes and wraps ``message`` (setting its group id and trace header): its wire message and type."""
         client = self._client
         if message.group_id is None and self._group_id is not None:
             message.group_id = self._group_id(message) if callable(self._group_id) else self._group_id
@@ -282,19 +301,7 @@ class _Destination(_Resource):
             if trace_attributes:
                 self._add_trace_attributes(attributes, trace_attributes, wire.body, message)
             wire = wire.replace(attributes=attributes)
-        return PreparedMessage(
-            destination=self._destination_for(info),
-            destination_name=self.name,
-            wire=wire,
-            message_id=message.id,
-            message_type=message_type,
-            group_id=message.group_id,
-            deduplication_id=message.deduplication_id,
-            # Middleware may have set a timedelta after the message was created.
-            delay=optional_seconds(message.delay, "delay"),
-            sns_subject=message.sns_subject,
-            trace_header=message.trace_header,
-        )
+        return wire, message_type
 
     def _add_trace_attributes(
         self,
@@ -389,17 +396,26 @@ class _Destination(_Resource):
             try:
                 if client.publish_middleware:
                     prepared = await self._prepare_message(message, info)
+                    destination = prepared.destination
+                    wire, message_id, message_type = prepared.wire, prepared.message_id, prepared.message_type
+                    group_id, deduplication_id = prepared.group_id, prepared.deduplication_id
+                    delay, sns_subject, trace_header = prepared.delay, prepared.sns_subject, prepared.trace_header
                 else:
-                    prepared = self._encode_now(message, info)
+                    # Without middleware nothing reads a PreparedMessage: pass the fields directly.
+                    wire, message_type = self._encode_wire(message)
+                    destination = self._destination_for(info)
+                    message_id, group_id, deduplication_id = message.id, message.group_id, message.deduplication_id
+                    delay = optional_seconds(message.delay, "delay")  # may have been changed after creation
+                    sns_subject, trace_header = message.sns_subject, message.trace_header
                 receipt = await core.publish(
-                    self._native_destination(core, prepared.destination),
-                    prepared.wire,
-                    prepared.message_id,
-                    group_id=prepared.group_id,
-                    deduplication_id=prepared.deduplication_id,
-                    delay=prepared.delay,
-                    subject=prepared.sns_subject,
-                    trace_header=prepared.trace_header,
+                    self._native_destination(core, destination),
+                    wire,
+                    message_id,
+                    group_id=group_id,
+                    deduplication_id=deduplication_id,
+                    delay=delay,
+                    subject=sns_subject,
+                    trace_header=trace_header,
                     transport=transport,
                 )
             except Exception as error:
@@ -428,7 +444,7 @@ class _Destination(_Resource):
                 kind=self.kind,
                 message_id=result.message_id,
                 transport_message_id=result.transport_message_id,
-                message_type=prepared.message_type,
+                message_type=message_type,
                 size=result.size,
                 offloaded=result.offloaded is not None,
                 duration=round(duration, 6),
@@ -692,7 +708,7 @@ class Queue(_Destination):
 
     @property
     def dead_letter_queue(self) -> Queue | None:
-        """The declared dead-letter queue (consume it to inspect or redrive failed messages)."""
+        """The declared dead-letter queue (look into it with :meth:`peek`, move messages back with :meth:`redrive`)."""
         return self._dead_letter_queue
 
     def _settings(self) -> dict[str, Any]:
@@ -810,6 +826,93 @@ class Queue(_Destination):
     async def approximate_count(self) -> QueueCounts:
         """Approximate visible, in-flight and delayed message counts (``counts.visible``)."""
         return QueueCounts.from_attributes(await self.get_attributes())
+
+    async def peek(
+        self,
+        limit: int = 10,
+        *,
+        visibility_timeout: Duration = 30,
+        wait_time: Duration = 1,
+    ) -> list[PeekedMessage]:
+        """Returns up to ``limit`` messages of the queue without settling them.
+
+        Meant for dead-letter queues: each :class:`~fanferro.PeekedMessage` has its raw body and
+        attributes and ``dead_letter_info`` (why fanferro dead-lettered it). The messages are
+        received, kept hidden until ``limit`` are collected or the queue has no more visible
+        messages, and made visible again before this returns. Receiving counts towards
+        ``ApproximateReceiveCount``: do not peek a queue whose own redrive policy would move them.
+
+        Args:
+            limit: How many messages to return at most.
+            visibility_timeout: How long the messages stay hidden while the peek runs (if it is
+                interrupted, they become visible again when this runs out).
+            wait_time: Long polling wait of each receive (``0`` may miss messages on SQS).
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValidationError(f"limit must be a positive integer, got {limit!r}")
+        visibility = seconds(visibility_timeout, "visibility_timeout")
+        wait = seconds(wait_time, "wait_time")
+        info = await self.resolve()
+        core = await self._client._core()
+        messages = await core.peek(info.url, limit=limit, visibility_timeout=visibility, wait_time=wait)
+        return [PeekedMessage.from_core(message) for message in messages]
+
+    async def redrive(
+        self,
+        to: Queue | str | None = None,
+        *,
+        limit: int | None = None,
+        max_per_second: float | None = None,
+        reset_attempts: bool = True,
+        visibility_timeout: Duration = 60,
+        wait_time: Duration = 1,
+    ) -> RedriveResult:
+        """Moves the messages of this (dead-letter) queue back to their source queue, or to ``to``.
+
+        Each message's source is the queue fanferro dead-lettered it from (``fanferro.dead-letter``)
+        or, for messages SQS's redrive policy moved, ``DeadLetterQueueSourceArn``. The message is
+        sent with its body and attributes, without ``fanferro.dead-letter`` and, unless
+        ``reset_attempts=False``, without ``fanferro.attempt``, so that a message that was requeued
+        (``RetryPolicy(strategy="requeue")``) gets its full ``max_attempts`` again. It is deleted
+        from this queue only once it was sent. Messages that cannot be moved stay here and are
+        listed in :attr:`RedriveResult.not_moved <fanferro.RedriveResult.not_moved>`.
+
+        Runs until the queue has no visible messages left or ``limit`` messages were moved. FIFO
+        messages keep their message group; within a group they are moved in order.
+
+        Args:
+            to: The queue to move every message to (a declared :class:`Queue` or a queue name),
+                instead of each message's source.
+            limit: How many messages to move at most (default: all).
+            max_per_second: The most messages to move per second (default: no limit), so that the
+                consumers of the source queue are not flooded.
+            reset_attempts: Remove ``fanferro.attempt`` so that the retry budget starts over.
+            visibility_timeout: How long messages stay hidden while they are being moved.
+            wait_time: Long polling wait of each receive.
+
+        Raises:
+            AwsError: When receiving from this queue fails (messages moved until then stay moved).
+        """
+        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
+            raise ValidationError(f"limit must be a positive integer or None, got {limit!r}")
+        if max_per_second is not None and not (max_per_second > 0 and max_per_second != float("inf")):
+            raise ValidationError(f"max_per_second must be a positive number or None, got {max_per_second!r}")
+        visibility = seconds(visibility_timeout, "visibility_timeout")
+        wait = seconds(wait_time, "wait_time")
+        target = self._client.queue(to) if isinstance(to, str) else to
+        info = await self.resolve()
+        target_url = (await target.resolve()).url if target is not None else None
+        core = await self._client._core()
+        report = await core.redrive(
+            info.url,
+            to=target_url,
+            limit=limit,
+            max_per_second=None if max_per_second is None else float(max_per_second),
+            reset_attempts=reset_attempts,
+            visibility_timeout=visibility,
+            wait_time=wait,
+        )
+        return RedriveResult.from_core(report)
 
     async def purge(self) -> None:
         """Deletes every message in the queue."""

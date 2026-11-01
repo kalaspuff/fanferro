@@ -16,6 +16,7 @@ pub mod events;
 pub mod metrics;
 pub mod provision;
 pub mod publish;
+pub mod redrive;
 pub mod retry;
 pub mod trace;
 pub mod transport;

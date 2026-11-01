@@ -2,7 +2,7 @@ use bytes::Bytes;
 
 use super::*;
 use crate::backend::memory::MemoryBroker;
-use crate::backend::testing::{SlowBatches, SlowUploads, ThrottledBatches, ThrottledPublishBatches};
+use crate::backend::testing::{BatchFailure, SlowBatches, SlowUploads, ThrottledBatches, ThrottledPublishBatches};
 use crate::backend::{ReceiveRequest, StringMap};
 use crate::client::ClientConfig;
 use crate::transport::OffloadSettings;
@@ -260,8 +260,8 @@ async fn retried_batch_entries_stay_split_by_trace_header() {
     let broker = MemoryBroker::new("us-east-1", "000000000000");
     let mut backend = broker.backend();
     let topic = backend.sns.create_topic("t", &StringMap::new(), &StringMap::new()).await.unwrap();
-    // The first calls of all three groups fail: their entries are retried together.
-    let throttled = std::sync::Arc::new(ThrottledPublishBatches::new(backend.sns.clone(), 3));
+    // The entries of the first calls of all three groups fail: they are retried together.
+    let throttled = std::sync::Arc::new(ThrottledPublishBatches::new(backend.sns.clone(), BatchFailure::Entries, 3));
     backend.sns = throttled.clone();
     let config = ClientConfig { split_batches_by_trace_header: true, ..ClientConfig::default() };
     let client = Client::with_backend(backend, config).unwrap();
@@ -346,12 +346,119 @@ async fn batch_calls_overlap_except_for_fifo_destinations() {
     assert_eq!(bodies, (0..25).map(|i| i.to_string()).collect::<Vec<_>>());
 }
 
+fn fifo_queue_destination(url: &str) -> Destination {
+    Destination::Queue { url: url.into(), fifo: true, content_based_deduplication: false, max_message_size: None }
+}
+
+/// `count` messages over `groups` message groups (round robin), with bodies `<group>:<sequence>`.
+fn grouped_messages(count: usize, groups: usize) -> Vec<OutgoingMessage> {
+    (0..count)
+        .map(|i| OutgoingMessage {
+            group_id: Some(format!("g{}", i % groups)),
+            ..message(&format!("m{i}"), &format!("g{}:{}", i % groups, i / groups))
+        })
+        .collect()
+}
+
+/// Asserts that every group's messages arrived in the order they were sent.
+fn assert_group_order(bodies: &[String], count: usize, groups: usize) {
+    assert_eq!(bodies.len(), count);
+    let mut next = vec![0usize; groups];
+    for body in bodies {
+        let (group, sequence) = body.split_once(':').unwrap();
+        let group: usize = group[1..].parse().unwrap();
+        assert_eq!(sequence.parse::<usize>().unwrap(), next[group], "group g{group} out of order: {bodies:?}");
+        next[group] += 1;
+    }
+}
+
+#[test]
+fn fifo_lanes_keep_each_group_in_one_lane_in_order() {
+    let prepared = |group: &str| Prepared {
+        body: OutgoingBody { body: "x".into(), attributes: MessageAttributes::new(), offloaded: None },
+        group_id: Some(group.into()),
+        deduplication_id: None,
+        delay: None,
+        subject: None,
+        trace_header: None,
+        message_id: "m".into(),
+    };
+    let entries = |count: usize, groups: usize| -> Vec<(usize, Prepared)> {
+        (0..count).map(|i| (i, prepared(&format!("g{}", i % groups)))).collect()
+    };
+    // No more lanes than the batch calls the entries fill.
+    assert_eq!(fifo_lanes(entries(10, 10), 8).len(), 1);
+    assert_eq!(fifo_lanes(entries(25, 25), 8).len(), 3);
+    assert_eq!(fifo_lanes(entries(500, 100), 8).len(), 8);
+    // One group: one lane, whatever the number of entries.
+    assert_eq!(fifo_lanes(entries(500, 1), 8).len(), 1);
+    let lanes = fifo_lanes(entries(500, 100), 8);
+    let mut seen = std::collections::HashMap::new();
+    for (lane, entries) in lanes.iter().enumerate() {
+        assert!(entries.windows(2).all(|pair| pair[0].0 < pair[1].0), "lane {lane} is out of input order");
+        for (_, entry) in entries {
+            let group = entry.group_id.clone().unwrap();
+            assert_eq!(*seen.entry(group.clone()).or_insert(lane), lane, "{group} is in two lanes");
+        }
+    }
+    assert_eq!(lanes.iter().map(Vec::len).sum::<usize>(), 500);
+}
+
+#[tokio::test(start_paused = true)]
+async fn fifo_batch_calls_overlap_across_message_groups() {
+    let broker = MemoryBroker::new("us-east-1", "000000000000");
+    let mut backend = broker.backend();
+    let slow = std::sync::Arc::new(SlowBatches::new(backend.sqs.clone(), Duration::from_millis(100)));
+    backend.sqs = slow.clone();
+    let client = Client::with_backend(backend, ClientConfig::default()).unwrap();
+    let url = client
+        .backend()
+        .sqs
+        .create_queue("q.fifo", &StringMap::from([("FifoQueue".to_string(), "true".to_string())]), &StringMap::new())
+        .await
+        .unwrap();
+    // 200 messages over 40 groups: 20 calls one after another before, now in up to eight lanes.
+    let started = tokio::time::Instant::now();
+    let results = client.publish_batch(&fifo_queue_destination(&url), grouped_messages(200, 40)).await.unwrap();
+    assert!(results.iter().all(Result::is_ok));
+    assert_eq!(results[199].as_ref().unwrap().message_id, "m199");
+    assert!(slow.sends.take_peak() > 1, "FIFO batch calls of different groups did not overlap");
+    assert!(started.elapsed() < Duration::from_millis(1000), "took {:?}", started.elapsed());
+    let bodies: Vec<String> = broker.queue_messages(&url).unwrap().into_iter().map(|m| m.body).collect();
+    assert_group_order(&bodies, 200, 40);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_retried_fifo_batch_blocks_only_its_own_lane() {
+    let broker = MemoryBroker::new("us-east-1", "000000000000");
+    let mut backend = broker.backend();
+    // The entries of the first batch call (the first lane's) fail: they are retried after a backoff.
+    backend.sqs = std::sync::Arc::new(ThrottledBatches::new(backend.sqs.clone(), BatchFailure::Entries, 1));
+    let client = Client::with_backend(backend, ClientConfig::default()).unwrap();
+    let url = client
+        .backend()
+        .sqs
+        .create_queue("q.fifo", &StringMap::from([("FifoQueue".to_string(), "true".to_string())]), &StringMap::new())
+        .await
+        .unwrap();
+    let results = client.publish_batch(&fifo_queue_destination(&url), grouped_messages(200, 40)).await.unwrap();
+    assert!(results.iter().all(Result::is_ok));
+    let bodies: Vec<String> = broker.queue_messages(&url).unwrap().into_iter().map(|m| m.body).collect();
+    assert_group_order(&bodies, 200, 40);
+    // The other lanes sent everything while the first lane waited to retry its first batch.
+    let first_lane = (0..40).map(|g| format!("g{g}")).find(|g| fifo_lane(Some(g), 8) == 0).unwrap();
+    let in_first_lane = |body: &String| fifo_lane(body.split_once(':').map(|(group, _)| group), 8) == 0;
+    let first = bodies.iter().position(in_first_lane).unwrap();
+    assert!(bodies[first..].iter().all(in_first_lane), "the first lane ({first_lane}, ...) held back other lanes");
+    assert!(first > 0);
+}
+
 #[tokio::test(start_paused = true)]
 async fn fifo_batches_keep_their_order_when_a_batch_is_retried() {
     let broker = MemoryBroker::new("us-east-1", "000000000000");
     let mut backend = broker.backend();
-    // The first batch call is throttled (after the SDK's own retries): its entries are retried.
-    backend.sqs = std::sync::Arc::new(ThrottledBatches::new(backend.sqs.clone(), 1));
+    // The entries of the first batch call fail with a retryable error: they are retried.
+    backend.sqs = std::sync::Arc::new(ThrottledBatches::new(backend.sqs.clone(), BatchFailure::Entries, 1));
     let client = Client::with_backend(backend, ClientConfig::default()).unwrap();
     let url = client
         .backend()
@@ -372,16 +479,91 @@ async fn fifo_batches_keep_their_order_when_a_batch_is_retried() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn standard_batches_retry_throttled_entries() {
+async fn standard_batches_retry_failed_entries() {
     let broker = MemoryBroker::new("us-east-1", "000000000000");
     let mut backend = broker.backend();
-    backend.sqs = std::sync::Arc::new(ThrottledBatches::new(backend.sqs.clone(), 2));
+    let throttled = std::sync::Arc::new(ThrottledBatches::new(backend.sqs.clone(), BatchFailure::Entries, 2));
+    backend.sqs = throttled.clone();
     let client = Client::with_backend(backend, ClientConfig::default()).unwrap();
     let url = client.backend().sqs.create_queue("q", &StringMap::new(), &StringMap::new()).await.unwrap();
     let messages: Vec<OutgoingMessage> = (0..25).map(|i| message(&format!("m{i}"), &i.to_string())).collect();
     let results = client.publish_batch(&queue(&url), messages).await.unwrap();
     assert!(results.iter().all(Result::is_ok));
     assert_eq!(broker.queue_messages(&url).unwrap().len(), 25);
+    // Three calls, then one retrying the 20 failed entries together (two calls of 10).
+    assert_eq!(*throttled.calls.lock(), 5);
+    assert_eq!(client.metrics().publish_retries.get(), 20);
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_entries_are_retried_up_to_publish_retry_attempts() {
+    let broker = MemoryBroker::new("us-east-1", "000000000000");
+    let mut backend = broker.backend();
+    let throttled = std::sync::Arc::new(ThrottledBatches::new(backend.sqs.clone(), BatchFailure::Entries, usize::MAX));
+    backend.sqs = throttled.clone();
+    let client = Client::with_backend(backend, ClientConfig::default()).unwrap();
+    let url = client.backend().sqs.create_queue("q", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let results = client.publish_batch(&queue(&url), vec![message("m", "x")]).await.unwrap();
+    let err = results.into_iter().next().unwrap().unwrap_err();
+    assert!(err.is_retryable(), "{err}");
+    assert_eq!(*throttled.calls.lock(), ClientConfig::default().publish_retry.max_attempts as usize);
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_batch_calls_are_not_retried_on_top_of_the_sdk() {
+    // A call that failed as a whole (throttling, a timeout, a 5xx) was already retried by the
+    // SDK, within its retry quota: retrying it again multiplied the attempts during an outage and,
+    // after a timeout that reached SQS, the duplicates on standard queues (#195).
+    for fifo in [false, true] {
+        let broker = MemoryBroker::new("us-east-1", "000000000000");
+        let mut backend = broker.backend();
+        let throttled = std::sync::Arc::new(ThrottledBatches::new(backend.sqs.clone(), BatchFailure::Call, 1));
+        backend.sqs = throttled.clone();
+        let client = Client::with_backend(backend, ClientConfig::default()).unwrap();
+        let (name, attributes) = if fifo {
+            ("q.fifo", StringMap::from([("FifoQueue".to_string(), "true".to_string())]))
+        } else {
+            ("q", StringMap::new())
+        };
+        let url = client.backend().sqs.create_queue(name, &attributes, &StringMap::new()).await.unwrap();
+        let destination =
+            Destination::Queue { url: url.clone(), fifo, content_based_deduplication: false, max_message_size: None };
+        let messages: Vec<OutgoingMessage> = (0..25)
+            .map(|i| OutgoingMessage {
+                group_id: fifo.then(|| "g".to_string()),
+                ..message(&format!("m{i}"), &i.to_string())
+            })
+            .collect();
+        let started = tokio::time::Instant::now();
+        let results = client.publish_batch(&destination, messages).await.unwrap();
+        assert_eq!(started.elapsed(), Duration::ZERO, "fifo={fifo}: waited for a retry");
+        // One call per batch: the first failed and its entries report the call's error.
+        assert_eq!(*throttled.calls.lock(), 3, "fifo={fifo}");
+        assert_eq!(client.metrics().publish_retries.get(), 0, "fifo={fifo}");
+        assert_eq!(client.metrics().publish_failures.get(), 10, "fifo={fifo}");
+        let failed: Vec<usize> = results.iter().enumerate().filter(|(_, r)| r.is_err()).map(|(i, _)| i).collect();
+        assert_eq!(failed, (0..10).collect::<Vec<_>>(), "fifo={fifo}");
+        let err = results[0].as_ref().unwrap_err();
+        assert!(err.is_retryable(), "fifo={fifo}: {err}");
+        assert_eq!(broker.queue_messages(&url).unwrap().len(), 15, "fifo={fifo}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_topic_batch_calls_are_not_retried() {
+    let broker = MemoryBroker::new("us-east-1", "000000000000");
+    let mut backend = broker.backend();
+    let topic = backend.sns.create_topic("t", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let throttled = std::sync::Arc::new(ThrottledPublishBatches::new(backend.sns.clone(), BatchFailure::Call, 1));
+    backend.sns = throttled.clone();
+    let client = Client::with_backend(backend, ClientConfig::default()).unwrap();
+    let destination =
+        Destination::Topic { arn: topic, fifo: false, content_based_deduplication: false, max_message_size: None };
+    let messages = (0..3).map(|i| message(&format!("m{i}"), &i.to_string())).collect();
+    let results = client.publish_batch(&destination, messages).await.unwrap();
+    assert!(results.iter().all(Result::is_err));
+    assert!(throttled.calls.lock().is_empty());
+    assert_eq!(client.metrics().publish_retries.get(), 0);
 }
 
 #[tokio::test(start_paused = true)]
