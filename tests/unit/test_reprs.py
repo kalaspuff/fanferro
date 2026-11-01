@@ -104,7 +104,7 @@ async def test_memory_broker_repr_counts_resources() -> None:
 
 def test_codec_registry_repr_lists_codecs_in_lookup_order() -> None:
     assert repr(CodecRegistry()) == (
-        "CodecRegistry(['protobuf', 'pydantic', 'msgspec', 'dataclass', 'bytes', 'text', 'json'])"
+        "CodecRegistry(['protobuf', 'pydantic', 'msgspec', 'aws', 'dataclass', 'bytes', 'text', 'json'])"
     )
     assert repr(CodecRegistry([JsonCodec()])) == "CodecRegistry(['json'])"
 

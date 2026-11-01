@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from fanferro.codecs._aws import AwsNotificationCodec
 from fanferro.codecs._base import Codec, EncodedBody, media_type
 from fanferro.codecs._dataclass import DataclassCodec
 from fanferro.codecs._json import JsonCodec
@@ -20,7 +21,7 @@ __all__ = ["CodecRegistry", "default_codecs"]
 
 
 _BUILTIN_CODECS: frozenset[type] = frozenset(
-    {ProtobufCodec, PydanticCodec, MsgspecCodec, DataclassCodec, BytesCodec, TextCodec, JsonCodec}
+    {ProtobufCodec, PydanticCodec, MsgspecCodec, AwsNotificationCodec, DataclassCodec, BytesCodec, TextCodec, JsonCodec}
 )
 
 
@@ -30,7 +31,16 @@ def default_codecs() -> list[Codec]:
     Library-specific codecs (protobuf, pydantic, msgspec) are always present but only match when
     the library is imported, so fanferro has no required dependencies.
     """
-    return [ProtobufCodec(), PydanticCodec(), MsgspecCodec(), DataclassCodec(), BytesCodec(), TextCodec(), JsonCodec()]
+    return [
+        ProtobufCodec(),
+        PydanticCodec(),
+        MsgspecCodec(),
+        AwsNotificationCodec(),
+        DataclassCodec(),
+        BytesCodec(),
+        TextCodec(),
+        JsonCodec(),
+    ]
 
 
 class CodecRegistry:

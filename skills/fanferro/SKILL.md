@@ -29,7 +29,9 @@ in code: `await dlq.peek()`, `await dlq.redrive()`).
    Messages are raw JSON bodies by default; opt into CloudEvents with
    `Client(envelope=fanferro.envelopes.CloudEvents())`. tomodachi services: envelopes
    `fanferro.envelopes.compat.TomodachiJSON()`/`TomodachiProtobuf()` (also in `accept_envelopes`,
-   before `Raw`); the tomodachi topic is the message type.
+   before `Raw`); the tomodachi topic is the message type. S3 events and SES bounces, complaints
+   and deliveries are recognised by default: annotate handlers with `fanferro.aws.S3Event`,
+   `SesBounceNotification`, `SesComplaintNotification`, `SesDeliveryNotification`.
 9. Tests: `fanferro.testing.memory_client()` + `consumer.run_until_idle()`; handler unit tests with
    `fanferro.testing.build_message(obj, attempt=..., topic=...)`, routers and outcomes with
    `await fanferro.testing.dispatch(router, obj)`; end-to-end against MiniStack (`endpoint_url=http://localhost:4566`).

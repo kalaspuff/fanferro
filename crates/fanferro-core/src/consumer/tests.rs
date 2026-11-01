@@ -1694,7 +1694,7 @@ async fn envelopes_are_unwrapped_while_decoding() {
         delivery.lease.ack().await.unwrap();
     }
     seen.sort_unstable();
-    assert_eq!(seen, [0, 2, usize::MAX], "CloudEvents, raw and a malformed CloudEvent");
+    assert_eq!(seen, [0, 3, usize::MAX], "CloudEvents, raw and a malformed CloudEvent");
     engine.close(true).await;
 
     // Without a matching envelope, and without envelopes at all.

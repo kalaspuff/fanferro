@@ -19,6 +19,7 @@ with ``Client(codecs=CodecRegistry([MyCodec(), *default_codecs()]))`` or
 ``client.codecs.register(MyCodec())``.
 """
 
+from fanferro.codecs._aws import AwsNotificationCodec
 from fanferro.codecs._base import (
     JSON_CONTENT_TYPE,
     OCTET_STREAM,
@@ -43,6 +44,7 @@ __all__ = [
     "OCTET_STREAM",
     "PROTOBUF_CONTENT_TYPE",
     "TEXT_CONTENT_TYPE",
+    "AwsNotificationCodec",
     "BytesCodec",
     "Codec",
     "CodecRegistry",
