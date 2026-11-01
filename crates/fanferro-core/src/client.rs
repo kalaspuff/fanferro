@@ -26,7 +26,8 @@ pub struct ClientConfig {
     /// How incoming payload pointers are resolved.
     #[serde(default)]
     pub fetch: FetchSettings,
-    /// Retries for failed batch entries and checksum mismatches.
+    /// Retries for batch entries the service reports as failed (or leaves out of its response)
+    /// and for checksum mismatches; failed batch calls are retried by the SDK only.
     #[serde(default)]
     pub publish_retry: RetrySettings,
     /// Verify the MD5 digests returned by SQS for sent and received messages (opt-in: TLS
