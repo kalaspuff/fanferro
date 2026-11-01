@@ -26,6 +26,7 @@ single-process workers.
 from __future__ import annotations
 
 import time
+from collections import OrderedDict
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -74,45 +75,94 @@ class IdempotencyStore(Protocol):
 class InMemoryIdempotencyStore:
     """Process-local store (tests, single-process workers).
 
-    Expired keys are forgotten (checked at most once per ``sweep_interval`` seconds), so a long-running
-    worker keeps only the keys of its last ``ttl`` seconds in memory.
+    Claims and completed keys are kept in the order they expire in, so forgetting expired keys
+    (at most once per ``sweep_interval`` seconds) only touches the expired ones, however many live
+    keys the store holds. Each key takes about 200 bytes, and a worker keeps every key of its last
+    ``ttl`` seconds: at 100 messages per second, the middleware's default ``ttl`` of 7 days would be
+    60 million keys. The store therefore keeps at most ``max_entries`` keys and forgets the oldest
+    completed keys beyond that (only deduplication of very old messages is lost), and an in-memory
+    store suits a shorter ``ttl``: duplicates from publishers and redeliveries after a lost delete
+    usually arrive within minutes, for example ``idempotent(ttl=timedelta(hours=1))``.
+
+    Args:
+        clock: Monotonic time in seconds (tests pass a fake one).
+        sweep_interval: How often expired keys are forgotten (seconds or a ``timedelta``).
+        max_entries: Most keys kept (``None``: unbounded). Beyond it the oldest completed keys are
+            forgotten first, then the oldest claims.
     """
 
-    def __init__(self, *, clock: Callable[[], float] = time.monotonic, sweep_interval: Duration = 60.0) -> None:
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        sweep_interval: Duration = 60.0,
+        max_entries: int | None = 100_000,
+    ) -> None:
         sweep_interval = seconds(sweep_interval, "sweep_interval")
+        if max_entries is not None and (isinstance(max_entries, bool) or not isinstance(max_entries, int)):
+            raise TypeError(f"max_entries must be an int or None, got {type(max_entries).__name__}")
+        if max_entries is not None and max_entries < 1:
+            raise ValueError(f"max_entries must be at least 1 (or None for no bound), got {max_entries}")
         self._clock = clock
-        self._entries: dict[str, tuple[Claim, float]] = {}
+        # Key -> deadline, in insertion order. Every claim uses the middleware's lock_ttl and every
+        # completion its ttl, so insertion order is expiry order and a sweep stops at the first
+        # live key. (With varying ttls a live key may shield expired ones behind it until it
+        # expires; lookups still check each deadline.) A key is in at most one of them.
+        self._in_progress: OrderedDict[str, float] = OrderedDict()
+        self._completed: OrderedDict[str, float] = OrderedDict()
         self._sweep_interval = sweep_interval
+        self._max_entries = max_entries
         self._next_sweep = clock() + sweep_interval
 
     def _forget_expired(self, now: float) -> None:
         if now < self._next_sweep:
             return
         self._next_sweep = now + self._sweep_interval
-        expired = [key for key, (_, until) in self._entries.items() if until <= now]
-        for key in expired:
-            del self._entries[key]
+        for entries in (self._in_progress, self._completed):
+            while entries:
+                key, until = next(iter(entries.items()))
+                if until > now:
+                    break
+                del entries[key]
+
+    def _bound(self) -> None:
+        if self._max_entries is None:
+            return
+        while len(self) > self._max_entries:
+            (self._completed or self._in_progress).popitem(last=False)
 
     async def claim(self, key: str, *, lock_ttl: float) -> Claim:
         """Claims ``key`` unless it is completed or claimed by someone else."""
         now = self._clock()
         self._forget_expired(now)
-        entry = self._entries.get(key)
-        if entry is not None and entry[1] > now:
-            return entry[0] if entry[0] is Claim.COMPLETED else Claim.IN_PROGRESS
-        self._entries[key] = (Claim.IN_PROGRESS, now + lock_ttl)
+        until = self._completed.get(key)
+        if until is not None:
+            if until > now:
+                return Claim.COMPLETED
+            del self._completed[key]
+        until = self._in_progress.get(key)
+        if until is not None:
+            if until > now:
+                return Claim.IN_PROGRESS
+            del self._in_progress[key]  # taken over: appended again with its new deadline
+        self._in_progress[key] = now + lock_ttl
+        self._bound()
         return Claim.ACQUIRED
 
     async def complete(self, key: str, *, ttl: float) -> None:
         """Marks ``key`` as processed for ``ttl`` seconds."""
-        self._entries[key] = (Claim.COMPLETED, self._clock() + ttl)
+        self._in_progress.pop(key, None)
+        self._completed.pop(key, None)
+        self._completed[key] = self._clock() + ttl
+        self._bound()
 
     async def release(self, key: str) -> None:
         """Drops the claim on ``key``."""
-        self._entries.pop(key, None)
+        self._in_progress.pop(key, None)
+        self._completed.pop(key, None)
 
     def __len__(self) -> int:
-        return len(self._entries)
+        return len(self._in_progress) + len(self._completed)
 
 
 _PROCESSED_AGAIN = frozenset({"retried", "requeued", "released", "dead_lettered"})

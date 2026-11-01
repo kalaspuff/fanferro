@@ -153,10 +153,13 @@ at most 12 hours).
 
 `RateLimit`: `per_second`, `burst`.
 
+`InMemoryIdempotencyStore`: `clock` (`time.monotonic`), `sweep_interval` (60 s), `max_entries`
+(100,000; `None` for no bound; beyond it the oldest completed keys are forgotten first).
+
 Durations in the policies (`Backoff`'s delays, `ShutdownPolicy`'s timeouts, `Heartbeat`), in
 `Retry(delay=...)`, `Requeue(delay=...)`, `message.retry()`, `message.requeue()`,
 `message.extend()`, `consumer.stop()` and `run_until_idle()`, `IdempotencyMiddleware`,
-`InMemoryIdempotencyStore`, `OutboxRelay(poll_interval=)` and a publish's `delay` are seconds or a `timedelta`;
+`InMemoryIdempotencyStore(sweep_interval=)`, `OutboxRelay(poll_interval=)` and a publish's `delay` are seconds or a `timedelta`;
 the policies and `OutgoingMessage` keep them as float seconds.
 
 `Provisioning`: `lookup` (`True`), `verify` (`True`), `create` (`False`), `update` (`False`),
