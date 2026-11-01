@@ -12,12 +12,17 @@ and generated entries of the pull requests they mention are left out (no change 
 If CHANGELOG.md already has a ``## [<version>] - Unreleased`` section (hand-written, e.g. for the
 first release), it is dated instead. ``scripts/release_notes.py`` turns the section into the
 GitHub release notes, so polish it in the release PR.
+
+git-cliff looks up the pull request of each commit on the GitHub API. Unauthenticated, that API
+allows 60 requests an hour per IP address (a run takes about 15), so the script passes on
+``GITHUB_TOKEN`` or, without it, the token of the GitHub CLI (``gh auth token``) when there is one.
 """
 
 from __future__ import annotations
 
 import argparse
 import datetime
+import os
 import re
 import subprocess
 import sys
@@ -61,14 +66,33 @@ def bump_cargo(old: str, new: str) -> None:
     subprocess.run(["cargo", "update", "--workspace"], cwd=ROOT, check=True)
 
 
+def github_token() -> str | None:
+    """``GITHUB_TOKEN``, or the GitHub CLI's token, for git-cliff's GitHub API requests."""
+    if token := os.environ.get("GITHUB_TOKEN"):
+        return token
+    try:
+        result = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, check=False)
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
 def generated_section(version: str) -> str:
+    env = dict(os.environ)
+    if token := github_token():
+        env["GITHUB_TOKEN"] = token
     result = subprocess.run(
         ["uvx", GIT_CLIFF, "--config", "cliff.toml", "--unreleased", "--tag", f"v{version}", "--strip", "all"],
         cwd=ROOT,
-        check=True,
+        env=env,
         capture_output=True,
         text=True,
     )
+    if result.returncode != 0:
+        hint = "" if "GITHUB_TOKEN" in env else " (set GITHUB_TOKEN: unauthenticated GitHub API use is rate limited)"
+        raise SystemExit(f"git-cliff failed with exit status {result.returncode}{hint}:\n{result.stderr.strip()}")
     return result.stdout.strip()
 
 

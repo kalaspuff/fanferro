@@ -80,6 +80,7 @@ Commit as `chore(release): v0.2.0` through a PR; pushing a tag `v0.2.0` by hand 
 | --- | --- |
 | "tag vX does not match Cargo.toml version" | The tag points at a commit without the bump; delete the tag, release from the merged bump commit |
 | "CHANGELOG.md has no '## [X]' section" | Add the section on main through a PR, re-tag (or re-run with the new tag) |
+| "git-cliff failed with exit status 101" in Prepare release, "Could not get github metadata" | git-cliff looks up pull requests on the GitHub API and panics when a request fails, such as when the rate limit runs out (60 an hour per IP address without a token). `prepare-release.yml` passes the workflow token as `GITHUB_TOKEN`, and `release.py` run locally falls back to `gh auth token`; for a passing outage, run the workflow again |
 | "tag vX already exists" in Tag release | The version was released already; prepare a new version |
 | A release job failed and nothing was published | `release.yml` runs from the tag, so a workflow fix needs a new tag: fix on `main`, delete the tag (`git push origin :refs/tags/vX`), re-tag the fixed commit and run Release for it |
 | Windows arm64 job failed | Best effort: the release continued without that wheel; fix in a patch release |
