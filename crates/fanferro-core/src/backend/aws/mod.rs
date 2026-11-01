@@ -92,7 +92,7 @@ impl Default for RetrySettings {
 ///
 /// Long polls get at least their wait time plus 15 seconds for `read`, `attempt` and `operation`,
 /// and requests that upload a large body (payload objects, big messages) one more second per
-/// 64 KiB. Transfers that stall are cut off by the SDK's stalled-stream protection.
+/// 64 KiB, rounded up to a power of two seconds. Transfers that stall are cut off by the SDK's stalled-stream protection.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TimeoutSettings {
@@ -118,9 +118,17 @@ const UPLOAD_BYTES_PER_SECOND: usize = 64 * 1024;
 
 /// The configured read, attempt and operation timeouts, extended for a request that uploads
 /// `bytes`. `None` when the request is small or has no such timeouts.
+///
+/// The extension is rounded up to a power of two seconds, so that requests share a few sizes:
+/// the SDK's HTTP client keeps a connector, with a connection pool and TLS configuration of its
+/// own, for every distinct read timeout of a request and never drops it. One second per 64 KiB
+/// exactly opened a pool per 64 KiB of size, up to about a thousand for S3 uploads (#174); this
+/// way SQS and SNS requests use at most 5 extended timeouts and uploads up to 64 MiB 11. Keep any
+/// other per-request timeout override to a few values for the same reason.
 pub(crate) fn upload_timeouts(configured: Option<&TimeoutConfig>, bytes: usize) -> Option<TimeoutConfig> {
-    let extra = Duration::from_secs(u64::try_from(bytes / UPLOAD_BYTES_PER_SECOND).unwrap_or(u64::MAX));
-    let configured = configured.filter(|_| !extra.is_zero())?;
+    let steps = u64::try_from(bytes / UPLOAD_BYTES_PER_SECOND).unwrap_or(u64::MAX);
+    let configured = configured.filter(|_| steps > 0)?;
+    let extra = Duration::from_secs(steps.checked_next_power_of_two().unwrap_or(u64::MAX));
     // Only what is configured: unset fields of an override inherit the client's.
     let mut builder = TimeoutConfig::builder();
     if let Some(timeout) = configured.read_timeout() {
@@ -393,6 +401,8 @@ mod tests {
         assert!(upload_timeouts(Some(&configured), 64 * 1024 - 1).is_none(), "small requests keep the timeouts");
         let extended = upload_timeouts(Some(&configured), 1024 * 1024).unwrap();
         assert_eq!(extended.read_timeout(), Some(seconds(26)), "one more second per 64 KiB");
+        let extended = upload_timeouts(Some(&configured), 1024 * 1024 + 64 * 1024).unwrap();
+        assert_eq!(extended.read_timeout(), Some(seconds(42)), "rounded up to a power of two");
         assert_eq!(extended.operation_attempt_timeout(), None, "unset timeouts are left to the client's");
         let all = TimeoutConfig::builder()
             .read_timeout(seconds(10))
@@ -400,10 +410,25 @@ mod tests {
             .operation_timeout(seconds(60))
             .build();
         let extended = upload_timeouts(Some(&all), 640 * 1024).unwrap();
-        assert_eq!(extended.operation_attempt_timeout(), Some(seconds(40)));
-        assert_eq!(extended.operation_timeout(), Some(seconds(70)));
+        assert_eq!(extended.operation_attempt_timeout(), Some(seconds(46)));
+        assert_eq!(extended.operation_timeout(), Some(seconds(76)));
         assert!(upload_timeouts(Some(&TimeoutConfig::builder().build()), 1024 * 1024).is_none());
         assert!(upload_timeouts(None, 1024 * 1024).is_none());
+    }
+
+    #[test]
+    fn large_uploads_share_a_few_timeouts() {
+        // The SDK keeps a connection pool per distinct read timeout (#174).
+        let configured = TimeoutConfig::builder().read_timeout(Duration::from_secs(10)).build();
+        let distinct = |max: usize| {
+            (0..=max)
+                .step_by(4 * 1024)
+                .filter_map(|bytes| upload_timeouts(Some(&configured), bytes)?.read_timeout())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+        };
+        assert_eq!(distinct(1024 * 1024), 5, "SQS bodies up to 1 MiB");
+        assert_eq!(distinct(64 * 1024 * 1024), 11, "payload uploads up to 64 MiB");
     }
 
     #[tokio::test]

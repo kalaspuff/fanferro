@@ -38,6 +38,13 @@ fn is_sqs_safe_text(text: &str) -> bool {
     fanferro_core::types::text::is_sqs_safe_text(text)
 }
 
+/// Checks the attributes of a wire message as a publish does before sending it inline (raises
+/// `ValidationError`).
+#[pyfunction]
+fn validate_wire(wire: &types::PyWireMessage) -> PyResult<()> {
+    fanferro_core::transport::validate_wire(&wire.inner).map_err(errors::to_py_err)
+}
+
 /// All event kinds as `(name, default level, description)` tuples.
 #[pyfunction]
 fn event_kinds() -> Vec<(&'static str, &'static str, &'static str)> {
@@ -88,6 +95,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(xray_from_traceparent, m)?)?;
     m.add_function(wrap_pyfunction!(traceparent_from_xray, m)?)?;
     m.add_function(wrap_pyfunction!(is_sqs_safe_text, m)?)?;
+    m.add_function(wrap_pyfunction!(validate_wire, m)?)?;
     m.add_function(wrap_pyfunction!(event_kinds, m)?)?;
     m.add_function(wrap_pyfunction!(reserved_attributes, m)?)?;
     m.add_function(wrap_pyfunction!(_reset_after_fork, m)?)?;

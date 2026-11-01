@@ -4,7 +4,7 @@
 //! takes logarithmic time or less, however many messages a queue holds, so large test queues
 //! stay fast.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 use time::OffsetDateTime;
@@ -29,6 +29,9 @@ pub(super) struct StoredMessage {
     pub receive_count: u32,
     pub first_receive: Option<OffsetDateTime>,
     pub receipt_handle: Option<String>,
+    /// Receipt handles of earlier receives, which SQS still knows while the message is in the
+    /// queue; they go with the message (#212).
+    pub earlier_receipts: HashSet<String>,
     /// When the message was received last (the 12 hour visibility limit counts from there).
     pub received_at: Option<Instant>,
     /// Received and not released since (until `available_at`).
@@ -146,8 +149,8 @@ impl Messages {
     }
 
     /// Receives a visible message at `now`: counts the receive and hides it, in flight until
-    /// `until`, with a new receipt handle. Returns the message and the handle it replaced.
-    pub fn receive(&mut self, sequence: u64, now: Instant, until: Instant) -> Option<(&StoredMessage, Option<String>)> {
+    /// `until`, with a new receipt handle; the handle it replaces joins `earlier_receipts`.
+    pub fn receive(&mut self, sequence: u64, now: Instant, until: Instant) -> Option<&StoredMessage> {
         let message = self.by_sequence.get_mut(&sequence)?;
         self.visible.remove(&sequence);
         self.redelivered.remove(&sequence);
@@ -156,8 +159,9 @@ impl Messages {
         let handle = format!("{}#{}", message.message_id, uuid::Uuid::new_v4());
         message.received_at = Some(now);
         let previous = message.receipt_handle.replace(handle.clone());
-        if let Some(previous) = &previous {
-            self.receipts.remove(previous);
+        if let Some(previous) = previous {
+            self.receipts.remove(&previous);
+            message.earlier_receipts.insert(previous);
         }
         self.receipts.insert(handle, sequence);
         if !message.in_flight {
@@ -169,7 +173,7 @@ impl Messages {
         }
         message.available_at = until;
         self.hidden.insert((until, sequence));
-        Some((message, previous))
+        Some(message)
     }
 
     /// The message with the current receipt handle `handle`.
@@ -296,6 +300,7 @@ mod tests {
             receive_count: 0,
             first_receive: None,
             receipt_handle: None,
+            earlier_receipts: HashSet::new(),
             received_at: None,
             in_flight: false,
             group_id: group.map(str::to_string),
@@ -321,8 +326,9 @@ mod tests {
         assert_eq!(messages.counts(), (2, 0, 1));
 
         let a = messages.visible().next().unwrap().0;
-        let (received, previous) = messages.receive(a, now, now + Duration::from_secs(10)).unwrap();
-        assert_eq!((received.receive_count, previous), (1, None));
+        let received = messages.receive(a, now, now + Duration::from_secs(10)).unwrap();
+        assert_eq!(received.receive_count, 1);
+        assert!(received.earlier_receipts.is_empty());
         let first = received.receipt_handle.clone().unwrap();
         assert!(first.starts_with("a#"));
         assert!(messages.group_in_flight("g"));
@@ -340,8 +346,9 @@ mod tests {
 
         // A new receive replaces the handle; releasing makes the message visible at once.
         let later = now + Duration::from_secs(10);
-        let (received, previous) = messages.receive(a, later, later + Duration::from_secs(30)).unwrap();
-        assert_eq!((received.receive_count, previous.as_deref()), (2, Some(first.as_str())));
+        let received = messages.receive(a, later, later + Duration::from_secs(30)).unwrap();
+        assert_eq!(received.receive_count, 2);
+        assert_eq!(received.earlier_receipts, HashSet::from([first.clone()]));
         let second = received.receipt_handle.clone().unwrap();
         assert_eq!(messages.by_receipt(&first), None);
         messages.change_visibility(a, later, Duration::ZERO);
