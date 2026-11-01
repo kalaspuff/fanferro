@@ -57,6 +57,29 @@ deployments as they behave on SQS; it is off by default, so that a test that sto
 goes on at once does not wait for visibility timeouts. fanferro's consumers keep the messages they
 release while stopping out of such polls, on SQS and on such a broker.
 
+## Lambda functions
+
+A function from `fanferro.aws_lambda.sqs_handler` (see [deployment](deployment.md#lambda)) is
+tested against the queue it consumes: `invoke_sqs_handler` does what the event source mapping does
+once (receives up to ten messages, invokes the handler with them as an SQS event, deletes the
+records the response does not list), and `receive_sqs_event` only builds the event, with real
+receipt handles, to inspect or invoke yourself.
+
+```python
+from fanferro.testing import invoke_sqs_handler, memory_client
+
+async def test_function() -> None:
+    client = memory_client()
+    payments = client.queue("payments", dead_letter=fanferro.DeadLetterQueue("payments-dlq"))
+    handler = fanferro.aws_lambda.sqs_handler(client, book, queue=payments)
+    await payments.send(PaymentCaptured("p-1", 100))
+    assert await invoke_sqs_handler(handler, payments) == {"batchItemFailures": []}
+```
+
+Hand-written events work too (`await handler.handle({"Records": [...]})`): settling them needs no
+receipt handle, except for retries and releases, whose visibility change then fails (the record
+is still reported as failed).
+
 ## Against an emulator
 
 [MiniStack](https://github.com/ministackorg/ministack) runs without Docker:
@@ -78,4 +101,5 @@ integration scenario against both the in-memory broker and MiniStack.
 * Use unique resource names per test when sharing an emulator.
 * Lower `wait_time` (e.g. 1) in tests so consumers stop quickly.
 * Assert on events: `client.on("message.dead_lettered", seen.append)`.
-* `consumer.stats()` and `client.metrics()` expose counters for assertions.
+* `consumer.stats()`, `client.metrics()` and `queue.approximate_count()` expose counters for
+  assertions (`consumer.stats().engine.messages_acked == 1`, `(await queue.approximate_count()).visible == 0`).

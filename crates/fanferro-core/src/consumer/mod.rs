@@ -30,6 +30,7 @@ mod config;
 mod heartbeat;
 mod lease;
 mod poller;
+pub mod records;
 mod settle;
 
 use std::borrow::Cow;
@@ -236,6 +237,9 @@ pub(crate) struct EngineInner {
     orphaned_receives_until: Mutex<Option<Instant>>,
     /// Envelopes applied while decoding (see [`ConsumerEngine::with_envelopes`]).
     envelopes: Option<EnvelopeSet>,
+    /// Receipt handles of messages settled with a delete, which an engine with
+    /// `external` messages records instead of sending (see [`ConsumerEngine::take_deleted`]).
+    pub(crate) deleted: Mutex<Vec<String>>,
 }
 
 /// The receive loops: `pollers` that always run, and extra ones while the queue keeps receives
@@ -413,33 +417,11 @@ impl EngineInner {
             for (message, permit) in messages.into_iter().zip(permits) {
                 let id = self.next_lease_id.fetch_add(1, Ordering::Relaxed);
                 let message = Arc::new(message);
-                leases.insert(
-                    id,
-                    LeaseEntry {
-                        message: message.clone(),
-                        received_at: now,
-                        visible_until: now + self.settings.visibility_timeout,
-                        next_heartbeat: now + self.settings.heartbeat_interval,
-                        max_until: now + self.settings.max_lease,
-                        status: LeaseStatus::Buffered,
-                        extending: None,
-                    },
-                );
-                leased.push(Lease::new(id, self.clone(), message, permit));
+                leases.insert(id, self.lease_entry(&message, now));
+                leased.push(Lease::new(id, self.clone(), message, Some(permit)));
             }
         }
-        self.metrics.messages_received.add(leased.len() as u64);
-        self.metrics.in_flight.add(i64::try_from(leased.len()).unwrap_or(i64::MAX));
-        for lease in &leased {
-            let message = lease.message();
-            self.client.events().emit(EventKind::MessageReceived, || {
-                Event::new(EventKind::MessageReceived, "message received")
-                    .field("queue", self.queue())
-                    .field("sqs_message_id", &message.message_id)
-                    .field("receive_count", message.system.approximate_receive_count)
-                    .field_opt("group_id", message.system.message_group_id.clone())
-            });
-        }
+        self.received(&leased);
         let inner = self.clone();
         self.decoders.spawn(async move {
             // Decoded concurrently (claim-check downloads overlap), handed over in order and
@@ -466,6 +448,34 @@ impl EngineInner {
                 drop(error);
             }
         });
+    }
+
+    fn lease_entry(&self, message: &Arc<ReceivedMessage>, now: Instant) -> LeaseEntry {
+        LeaseEntry {
+            message: message.clone(),
+            received_at: now,
+            visible_until: now + self.settings.visibility_timeout,
+            next_heartbeat: now + self.settings.heartbeat_interval,
+            max_until: now + self.settings.max_lease,
+            status: LeaseStatus::Buffered,
+            extending: None,
+        }
+    }
+
+    /// Counts newly leased messages and reports them (`message.received`).
+    fn received(&self, leased: &[Lease]) {
+        self.metrics.messages_received.add(leased.len() as u64);
+        self.metrics.in_flight.add(i64::try_from(leased.len()).unwrap_or(i64::MAX));
+        for lease in leased {
+            let message = lease.message();
+            self.client.events().emit(EventKind::MessageReceived, || {
+                Event::new(EventKind::MessageReceived, "message received")
+                    .field("queue", self.queue())
+                    .field("sqs_message_id", &message.message_id)
+                    .field("receive_count", message.system.approximate_receive_count)
+                    .field_opt("group_id", message.system.message_group_id.clone())
+            });
+        }
     }
 
     async fn decode(self: &Arc<Self>, lease: Lease) -> Option<Delivery> {
@@ -689,7 +699,8 @@ impl ConsumerEngine {
                 state: Mutex::new(EngineState::Created),
                 pollers: Mutex::new(Pollers::default()),
                 receives: Mutex::new(ReceivesInFlight::default()),
-                leave_dropped: AtomicBool::new(false),
+                // Messages received by someone else are left to them (see `ConsumerConfig::external`).
+                leave_dropped: AtomicBool::new(settings.external),
                 background: Mutex::new(Vec::new()),
                 decoders: TaskTracker::new(),
                 settlements: TaskTracker::new(),
@@ -697,6 +708,7 @@ impl ConsumerEngine {
                 runtime,
                 orphaned_receives_until: Mutex::new(None),
                 envelopes,
+                deleted: Mutex::new(Vec::new()),
                 settings,
             }),
         })
@@ -739,7 +751,7 @@ impl ConsumerEngine {
             background.push(inner.runtime.spawn(heartbeat::heartbeat_loop(inner.clone())));
         }
         *inner.background.lock() = background;
-        {
+        if !inner.settings.external {
             let mut pollers = inner.pollers.lock();
             for _ in 0..inner.settings.pollers {
                 let handle = inner.spawn_poller(&mut pollers, false);
@@ -755,6 +767,60 @@ impl ConsumerEngine {
                 .field("max_pollers", inner.settings.max_pollers)
         });
         Ok(())
+    }
+
+    /// Leases and decodes messages that someone else received (an AWS Lambda event source
+    /// mapping), like received messages, and returns their deliveries in order (SNS subscription
+    /// confirmations are handled and left out, as when receiving). Settling them records deletes
+    /// instead of sending them ([`Self::take_deleted`]); visibility changes, dead-letter and
+    /// requeue copies are sent. Their in-flight slots are not limited: whoever received the
+    /// messages bounds how many arrive at once.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`] unless the engine was configured with `external` messages and is
+    /// running.
+    pub async fn accept_records(&self, messages: Vec<ReceivedMessage>) -> Result<Vec<Delivery>> {
+        let inner = &self.inner;
+        if !inner.settings.external {
+            return Err(Error::config("accept_records needs a consumer engine configured with external = true"));
+        }
+        let state = self.state();
+        if state != EngineState::Running {
+            return Err(Error::config(format!("cannot accept records in consumer engine state {}", state.as_str())));
+        }
+        let now = Instant::now();
+        let leased: Vec<Lease> = {
+            let mut leases = inner.leases.lock();
+            messages
+                .into_iter()
+                .map(|message| {
+                    let id = inner.next_lease_id.fetch_add(1, Ordering::Relaxed);
+                    let message = Arc::new(message);
+                    leases.insert(id, inner.lease_entry(&message, now));
+                    Lease::new(id, inner.clone(), message, None)
+                })
+                .collect()
+        };
+        inner.received(&leased);
+        let decoded = futures::future::join_all(leased.into_iter().map(|lease| inner.decode(lease))).await;
+        Ok(decoded.into_iter().flatten().collect())
+    }
+
+    /// Takes the receipt handles of the messages settled with a delete (acked, dead-lettered,
+    /// requeued) since the last call, in an engine with `external` messages: whoever received
+    /// them deletes them (see [`Self::accept_records`]).
+    pub fn take_deleted(&self) -> Vec<String> {
+        std::mem::take(&mut *self.inner.deleted.lock())
+    }
+
+    /// Waits until the settlements running in the background (acks that were not awaited...)
+    /// completed.
+    pub async fn wait_settlements(&self) {
+        let settlements = &self.inner.settlements;
+        settlements.close();
+        settlements.wait().await;
+        settlements.reopen();
     }
 
     /// Waits up to `timeout` for deliveries and returns at most `max` of them. Returns an

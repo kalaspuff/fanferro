@@ -39,6 +39,7 @@ from fanferro.provisioning import (
     attributes_to_aws,
 )
 from fanferro.redrive import PeekedMessage, RedriveResult
+from fanferro.stats import QueueCounts
 from fanferro.telemetry import monotonic
 
 if TYPE_CHECKING:
@@ -807,14 +808,9 @@ class Queue(_Destination):
         core = await self._client._core()
         return await core.queue_attributes(info.url)
 
-    async def approximate_count(self) -> dict[str, int]:
-        """Approximate visible, in-flight and delayed message counts."""
-        attributes = await self.get_attributes()
-        return {
-            "visible": int(attributes.get("ApproximateNumberOfMessages", 0)),
-            "in_flight": int(attributes.get("ApproximateNumberOfMessagesNotVisible", 0)),
-            "delayed": int(attributes.get("ApproximateNumberOfMessagesDelayed", 0)),
-        }
+    async def approximate_count(self) -> QueueCounts:
+        """Approximate visible, in-flight and delayed message counts (``counts.visible``)."""
+        return QueueCounts.from_attributes(await self.get_attributes())
 
     async def peek(
         self,

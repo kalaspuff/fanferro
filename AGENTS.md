@@ -40,8 +40,8 @@ Requirements: Rust (stable, see `rust-toolchain.toml`), [uv](https://docs.astral
 | --- | --- |
 | Install/refresh everything (builds the extension) | `uv sync` |
 | All checks (what CI runs) | `make check` |
-| Python tests (unit + integration on memory and MiniStack + e2e) | `uv run pytest` |
-| Only fast tests (no emulator) | `uv run pytest -m "not e2e"` |
+| Python tests (unit + integration on memory and MiniStack + e2e) | `uv run pytest -n auto --dist worksteal` (`make test`; without `-n` they run one at a time, for debugging single tests) |
+| Only fast tests (no emulator) | `uv run pytest -n auto --dist worksteal -m "not e2e"` |
 | Async tests on uvloop instead of asyncio | `FANFERRO_TEST_EVENT_LOOP=uvloop uv run pytest tests/integration` |
 | Rust tests | `cargo test --workspace` |
 | Rust e2e against an emulator | `FANFERRO_TEST_ENDPOINT_URL=http://localhost:4566 cargo test -p fanferro-core --test aws_emulator` |
@@ -123,6 +123,9 @@ protocol issue), fix, keep the test.
   `#[tokio::test(start_paused = true)]` for anything time-related: tests run instantly and deterministically.
 * Python integration tests use the `client_factory` fixture → each scenario runs on the memory
   broker and on MiniStack. Use unique resource names (`name` fixture) and `wait_time=1`.
+* CI runs pytest in parallel (`-n auto --dist worksteal`, one MiniStack per worker): a test must not
+  depend on another having run, in the same process or before it, and wall-clock bounds must
+  leave room for a loaded machine.
 * Prefer asserting on events, `consumer.stats()`, `queue.approximate_count()` over sleeping.
   Helpers: `tests/helpers.py` (`consume_until`, `drain_queue`, `wait_for`).
 * Time-sensitive tests: keep visibility timeouts ≥ 2 s and use generous `wait_for` timeouts; a test

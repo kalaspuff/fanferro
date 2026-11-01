@@ -178,6 +178,8 @@ class Normalizer:
             return {"bytes": value.hex()}
         if isinstance(value, Decimal):
             return str(value)
+        if isinstance(value, fanferro.QueueCounts):
+            return self.value(value.as_dict())
         if isinstance(value, dict):
             return {self.text(str(key)): self.value(item) for key, item in value.items()}
         if isinstance(value, list | tuple):
@@ -947,7 +949,7 @@ async def sqs_delay(probe: Probe) -> None:
     seen_delayed = False  # the counts are approximate: poll them
     for _ in range(10):
         counts = await queue.approximate_count()
-        if counts["delayed"] == 1:
+        if counts.delayed == 1:
             seen_delayed = True
             break
         await asyncio.sleep(0.2)
@@ -1174,7 +1176,11 @@ async def sqs_handler_actions(probe: Probe) -> None:
         [
             {
                 "label": label_of(m),
-                "info": {k: v for k, v in (m.dead_letter_info or {}).items() if k not in {"time", "dead_lettered_at"}},
+                "info": {
+                    k: v
+                    for k, v in (m.dead_letter_info.document if m.dead_letter_info else {}).items()
+                    if k not in {"time", "dead_lettered_at"}
+                },
                 "attributes": describe_message(m)["attributes"],
             }
             for m in dead
@@ -1266,7 +1272,7 @@ async def sqs_dead_letter_redrive(probe: Probe) -> None:
             (
                 {
                     "label": json.loads(message.body).get("label"),
-                    "reason": (message.dead_letter_info or {}).get("reason"),
+                    "reason": message.dead_letter_info.reason if message.dead_letter_info else None,
                     "source_is_queue": message.source == queue.arn,
                     "requeued_attempts": message.requeued_attempts,
                     "raw_attribute_names": sorted(message.raw_attributes),
@@ -1432,7 +1438,7 @@ async def sqs_purge(probe: Probe) -> None:
     await probe.outcome("purge_again", queue.purge())
     emptied = False
     for _ in range(20):
-        if (await queue.approximate_count())["visible"] == 0:
+        if (await queue.approximate_count()).visible == 0:
             emptied = True
             break
         await asyncio.sleep(0.5)

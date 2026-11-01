@@ -37,10 +37,11 @@ from fanferro.events import EventKind
 from fanferro.messages import Message, Outcome
 from fanferro.middleware import ConsumeMiddleware, chain_consume
 from fanferro.policies import DeadLetterPolicy, FailureAction, Heartbeat, RateLimit, RetryPolicy, ShutdownPolicy
+from fanferro.stats import ConsumerStats, EngineStats
 from fanferro.telemetry import monotonic
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from fanferro.client import Client
     from fanferro.resources import Queue
@@ -100,16 +101,6 @@ class _Stats:
         self.unroutable = 0
         self.decode_failures = 0
         self.handler_seconds = 0.0
-
-    def snapshot(self) -> dict[str, Any]:
-        return {
-            "processed": self.processed,
-            "failed": self.failed,
-            "duplicates": self.duplicates,
-            "unroutable": self.unroutable,
-            "decode_failures": self.decode_failures,
-            "handler_seconds": round(self.handler_seconds, 6),
-        }
 
 
 class _Slot:
@@ -512,20 +503,26 @@ class Consumer:
         """Messages currently being processed by handlers."""
         return self._active
 
-    def stats(self) -> dict[str, Any]:
-        """Processing statistics (Python outcomes plus the Rust engine's counters)."""
-        engine: dict[str, Any] = {}
-        if self._engine is not None:
-            raw = self._engine.stats()
-            engine = {**raw.get("metrics", {}), "state": raw.get("state"), "leases": raw.get("leases")}
-        return {
-            "name": self.name,
-            "queue": self.queue.name,
-            "state": self._state,
-            "active": self._active,
-            **self._stats.snapshot(),
-            "engine": engine,
-        }
+    def stats(self) -> ConsumerStats:
+        """Processing statistics: Python outcomes and the Rust engine's counters.
+
+        ``consumer.stats().processed``, ``consumer.stats().engine.messages_acked``; ``as_dict()``
+        gives the plain dictionary.
+        """
+        stats = self._stats
+        return ConsumerStats(
+            name=self.name,
+            queue=self.queue.name,
+            state=self._state,
+            active=self._active,
+            processed=stats.processed,
+            failed=stats.failed,
+            duplicates=stats.duplicates,
+            unroutable=stats.unroutable,
+            decode_failures=stats.decode_failures,
+            handler_seconds=round(stats.handler_seconds, 6),
+            engine=EngineStats._from_core(self._engine.stats() if self._engine is not None else None),
+        )
 
     def pause(self) -> None:
         """Stops receiving new messages (in-flight messages continue)."""
@@ -567,14 +564,68 @@ class Consumer:
             self._starting = None
             starting.set_result(None)
 
-    async def _start(self) -> None:
+    async def _start_records(self) -> None:
+        """Starts processing records that someone else received (see :mod:`fanferro.aws_lambda`).
+
+        The engine runs no receive loops and no heartbeats; :meth:`_process_records` hands it
+        each batch of records. The consumer is not registered with the client (closing the client
+        does not stop it), and no dispatcher task runs.
+        """
+        if self._state not in ("created", "stopped"):
+            raise ConsumerStateError(f"consumer {self.name!r} is {self._state}")
+        if not len(self.router):
+            raise ConsumerStateError(f"consumer {self.name!r} has no routes; add a handler or routes")
+        self._state = "starting"
+        try:
+            self._emit(EventKind.CONSUMER_STARTING, f"consumer {self.name} starting")
+            await self._start(external=True)
+        except BaseException:
+            self._state = "stopped"
+            raise
+
+    async def _process_records(self, records: Sequence[Mapping[str, Any]], timeout: float | None) -> set[str]:
+        """Processes records of an SQS event (see :meth:`_start_records`) like received messages.
+
+        Returns the receipt handles of the records that left the queue (acked, discarded,
+        dead-lettered, requeued): whoever received them deletes them. Handlers still running after
+        ``timeout`` seconds are cancelled; their records stay in the queue.
+        """
+        engine = self._engine
+        deliveries = await engine.accept_records(records)
+        self._last_activity = time.monotonic()
+        self._client._telemetry.record_consumed(self.queue.name, len(deliveries))
+        self._schedule_all(deliveries)
+        # Not kept: a delivery nothing else holds must be dropped when its task ends.
+        del deliveries
+        tasks = set(self._tasks)
+        if tasks:
+            _done, pending = await asyncio.wait(tasks, timeout=timeout)
+            if pending:
+                self._emit(
+                    EventKind.CONSUMER_ERROR,
+                    f"consumer {self.name} cancelled {len(pending)} unfinished message tasks: the invocation's time "
+                    "runs out; their messages are reported as failures",
+                    in_flight=len(pending),
+                )
+                for task in pending:
+                    task.cancel()
+                await asyncio.wait(pending)
+                self._tasks.difference_update(pending)
+                # Tasks cancelled before they ran left their counters and message groups behind.
+                self._active = self._waiting = self._blocked = self._group_waits = 0
+                self._sequencer = _GroupSequencer(self)
+                self._semaphore = asyncio.Semaphore(self.concurrency)
+        await engine.wait_settlements()
+        return set(engine.take_deleted())
+
+    async def _start(self, *, external: bool = False) -> None:
         client = self._client
         info = await self.queue.resolve()
         await client._provision_subscriptions_for(self.queue)
         self._dead_letter_url = await self._resolve_dead_letter_url(info)
         visibility = self.visibility_timeout or info.visibility_timeout or 30
         heartbeat: dict[str, Any]
-        if self.heartbeat is False:
+        if self.heartbeat is False or external:
             heartbeat = {"enabled": False}
         elif isinstance(self.heartbeat, Heartbeat):
             heartbeat = self.heartbeat.to_core()
@@ -604,6 +655,7 @@ class Consumer:
             "sns_unwrap": "auto" if self.sns_unwrap else "never",
             "auto_confirm_subscriptions": self.auto_confirm_subscriptions,
             "verify_md5": client.verify_md5,
+            "external": external,
         }
         self._check_configuration(info)
         self._sequenced = self.ordering == "fifo" or (self.ordering == "auto" and self._fifo)
@@ -621,6 +673,11 @@ class Consumer:
         self._active = self._waiting = self._blocked = self._group_waits = 0
         # A group task cancelled before it ran (stopping) left its group behind in the last one.
         self._sequencer = _GroupSequencer(self)
+        if external:
+            self._engine.start()
+            self._last_activity = time.monotonic()
+            self._state = "running"
+            return
         client._acquire_pump()
         try:
             self._engine.start()
@@ -753,7 +810,7 @@ class Consumer:
                 if idle and now - self._last_activity >= idle_for:
                     # Locally idle: make sure the queue has nothing visible left either.
                     counts = await self.queue.approximate_count()
-                    if counts["visible"] == 0:
+                    if counts.visible == 0:
                         return
                     self._last_activity = time.monotonic()
                 if now >= deadline:

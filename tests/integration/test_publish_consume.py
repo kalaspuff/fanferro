@@ -49,7 +49,7 @@ async def test_queue_roundtrip_with_metadata(client_factory: ClientFactory, name
     assert message.envelope == "cloudevents"
     assert isinstance(message.time, datetime.datetime)
     assert message.outcome == "acked"
-    assert (await queue.approximate_count())["visible"] == 0
+    assert (await queue.approximate_count()).visible == 0
 
 
 async def test_default_raw_envelope(client_factory: ClientFactory, name: Any) -> None:
@@ -326,7 +326,7 @@ async def test_fifo_groups_wait_for_each_ack(
 
     @consumer.route(OrderCreated)
     async def handle(order: OrderCreated) -> None:
-        started.append((time.monotonic(), consumer.stats()["engine"]["messages_acked"]))
+        started.append((time.monotonic(), consumer.stats().engine.messages_acked))
 
     async with client:
         await queue.send_batch(
@@ -409,7 +409,7 @@ async def test_a_route_without_a_type_for_a_whole_message_handler_receives_every
         await queue.send({"plain": True}, type="something.else")
         await consume_until(consumer, lambda: len(received) == 2)
     assert sorted(received, key=str) == sorted([{"order_id": 1, "total": 0.0}, {"plain": True}], key=str)
-    assert consumer.stats()["unroutable"] == 0
+    assert consumer.stats().unroutable == 0
 
 
 async def test_large_payloads(client_factory: ClientFactory, name: Any) -> None:
@@ -487,11 +487,11 @@ async def test_a_copy_whose_offloaded_payload_was_deleted_is_skipped_as_a_duplic
         await core.delete_payload(bucket, first.offloaded.key)
         await consume_until(consumer, lambda: len(duplicates) == 2)
         counts = await queue.approximate_count()
-    assert counts["visible"] == counts["in_flight"] == 0
+    assert counts.visible == counts.in_flight == 0
     assert processed == []
     assert decode_failures == []
-    assert consumer.stats()["duplicates"] == 2
-    assert consumer.stats()["decode_failures"] == 0
+    assert consumer.stats().duplicates == 2
+    assert consumer.stats().decode_failures == 0
     assert duplicates[0].fields["reason"] == "payload_deleted"
 
 
@@ -704,7 +704,7 @@ async def test_out_of_range_options_are_validation_errors(client_factory: Client
         for destination in (queue, topic):
             with pytest.raises(fanferro.ValidationError, match="trace_header"):
                 await destination.publish({"n": 1}, trace_header="Root=1-5759e988-bd862e3fe1be46a994272793\nX=1")
-        assert (await queue.approximate_count())["visible"] == 0
+        assert (await queue.approximate_count()).visible == 0
 
 
 async def test_reserved_attributes_are_rejected(client_factory: ClientFactory, name: Any) -> None:

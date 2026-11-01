@@ -30,6 +30,7 @@ Read ``fanferro guide`` (or ``python -m fanferro guide``) for the full usage gui
 # Public submodules: `from x import m as m` (or `__all__`) makes type checkers see `fanferro.errors`
 # and the others after `import fanferro`; `from fanferro.errors import ...` alone does not.
 from fanferro import actions as actions
+from fanferro import aws_lambda as aws_lambda
 from fanferro import client as client
 from fanferro import codecs, envelopes, idempotency, matchers, outbox, testing
 from fanferro import config as config
@@ -45,6 +46,7 @@ from fanferro import provisioning as provisioning
 from fanferro import redrive as redrive
 from fanferro import resources as resources
 from fanferro import routing as routing
+from fanferro import stats as stats
 from fanferro import telemetry as telemetry
 from fanferro._core import (
     AttributeValue,
@@ -63,6 +65,7 @@ from fanferro.envelopes import Envelope
 from fanferro.errors import (
     AccessDeniedError,
     AwsError,
+    BatchItemFailuresError,
     BatchPublishError,
     CodecError,
     ConfigurationError,
@@ -90,6 +93,7 @@ from fanferro.message_types import MessageTypes, message_type
 from fanferro.messages import (
     BatchFailure,
     BatchPublishResult,
+    DeadLetterInfo,
     Message,
     OutgoingMessage,
     PayloadPointer,
@@ -118,6 +122,7 @@ from fanferro.provisioning import (
 from fanferro.redrive import PeekedMessage, RedriveFailure, RedriveResult
 from fanferro.resources import Queue, Subscription, Topic
 from fanferro.routing import Route, Router
+from fanferro.stats import ClientCounters, ClientMetrics, ConsumerStats, EngineStats, QueueCounts
 from fanferro.telemetry import Carrier, Propagation, Telemetry
 
 __all__ = [
@@ -127,10 +132,13 @@ __all__ = [
     "AwsRetry",
     "Backoff",
     "BatchFailure",
+    "BatchItemFailuresError",
     "BatchPublishError",
     "BatchPublishResult",
     "Carrier",
     "Client",
+    "ClientCounters",
+    "ClientMetrics",
     "Codec",
     "CodecError",
     "CodecRegistry",
@@ -138,13 +146,16 @@ __all__ = [
     "ConsumeMiddleware",
     "Consumer",
     "ConsumerStateError",
+    "ConsumerStats",
     "Credentials",
+    "DeadLetterInfo",
     "DeadLetterPolicy",
     "DeadLetterQueue",
     "DecodeError",
     "Discard",
     "Drift",
     "EncodeError",
+    "EngineStats",
     "Envelope",
     "EnvelopeError",
     "ErrorInfo",
@@ -184,6 +195,7 @@ __all__ = [
     "PublishResult",
     "Queue",
     "QueueAttributes",
+    "QueueCounts",
     "QueueInfo",
     "RateLimit",
     "RedriveFailure",

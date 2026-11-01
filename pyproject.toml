@@ -64,6 +64,7 @@ test = [
     "opentelemetry-api>=1.25",
     "opentelemetry-sdk>=1.25",
     "uvloop>=0.21; sys_platform != 'win32'",
+    "pytest-xdist>=3.8",
 ]
 lint = ["ruff>=0.17", "pyrefly>=1.3"]
 dev = [{ include-group = "test" }, { include-group = "lint" }, "maturin>=1.15,<2"]

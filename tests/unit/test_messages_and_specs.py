@@ -157,14 +157,50 @@ def test_body_before_routing() -> None:
         bad.json()
 
 
+def dead_lettered(document: str) -> fanferro.Message[Any]:
+    return fanferro.Message(payload=fanferro.Payload(b"x"), attributes={"fanferro.dead-letter": document})
+
+
 def test_dead_letter_info() -> None:
-    info = {"reason": "boom", "receive_count": 3}
-    message = fanferro.Message(payload=fanferro.Payload(b"x"), attributes={"fanferro.dead-letter": json.dumps(info)})
-    assert message.dead_letter_info == info
-    assert (
-        fanferro.Message(payload=fanferro.Payload(b"x"), attributes={"fanferro.dead-letter": "nope"}).dead_letter_info
-        is None
+    document = {
+        "reason": "retries exhausted",
+        "source": "arn:aws:sqs:eu-west-1:123456789012:orders",
+        "sqs_message_id": "sqs-1",
+        "receive_count": 3,
+        "time": "2026-11-01T12:30:00.123456789Z",
+        "queue": "orders",
+        "attempt": "3",
+        "message_type": "order.created.v1",
+        "message_id": "order-1",
+        "error_type": "builtins.ValueError",
+        "error_message": "boom",
+        "added_later": "kept",
+    }
+    info = dead_lettered(json.dumps(document)).dead_letter_info
+    assert info is not None
+    assert info == fanferro.DeadLetterInfo(
+        reason="retries exhausted",
+        source="arn:aws:sqs:eu-west-1:123456789012:orders",
+        queue="orders",
+        message_id="order-1",
+        sqs_message_id="sqs-1",
+        receive_count=3,
+        attempt=3,
+        message_type="order.created.v1",
+        error_type="builtins.ValueError",
+        error_message="boom",
+        time=datetime.datetime(2026, 11, 1, 12, 30, 0, 123456, tzinfo=datetime.UTC),
     )
+    assert info.document == document, "the whole document, keys the class does not describe included"
+    assert "document" not in repr(info)
+
+
+def test_dead_letter_info_of_a_minimal_or_foreign_document() -> None:
+    info = dead_lettered(json.dumps({"reason": "boom", "receive_count": "x", "time": "yesterday"})).dead_letter_info
+    assert info == fanferro.DeadLetterInfo(reason="boom")
+    for document in ("nope", "[]", '{"receive_count": 3}', '{"reason": 3}'):
+        assert dead_lettered(document).dead_letter_info is None, document
+    assert fanferro.Message(payload=fanferro.Payload(b"x")).dead_letter_info is None
 
 
 def test_prepared_message_roundtrip() -> None:

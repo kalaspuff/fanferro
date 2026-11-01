@@ -57,10 +57,12 @@ queue = client.queue("orders", dead_letter=fanferro.DeadLetterQueue("orders-dlq"
 
 fanferro provisions the DLQ first and sets the queue's `RedrivePolicy`. When fanferro dead-letters a
 message it **forwards** it (original body and attributes, so SQS "redrive to source" works) and
-adds `fanferro.dead-letter`: a JSON document with `reason`, `source`, `sqs_message_id`,
-`receive_count`, `attempt`, `message_type`, `error_type`, `error_message` and `time`
-(`message.dead_letter_info` when you consume the DLQ). Keep `max_receive_count` above
-`RetryPolicy.max_attempts` so SQS redrive is only the safety net (fanferro warns otherwise).
+adds `fanferro.dead-letter`: a JSON document with `reason`, `source`, `queue`, `sqs_message_id`,
+`receive_count`, `attempt`, `message_type`, `message_id`, `error_type`, `error_message` and `time`.
+Consuming the DLQ, `message.dead_letter_info` reads it as a `fanferro.DeadLetterInfo`
+(`info.reason`, `info.attempt`, `info.time` as a `datetime`; `info.document` is the whole document).
+
+Keep `max_receive_count` above `RetryPolicy.max_attempts` so SQS redrive is only the safety net (fanferro warns otherwise).
 
 The consumer finds the DLQ from `DeadLetterPolicy(queue=...)`, the queue's `DeadLetterQueue`
 declaration, or the queue's `RedrivePolicy`. Without one, `on_missing_queue` applies
@@ -86,8 +88,9 @@ the cause is fixed:
 ```python
 dlq = queue.dead_letter_queue
 for message in await dlq.peek(limit=20):
-    info = message.dead_letter_info or {}
-    print(message.sqs_message_id, info.get("reason"), info.get("error_type"), message.body[:200])
+    info = message.dead_letter_info  # a fanferro.DeadLetterInfo; None when SQS's redrive policy moved it
+    reason = f"{info.reason} ({info.error_type})" if info else "moved by SQS"
+    print(message.sqs_message_id, reason, message.body[:200])
 
 result = await dlq.redrive(max_per_second=50)
 print(result.moved, result.destinations, result.not_moved)

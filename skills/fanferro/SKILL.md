@@ -30,6 +30,7 @@ in code: `await dlq.peek()`, `await dlq.redrive()`).
    `Client(envelope=fanferro.envelopes.CloudEvents())`.
 9. Tests: `fanferro.testing.memory_client()` + `consumer.run_until_idle()`; handler unit tests with
    `fanferro.testing.build_message(obj)`; end-to-end against MiniStack (`endpoint_url=http://localhost:4566`).
+   Lambda functions: `fanferro.testing.invoke_sqs_handler(handler, queue)`.
 10. Environments sharing an AWS account: `fanferro.Client(queue_prefix=f"{env}-", topic_prefix=f"{env}-")`,
     never hand-built `f"{env}-..."` names. Write names without the prefix everywhere (strings passed to
     `subscription`/`consumer`/`DeadLetterQueue` get it too); `prefixed=False` for shared resources, passed
@@ -51,4 +52,16 @@ async def handle(event: MyEvent) -> None: ...
 async def main() -> None:
     async with client:
         await client.run()
+```
+
+In AWS Lambda (SQS event source mapping with `FunctionResponseTypes: ["ReportBatchItemFailures"]`),
+the same routes run per record, and failed records are returned as `batchItemFailures`:
+
+```python
+router = fanferro.Router()
+
+@router.route(MyEvent)
+async def handle(event: MyEvent) -> None: ...
+
+handler = fanferro.aws_lambda.sqs_handler(client, router, queue=queue)  # the function's handler
 ```

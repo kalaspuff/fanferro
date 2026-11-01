@@ -636,6 +636,53 @@ impl PyCoreClient {
         future_into_py(py, async move { client.queue_attributes(&url).await })
     }
 
+    /// Receives up to `max_messages` messages of a queue as the records of an SQS event that
+    /// AWS Lambda would hand a function (awaitable list of dicts; for tests).
+    #[pyo3(signature = (queue_url, queue_arn, max_messages=10, wait_time=0.0, visibility_timeout=None))]
+    fn receive_records<'py>(
+        &self,
+        py: Python<'py>,
+        queue_url: String,
+        queue_arn: String,
+        max_messages: u8,
+        wait_time: f64,
+        visibility_timeout: Option<f64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client()?;
+        let wait_time = seconds(Some(wait_time), "wait_time")?.unwrap_or_default();
+        let visibility_timeout = seconds(visibility_timeout, "visibility_timeout")?;
+        future_into_py(py, async move {
+            let records = fanferro_core::consumer::records::receive_records(
+                &client,
+                &queue_url,
+                &queue_arn,
+                max_messages,
+                wait_time,
+                visibility_timeout,
+            )
+            .await;
+            convert(records, |py, records| {
+                pythonize::pythonize(py, &records)
+                    .map(Bound::unbind)
+                    .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))
+            })
+        })
+    }
+
+    /// Deletes messages by receipt handle, as an event source mapping deletes the records a
+    /// function processed (awaitable; for tests).
+    fn delete_records<'py>(
+        &self,
+        py: Python<'py>,
+        queue_url: String,
+        receipt_handles: Vec<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client()?;
+        future_into_py(py, async move {
+            fanferro_core::consumer::records::delete_records(&client, &queue_url, receipt_handles).await
+        })
+    }
+
     /// Reads topic attributes (awaitable dict).
     fn topic_attributes<'py>(&self, py: Python<'py>, arn: String) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client()?;

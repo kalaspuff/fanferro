@@ -58,9 +58,10 @@ async def test_redriven_messages_get_a_fresh_retry_budget(
         for message in peeked:
             info = message.dead_letter_info
             assert info is not None
-            assert info["reason"] == "retries exhausted"
-            assert info["error_type"].endswith("ValueError")
-            assert message.source == info["source"] == queue.arn
+            assert info.reason == "retries exhausted"
+            assert info.error_type is not None
+            assert info.error_type.endswith("ValueError")
+            assert message.source == info.source == queue.arn
             assert (message.requeued_attempts > 0) == (strategy == "requeue")
             assert "fanferro.dead-letter" in message.raw_attributes
             assert not any(name.startswith("fanferro.") for name in message.attributes)

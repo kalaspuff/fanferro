@@ -32,7 +32,7 @@ async def test_many_concurrent_awaitables() -> None:
     async with client:
         results = await asyncio.gather(*(queue.send({"n": n}) for n in range(500)))
         assert len({result.message_id for result in results}) == 500
-        assert (await queue.approximate_count())["visible"] == 500
+        assert (await queue.approximate_count()).visible == 500
 
 
 async def roundtrip(client: fanferro.Client, name: str) -> list[Any]:

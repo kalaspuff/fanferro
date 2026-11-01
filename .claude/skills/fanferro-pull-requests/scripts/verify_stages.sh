@@ -7,7 +7,7 @@
 #
 # REPO is the scratch repository (only read); REF... are the stage commits in order, for example
 # refs/kits/<topic>/stage-1 refs/kits/<topic>/stage-2. For each stage: ruff format and lint,
-# pyrefly, the consistency checks and actionlint, then pytest on each Python of --python (default:
+# pyrefly, the consistency checks and actionlint, then pytest (in parallel, -n auto) on each Python of --python (default:
 # 3.12 and 3.15, the oldest and newest in CI; including the e2e tests on MiniStack unless --quick),
 # and cargo fmt, clippy and test if the stage changes Rust files compared with the parent of the
 # first REF (with the Rust end-to-end tests on a MiniStack of its own unless --quick). A stage
@@ -121,9 +121,9 @@ for commit in $COMMITS; do
   results=""
   for version in $PYTHONS; do
     if [ "$QUICK" -eq 1 ]; then
-      check "$stage" "pytest-$version" in_venv "$version" pytest -q -p no:cacheprovider -m "not e2e"
+      check "$stage" "pytest-$version" in_venv "$version" pytest -q -p no:cacheprovider -n auto --dist worksteal -m "not e2e"
     else
-      check "$stage" "pytest-$version" in_venv "$version" pytest -q -p no:cacheprovider
+      check "$stage" "pytest-$version" in_venv "$version" pytest -q -p no:cacheprovider -n auto --dist worksteal
     fi
     results="$results; $version: $(pytest_summary "$stage" "$version")"
   done

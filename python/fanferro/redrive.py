@@ -12,7 +12,7 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from fanferro.messages import _HIDDEN_ATTRIBUTES, _INTERNAL_PREFIX
+from fanferro.messages import _HIDDEN_ATTRIBUTES, _INTERNAL_PREFIX, DeadLetterInfo
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -75,20 +75,10 @@ class PeekedMessage:
         }
 
     @property
-    def dead_letter_info(self) -> dict[str, Any] | None:
-        """Why fanferro dead-lettered the message (``None`` when it did not).
-
-        The keys include ``reason``, ``error_type``, ``error_message``, ``source``,
-        ``receive_count`` and ``time``. Messages SQS's redrive policy moved have none.
-        """
+    def dead_letter_info(self) -> DeadLetterInfo | None:
+        """Why fanferro dead-lettered the message (``None`` when SQS's redrive policy moved it)."""
         value = self.raw_attributes.get("fanferro.dead-letter")
-        if value is None:
-            return None
-        try:
-            info = json.loads(str(value.value))
-        except ValueError:
-            return None
-        return info if isinstance(info, dict) else None
+        return None if value is None else DeadLetterInfo.from_json(str(value.value))
 
     @property
     def requeued_attempts(self) -> int:

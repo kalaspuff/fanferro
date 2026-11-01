@@ -87,24 +87,24 @@ def _peeked_json(message: PeekedMessage) -> dict[str, Any]:
         "receive_count": message.receive_count,
         "group_id": message.group_id,
         "source": message.source,
-        "dead_letter_info": message.dead_letter_info,
+        "dead_letter_info": dict(message.dead_letter_info.document) if message.dead_letter_info else None,
         "attributes": {name: _attribute_json(value) for name, value in message.raw_attributes.items()},
         "body": message.body,
     }
 
 
 def _print_peeked(message: PeekedMessage) -> None:
-    info = message.dead_letter_info or {}
+    info = message.dead_letter_info
     print(message.sqs_message_id)
     sent = message.sent_at.isoformat() if message.sent_at else "?"
     print(f"  sent at:       {sent} (received {message.receive_count} times)")
     if message.group_id:
         print(f"  group:         {message.group_id}")
     print(f"  source:        {message.source or '(unknown)'}")
-    if info:
-        print(f"  reason:        {info.get('reason', '?')}")
-        if info.get("error_type"):
-            print(f"  error:         {info['error_type']}: {info.get('error_message', '')}")
+    if info is not None:
+        print(f"  reason:        {info.reason}")
+        if info.error_type:
+            print(f"  error:         {info.error_type}: {info.error_message or ''}")
     else:
         print("  reason:        (not dead-lettered by fanferro)")
     if message.requeued_attempts:
@@ -129,7 +129,7 @@ async def _dlq(args: argparse.Namespace) -> int:
     try:
         queue = client.queue(url=args.queue_url, provisioning=Provisioning.existing())
         if args.action == "stats":
-            counts = await queue.approximate_count()
+            counts = (await queue.approximate_count()).as_dict()
             if args.json:
                 print(json.dumps(counts))
             else:

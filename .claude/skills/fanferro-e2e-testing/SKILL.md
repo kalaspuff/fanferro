@@ -8,6 +8,8 @@ description: Run and write fanferro end-to-end tests against MiniStack (AWS emul
 * `uv run pytest` starts MiniStack automatically (session fixture `ministack_endpoint` in
   `tests/conftest.py`, random free port). To reuse a running instance:
   `uv run ministack &` then `FANFERRO_TEST_ENDPOINT_URL=http://localhost:4566 uv run pytest`.
+  With `-n auto` (pytest-xdist) each worker starts a MiniStack of its own; tests share an
+  emulator safely only because every resource has a unique name.
 * Integration tests take `client_factory` and run on `memory` and `ministack`
   (`-k memory` / `-k ministack` to select). MiniStack-only tests live in `tests/e2e/` and are
   marked `e2e`; `uv run pytest -m "not e2e"` skips all emulator tests.

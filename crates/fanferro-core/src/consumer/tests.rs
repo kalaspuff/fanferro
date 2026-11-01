@@ -1598,3 +1598,76 @@ async fn receive_errors_back_off_and_recover() {
     assert!(fx.client.events().drain(100).iter().any(|e| e.kind == EventKind::ReceiveFailed));
     engine.close(true).await;
 }
+
+/// Receives up to ten messages of `fx`'s queue directly and converts them into the records an
+/// AWS Lambda event source mapping would hand a function (and back).
+async fn lambda_records(fx: &Fixture) -> Vec<ReceivedMessage> {
+    let request = crate::backend::ReceiveRequest {
+        queue_url: fx.url.clone(),
+        max_messages: 10,
+        wait_time: Duration::ZERO,
+        visibility_timeout: Some(Duration::from_secs(30)),
+        attempt_id: None,
+    };
+    let received = fx.client.backend().sqs.receive_messages(request).await.unwrap();
+    received
+        .iter()
+        .map(|message| {
+            let record = records::SqsEventRecord::from_received(message, "arn:aws:sqs:us-east-1:000000000000:work");
+            let record: records::SqsEventRecord =
+                serde_json::from_value(serde_json::to_value(record).unwrap()).unwrap();
+            record.into_received().unwrap()
+        })
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn external_records_record_deletes_and_send_visibility_changes() {
+    let fx = fixture(ClientConfig::default()).await;
+    for i in 0..4 {
+        fx.send(&format!("m{i}")).await;
+    }
+    let records = lambda_records(&fx).await;
+    assert_eq!(records.len(), 4);
+    let engine = fx.engine(|c| {
+        c.external = true;
+        c.heartbeat.enabled = false;
+    });
+    let deliveries = engine.accept_records(records).await.unwrap();
+    assert_eq!(deliveries.iter().map(body).collect::<Vec<_>>(), ["m0", "m1", "m2", "m3"]);
+    let [first, second, third, fourth] = <[Delivery; 4]>::try_from(deliveries).unwrap().map(Arc::new);
+    first.lease.ack().await.unwrap();
+    fourth.ack_in_background().unwrap();
+    engine.wait_settlements().await;
+    second.lease.nack(Duration::from_secs(5)).await.unwrap();
+    drop(third); // left to time out: whoever received it reports it as failed
+    let deleted = engine.take_deleted();
+    assert_eq!(deleted, [first.message().receipt_handle.clone(), fourth.message().receipt_handle.clone()]);
+    assert!(engine.take_deleted().is_empty(), "taken once");
+    // Nothing deleted: the receiver deletes what the function reports as processed.
+    assert_eq!(fx.stored().len(), 4);
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let visible: Vec<String> = fx.stored().into_iter().filter(|m| !m.in_flight).map(|m| m.body).collect();
+    assert_eq!(visible, ["m1"], "the retry's visibility change was sent; the dropped message was left");
+    let stats = engine.stats();
+    assert_eq!(stats.metrics["receive_requests"], 0);
+    assert_eq!(stats.metrics["delete_requests"], 0);
+    assert_eq!(stats.metrics["messages_acked"], 2);
+    assert_eq!(stats.metrics["messages_retried"], 1);
+    assert_eq!(stats.metrics["in_flight"], 0);
+    engine.close(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn only_external_engines_accept_records() {
+    let fx = fixture(ClientConfig::default()).await;
+    let engine = fx.engine(|_| {});
+    let error = engine.accept_records(Vec::new()).await.unwrap_err();
+    assert!(error.to_string().contains("external"), "{error}");
+    engine.close(true).await;
+    let mut config = ConsumerConfig::new(fx.url.clone());
+    config.external = true;
+    let engine = ConsumerEngine::new(&fx.client, config).unwrap();
+    let error = engine.accept_records(Vec::new()).await.unwrap_err();
+    assert!(error.to_string().contains("created"), "{error}");
+}
