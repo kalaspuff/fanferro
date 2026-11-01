@@ -44,7 +44,7 @@ invocation returns (Lambda freezes the environment afterwards).
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, overload
 
 from fanferro._utils import Duration, optional_seconds, seconds
 from fanferro.consumer import Consumer
@@ -54,10 +54,11 @@ from fanferro.resources import Queue
 from fanferro.routing import Router
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from fanferro.client import Client
     from fanferro.envelopes import Envelope
+    from fanferro.matchers import Matcher, MessagePredicate
     from fanferro.middleware import ConsumeMiddleware
     from fanferro.policies import DeadLetterPolicy, RetryPolicy
     from fanferro.routing import Handler
@@ -107,11 +108,31 @@ class SqsEventHandler:
 
     # -- routing shortcuts -----------------------------------------------------------------
 
-    def route(self, *args: Any, **kwargs: Any) -> Any:
+    @overload
+    def route[H: Handler](self, handler: H, /) -> H: ...
+    @overload
+    def route[H: Handler](
+        self,
+        message_type: type | str | None = None,
+        /,
+        *,
+        when: Matcher | MessagePredicate | None = None,
+        priority: int = 0,
+        name: str | None = None,
+    ) -> Callable[[H], H]: ...
+    def route(
+        self,
+        message_type: Any = None,
+        /,
+        *,
+        when: Matcher | MessagePredicate | None = None,
+        priority: int = 0,
+        name: str | None = None,
+    ) -> Any:
         """Registers a route on this handler's router (see :meth:`fanferro.Router.route`)."""
-        return self.router.route(*args, **kwargs)
+        return self.router.route(message_type, when=when, priority=priority, name=name)
 
-    def default(self, handler: Handler) -> Handler:
+    def default[H: Handler](self, handler: H) -> H:
         """Registers the fallback route (see :meth:`fanferro.Router.default`)."""
         return self.router.default(handler)
 

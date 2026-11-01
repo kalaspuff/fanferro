@@ -28,6 +28,10 @@ async def test_gives_up_on_late_reminders() -> None:
     assert message.outcome == "discarded"
 ```
 
+The routing decorators (`@consumer.route`, `@consumer.default`, `@router.route`, `@client.on` and
+the Lambda handler's) return the function they decorate with its own type, so type checkers check
+these calls like any other.
+
 ## Routing and outcomes without a broker
 
 `dispatch(target, message_or_body)` runs what a consumer does with one received message, with the
