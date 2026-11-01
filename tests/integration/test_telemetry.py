@@ -16,6 +16,7 @@ from opentelemetry.trace import SpanKind, StatusCode
 import fanferro
 from fanferro import testing
 from fanferro.telemetry import Carrier, Propagation
+from tests.global_state import restored_global_state
 from tests.helpers import OrderCreated, consume_until, drain_queue
 
 
@@ -274,3 +275,24 @@ async def test_trace_context_passes_through_without_an_sdk(name: Any) -> None:
     assert trace.format_trace_id(contexts[0].trace_id) == "5759e988bd862e3fe1be46a994272793"
     assert trace.format_span_id(contexts[0].span_id) == "53995c3f42cd8ad8"
     assert [message.raw_attributes["traceparent"].value for message in forwarded] == [traceparent]
+
+
+async def test_a_global_sdk_configured_after_the_client_traces_its_messages(name: Any) -> None:
+    # Telemetry looks the global provider up cheaply on each message, so an SDK configured after
+    # the client was created (here after its first message) is used from then on.
+    assert isinstance(trace.get_tracer_provider(), trace.ProxyTracerProvider)
+    client = testing.memory_client()
+    queue = client.queue(name("late-sdk"))
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    async with client:
+        await queue.send({"x": 1})
+        with restored_global_state():
+            trace.set_tracer_provider(provider)
+            await queue.send({"x": 2})
+        await queue.send({"x": 3})
+        messages = await drain_queue(client, queue)
+    provider.shutdown()
+    assert [span.name for span in exporter.get_finished_spans()] == [f"send {queue.name}"]
+    assert ["traceparent" in message.raw_attributes for message in messages] == [False, True, False]

@@ -5,7 +5,8 @@ from __future__ import annotations
 import ast
 import asyncio
 import re
-from collections.abc import Sequence
+from collections import OrderedDict
+from collections.abc import Awaitable, Sequence
 from pathlib import Path
 
 import pytest
@@ -103,6 +104,68 @@ async def test_in_memory_idempotency_store_forgets_expired_keys() -> None:
     await store.claim("newer", lock_ttl=10)
     assert len(store) == 1
     assert await store.claim("done-1", lock_ttl=10) is Claim.ACQUIRED
+
+
+async def test_in_memory_idempotency_store_sweeps_only_expired_keys() -> None:
+    """A sweep stops at the first live key instead of scanning every key the store holds."""
+    now = [0.0]
+    store = InMemoryIdempotencyStore(clock=lambda: now[0], sweep_interval=0, max_entries=None)
+    for index in range(1000):
+        now[0] = float(index)
+        await store.claim(f"k{index}", lock_ttl=10)
+        await store.complete(f"k{index}", ttl=5000)
+    deadlines_read = 0
+
+    class CountingDict(OrderedDict[str, float]):
+        def items(self):  # the sweep reads the oldest entry through items()
+            nonlocal deadlines_read
+            deadlines_read += 1
+            return super().items()
+
+    store._completed = CountingDict(store._completed)
+    now[0] = 5600.0  # the first 601 keys (deadlines 5000-5600) have expired
+    await store.claim("new", lock_ttl=10)
+    assert len(store) == 1000 - 601 + 1
+    assert deadlines_read == 602, "each expired key and the first live one, not the 399 others"
+    assert await store.claim("k600", lock_ttl=10) is Claim.ACQUIRED
+    assert await store.claim("k601", lock_ttl=10) is Claim.COMPLETED
+
+
+async def test_in_memory_idempotency_store_completed_keys_deduplicate_within_their_ttl() -> None:
+    now = [0.0]
+    store = InMemoryIdempotencyStore(clock=lambda: now[0], sweep_interval=1)
+    await store.claim("done", lock_ttl=10)
+    await store.complete("done", ttl=100)
+    for step in range(1, 100):
+        now[0] = float(step)
+        await store.claim(f"other-{step}", lock_ttl=10)
+        assert await store.claim("done", lock_ttl=10) is Claim.COMPLETED, step
+    now[0] = 100.0
+    assert await store.claim("done", lock_ttl=10) is Claim.ACQUIRED
+    assert await store.claim("other-95", lock_ttl=10) is Claim.IN_PROGRESS, "claims stay live for their lock_ttl"
+
+
+async def test_in_memory_idempotency_store_evicts_the_oldest_keys_beyond_max_entries() -> None:
+    store = InMemoryIdempotencyStore(max_entries=3)
+    for key in ("a", "b", "c"):
+        await store.claim(key, lock_ttl=10)
+        await store.complete(key, ttl=100)
+    await store.claim("d", lock_ttl=10)
+    assert len(store) == 3
+    assert await store.claim("a", lock_ttl=10) is Claim.ACQUIRED, "the oldest completed key was forgotten"
+    assert await store.claim("d", lock_ttl=10) is Claim.IN_PROGRESS, "claims are evicted only after completed keys"
+    assert await store.claim("c", lock_ttl=10) is Claim.COMPLETED
+    await store.claim("e", lock_ttl=10)
+    await store.claim("f", lock_ttl=10)
+    assert len(store) == 3
+    assert await store.claim("d", lock_ttl=10) is Claim.ACQUIRED, "with only claims left, the oldest claim goes"
+    assert len(store) == 3
+
+
+@pytest.mark.parametrize(("value", "error"), [(0, ValueError), (-1, ValueError), (1.5, TypeError), (True, TypeError)])
+def test_in_memory_idempotency_store_validates_max_entries(value: object, error: type[Exception]) -> None:
+    with pytest.raises(error, match="max_entries"):
+        InMemoryIdempotencyStore(max_entries=value)  # type: ignore[arg-type]
 
 
 async def test_concurrent_claims_retry() -> None:
@@ -278,7 +341,7 @@ async def test_an_outbox_store_error_on_a_failed_record_does_not_end_the_round(m
         await gone.delete()
         relay = OutboxRelay(memory_client, outbox)
         assert await relay.run_once() == 3
-        assert outbox.published == [*sent, ordered]
+        assert sorted(outbox.published) == sorted([*sent, ordered]), "FIFO groups and batches go out at once"
         assert outbox.claimed == [], "the record whose failure was not recorded is released"
         assert [(r.id, r.attempts) for r in outbox.pending] == [(lost, 0)]
         assert await relay.run_once() == 0
@@ -350,6 +413,8 @@ async def test_a_cancelled_outbox_round_marks_what_it_published(
             patched.setattr(memory_client, "publish_prepared", hang)
             task = asyncio.create_task(relay.run())
             await asyncio.wait_for(sending.wait(), 5)
+            # The standard records' batch goes out alongside the FIFO group.
+            await wait_for(lambda: len(outbox.published) == 2)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
@@ -438,6 +503,77 @@ async def test_several_outbox_relays_keep_each_fifo_group_in_order(memory_client
         received = [message.json() for message in await drain_queue(memory_client, fifo)]
     for group in ("a", "b", "c"):
         assert [body["n"] for body in received if body["group"] == group] == list(range(6))
+
+
+class _Overlap:
+    """Counts calls in progress at once (the highest count in ``peak``)."""
+
+    def __init__(self) -> None:
+        self.running = 0
+        self.peak = 0
+
+    async def around[T](self, call: Awaitable[T]) -> T:
+        self.running += 1
+        self.peak = max(self.peak, self.running)
+        try:
+            await asyncio.sleep(0.05)
+            return await call
+        finally:
+            self.running -= 1
+
+
+async def test_an_outbox_round_publishes_fifo_groups_at_once(
+    memory_client: fanferro.Client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # FIFO records went out one at a time across every group: a round cost a round trip per record.
+    outbox = InMemoryOutbox()
+    fifo = memory_client.queue("outbox-lanes.fifo")
+    overlap = _Overlap()
+    publish = memory_client.publish_prepared
+    poisoned: set[str] = set()
+
+    async def slow(prepared: fanferro.PreparedMessage) -> fanferro.PublishResult:
+        if prepared.message_id in poisoned:
+            raise fanferro.ValidationError("refused")
+        return await overlap.around(publish(prepared))
+
+    async with memory_client:
+        records: dict[str, list[str]] = {}
+        for n in range(3):
+            for group in ("a", "b", "c", "d"):
+                prepared = await fifo.prepare({"group": group, "n": n}, group_id=group)
+                records.setdefault(group, []).append(outbox.add(prepared, record_id=prepared.message_id))
+        poisoned.add(records["c"][1])
+        relay = OutboxRelay(memory_client, outbox)
+        monkeypatch.setattr(memory_client, "publish_prepared", slow)
+        assert await relay.run_once() == 10
+        assert overlap.peak == 4, "the groups were not published at once"
+        assert [r.id for r in outbox.pending] == records["c"][1:], "the failure held back only its own group"
+        assert [r.attempts for r in outbox.pending] == [1, 1]
+        received = [message.json() for message in await drain_queue(memory_client, fifo)]
+    for group in ("a", "b", "d"):
+        assert [body["n"] for body in received if body["group"] == group] == [0, 1, 2]
+    assert [body["n"] for body in received if body["group"] == "c"] == [0]
+
+
+async def test_prepared_batches_send_their_destinations_at_once(
+    memory_client: fanferro.Client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    overlap = _Overlap()
+    transport_for = memory_client._transport_for_destination
+
+    async def slow(prepared: fanferro.PreparedMessage) -> object:
+        return await overlap.around(transport_for(prepared))
+
+    queues = [memory_client.queue(f"prepared-lanes-{i}") for i in range(3)]
+    async with memory_client:
+        messages = [await queues[n % 3].prepare({"n": n}) for n in range(9)]
+        monkeypatch.setattr(memory_client, "_transport_for_destination", slow)
+        batch = await memory_client.publish_prepared_batch(messages, raise_on_failure=True)
+        assert overlap.peak == 3
+        assert [result.message_id for result in batch.successful] == [m.message_id for m in messages]
+        for queue in queues:
+            assert len(await drain_queue(memory_client, queue)) == 3
 
 
 async def test_prepared_batches_report_events(memory_client: fanferro.Client) -> None:

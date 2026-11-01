@@ -22,9 +22,9 @@ use crate::types::attributes::{md5_of_attributes, md5_of_body};
 
 /// Maximum entries per batch call.
 pub const MAX_BATCH_ENTRIES: usize = 10;
-/// Batch calls of one `publish_batch` in flight at once (standard destinations; FIFO destinations
-/// send their batches one after another, and retry a batch's failed entries before the next batch, so
-/// that message groups keep their order).
+/// Batch calls of one `publish_batch` in flight at once. FIFO destinations split their entries into
+/// up to this many lanes by message group, and each lane sends its batches one after another,
+/// retrying a batch's failed entries before its next batch, so that message groups keep their order.
 pub const MAX_CONCURRENT_BATCH_CALLS: usize = 8;
 /// Messages of one `publish_batch` prepared at once: each may upload its payload to S3, and a large
 /// batch must not open a connection per message.
@@ -228,7 +228,7 @@ pub(crate) fn is_fifo_id(id: &str) -> bool {
     (1..=128).contains(&id.len()) && id.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
-fn entry_error(service: &'static str, operation: &'static str, error: &BatchEntryError) -> Error {
+pub(crate) fn entry_error(service: &'static str, operation: &'static str, error: &BatchEntryError) -> Error {
     let mut kind = classify(Some(&error.code), error.message.as_deref(), None);
     if !error.sender_fault && !kind.is_retryable() {
         kind = crate::error::AwsErrorKind::Transient;
@@ -431,9 +431,13 @@ impl Client {
     }
 
     /// Sends many messages with batch calls (10 per call, split by size; up to
-    /// [`MAX_CONCURRENT_BATCH_CALLS`] at once unless the destination is FIFO), retrying failed
-    /// entries that are retryable (on FIFO destinations before the next batch call, so that no
-    /// message overtakes an earlier one). Results are returned in input order.
+    /// [`MAX_CONCURRENT_BATCH_CALLS`] at once), retrying entries that the service reported as failed
+    /// with retryable errors, or did not report at all. FIFO destinations send each message group's
+    /// entries in one lane of calls made one after another, with the retries of a call before the
+    /// lane's next call, so that no message overtakes an earlier one of its group; lanes run in
+    /// parallel. Failed batch calls are not retried: the SDK has retried them already, so their
+    /// error is the result of each of their entries, as [`Client::publish`] passes it through.
+    /// Results are returned in input order.
     pub async fn publish_batch(
         &self,
         destination: &Destination,
@@ -467,15 +471,28 @@ impl Client {
             backoff: self.inner.config.publish_retry.backoff()?,
             max_attempts: self.inner.config.publish_retry.max_attempts.max(1),
         };
-        let chunks = self.chunk(destination, pending);
-        if destination.is_fifo() {
-            // One batch call at a time, and the retries of a batch before the next batch: entries
-            // sent later must not overtake earlier ones of their message group.
-            for chunk in chunks {
-                self.send_with_retries(destination, vec![chunk], 1, &retry, &mut results).await;
-            }
+        let sent = if destination.is_fifo() {
+            // Each lane's calls and their retries are sent one after another: entries sent later
+            // must not overtake earlier ones of their message group, which never leaves its lane.
+            let retry = &retry;
+            let lanes = fifo_lanes(pending, MAX_CONCURRENT_BATCH_CALLS);
+            let lanes = lanes.into_iter().map(|lane| {
+                let chunks = self.chunk(destination, lane);
+                async move {
+                    let mut sent = Vec::new();
+                    for chunk in chunks {
+                        sent.extend(self.send_with_retries(destination, vec![chunk], 1, retry).await);
+                    }
+                    sent
+                }
+            });
+            futures::future::join_all(lanes).await.into_iter().flatten().collect()
         } else {
-            self.send_with_retries(destination, chunks, MAX_CONCURRENT_BATCH_CALLS, &retry, &mut results).await;
+            let chunks = self.chunk(destination, pending);
+            self.send_with_retries(destination, chunks, MAX_CONCURRENT_BATCH_CALLS, &retry).await
+        };
+        for (index, outcome) in sent {
+            results[index] = Some(outcome);
         }
         let results: Vec<Result<Receipt>> = results
             .into_iter()
@@ -505,14 +522,16 @@ impl Client {
 
     /// Sends `chunks` (up to `concurrency` batch calls at once), then retries the entries that
     /// failed with retryable errors, all of them together, until they succeed or run out of attempts.
+    /// Entries of a call that failed as a whole are not retried (the SDK's retries gave up on it).
+    /// Returns the outcome of every entry by its input index.
     async fn send_with_retries(
         &self,
         destination: &Destination,
         mut chunks: Vec<Vec<(usize, Prepared)>>,
         concurrency: usize,
         retry: &BatchRetry,
-        results: &mut [Option<Result<Receipt>>],
-    ) {
+    ) -> Vec<(usize, Result<Receipt>)> {
+        let mut results = Vec::new();
         let mut attempt = 0;
         loop {
             let mut failed: Vec<(usize, Prepared, Error)> = Vec::new();
@@ -521,17 +540,17 @@ impl Client {
             while let Some(sent) = calls.next().await {
                 for (index, prepared, outcome) in sent {
                     match outcome {
-                        Ok(receipt) => results[index] = Some(Ok(receipt)),
-                        Err(err) if err.is_retryable() && attempt + 1 < retry.max_attempts => {
+                        Outcome::Sent(receipt) => results.push((index, Ok(receipt))),
+                        Outcome::EntryFailed(err) if err.is_retryable() && attempt + 1 < retry.max_attempts => {
                             failed.push((index, prepared, err));
                         }
-                        Err(err) => results[index] = Some(Err(err)),
+                        Outcome::EntryFailed(err) | Outcome::CallFailed(err) => results.push((index, Err(err))),
                     }
                 }
             }
             drop(calls);
             if failed.is_empty() {
-                return;
+                return results;
             }
             self.inner.metrics.publish_retries.add(failed.len() as u64);
             self.inner.events.emit(EventKind::PublishRetried, || {
@@ -552,7 +571,7 @@ impl Client {
         &self,
         destination: &Destination,
         chunk: Vec<(usize, Prepared)>,
-    ) -> Vec<(usize, Prepared, Result<Receipt>)> {
+    ) -> Vec<(usize, Prepared, Outcome)> {
         let service = destination.service();
         let call: Result<Vec<EntryOutcome>> = match destination {
             Destination::Queue { url, .. } => {
@@ -573,7 +592,9 @@ impl Client {
         };
         let operation = if service == "sqs" { "SendMessageBatch" } else { "PublishBatch" };
         match call {
-            Err(err) => chunk.into_iter().map(|(index, prepared)| (index, prepared, Err(err.clone()))).collect(),
+            Err(err) => {
+                chunk.into_iter().map(|(index, prepared)| (index, prepared, Outcome::CallFailed(err.clone()))).collect()
+            }
             Ok(outputs) => chunk
                 .into_iter()
                 .zip(outputs)
@@ -587,11 +608,46 @@ impl Client {
                         },
                         Err(entry) => Err(entry_error(service, operation, &entry)),
                     };
-                    (index, prepared, result)
+                    (index, prepared, result.map_or_else(Outcome::EntryFailed, Outcome::Sent))
                 })
                 .collect(),
         }
     }
+}
+
+/// What became of one entry of a batch call.
+enum Outcome {
+    /// Sent (and its checksums verified, if asked for).
+    Sent(Receipt),
+    /// The service reported this entry as failed (or did not report it), or its checksums did not
+    /// match: retried when the error is retryable.
+    EntryFailed(Error),
+    /// The whole call failed after the SDK's own retries: never retried.
+    CallFailed(Error),
+}
+
+/// Splits FIFO entries into lanes by a hash of their message group id, keeping input order within
+/// each lane: every group stays in one lane. Up to `max_lanes`, and no more than the batch calls the
+/// entries fill, so that spreading groups over lanes does not make more calls than needed. Empty
+/// lanes are left out.
+fn fifo_lanes(entries: Vec<(usize, Prepared)>, max_lanes: usize) -> Vec<Vec<(usize, Prepared)>> {
+    let count = entries.len().div_ceil(MAX_BATCH_ENTRIES).clamp(1, max_lanes.max(1));
+    let mut lanes: Vec<Vec<(usize, Prepared)>> = (0..count).map(|_| Vec::new()).collect();
+    for entry in entries {
+        let lane = fifo_lane(entry.1.group_id.as_deref(), count);
+        lanes[lane].push(entry);
+    }
+    lanes.retain(|lane| !lane.is_empty());
+    lanes
+}
+
+/// The lane (below `lanes`) of a message group: the same in every call, since
+/// `DefaultHasher::new()` has fixed keys.
+fn fifo_lane(group_id: Option<&str>, lanes: usize) -> usize {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::hash::DefaultHasher::new();
+    group_id.hash(&mut hasher);
+    usize::try_from(hasher.finish() % lanes.max(1) as u64).unwrap_or(0)
 }
 
 fn chunk_by_size(entries: Vec<(usize, Prepared)>, max_total: usize) -> Vec<Vec<(usize, Prepared)>> {

@@ -536,6 +536,7 @@ impl EngineInner {
             max_until: now + self.settings.max_lease,
             status: LeaseStatus::Buffered,
             extending: None,
+            extension_failures: 0,
         }
     }
 
@@ -774,6 +775,28 @@ impl ConsumerEngine {
                 .field("queue", settings.queue_url.as_str())
                 .field("min_receive_batch", settings.min_receive_batch)
                 .field("max_in_flight", settings.max_in_flight)
+            });
+        }
+        // A lease's first extension is due an interval after the receive, and its visibility runs
+        // out after the shorter of the two: with less than an interval left, one failed (or slow)
+        // extension leaves the retry too little time.
+        let extended_for = settings.visibility_timeout.min(settings.extend_by);
+        if settings.heartbeat_enabled && settings.heartbeat_interval > extended_for / 2 {
+            client.events().emit(EventKind::ConfigWarning, || {
+                Event::new(
+                    EventKind::ConfigWarning,
+                    format!(
+                        "heartbeat interval ({:.1} s) exceeds half the visibility it extends ({:.1} s): one failed \
+                         extension can let a message become visible again while it is processed; use an interval of \
+                         at most {:.1} s",
+                        settings.heartbeat_interval.as_secs_f64(),
+                        extended_for.as_secs_f64(),
+                        (extended_for / 2).as_secs_f64(),
+                    ),
+                )
+                .field("queue", settings.queue_url.as_str())
+                .field("heartbeat_interval", settings.heartbeat_interval.as_secs_f64())
+                .field("visibility_seconds", extended_for.as_secs_f64())
             });
         }
         let runtime = tokio::runtime::Handle::try_current()

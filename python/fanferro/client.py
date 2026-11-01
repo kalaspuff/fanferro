@@ -55,6 +55,8 @@ _EVENTS_WAIT = 1.0
 """Seconds the event pump waits for events per call (stopping wakes it at once)."""
 _PROVISION_CONCURRENCY = 8
 """Resources client.provision() resolves at once: enough to overlap the calls, few enough not to be throttled."""
+_PUBLISH_CONCURRENCY = 8
+"""Destinations of one ``publish_prepared_batch`` sent at once."""
 
 
 def _register_fork_hook() -> None:
@@ -171,7 +173,9 @@ class Client:
         provisioning: Default provisioning policy of declared resources.
         aws_retry: Retries of individual AWS calls.
         timeouts: Timeouts of AWS calls.
-        publish_retry_attempts: Attempts for failed batch entries and checksum mismatches.
+        publish_retry_attempts: Attempts for batch entries the service reports as failed with a
+            retryable error (or leaves out of its response), and for checksum mismatches. A batch
+            call that fails as a whole is retried by the AWS SDK only (``aws_retry``).
         verify_md5: Verify SQS MD5 digests of sent and received messages (opt-in; TLS already
             protects messages in transit).
         split_batches_by_trace_header: Send the entries of a batch publish to a topic in separate
@@ -1016,7 +1020,8 @@ class Client:
     ) -> BatchPublishResult:
         """Sends prepared messages, batching those with the same destination.
 
-        Like ``publish_batch``, each destination's batch emits ``publish.succeeded`` (with the
+        The destinations' batches are sent at once (up to eight at a time); results keep the
+        order of ``messages``. Like ``publish_batch``, each destination's batch emits ``publish.succeeded`` (with the
         count) and ``publish.failed`` per failed entry, and records the publish metrics.
         """
         core = await self._core()
@@ -1025,54 +1030,70 @@ class Client:
         for index, prepared in enumerate(messages):
             key = repr(sorted(prepared.destination.items()))
             groups.setdefault(key, []).append(index)
-        for indexes in groups.values():
-            first = messages[indexes[0]]
-            name = first.destination_name
-            kind = first.destination.get("kind", "queue")
-            started = monotonic()
-            with self._telemetry.publish_span(name, kind, None, batch_size=len(indexes)) as span:
-                try:
-                    transport = await self._transport_for_destination(first)
-                    receipts = await core.publish_batch(
-                        first.destination, [messages[i].core_entry() for i in indexes], transport=transport
-                    )
-                except Exception as error:  # noqa: BLE001 - deliberate catch-all; the error is reported, never swallowed silently
-                    self._telemetry.mark_error(span, error)
-                    receipts = [error] * len(indexes)
-            duration = monotonic() - started
-            succeeded = 0
-            for index, receipt in zip(indexes, receipts, strict=True):
-                if isinstance(receipt, BaseException):
-                    results[index] = BatchFailure(index, messages[index], receipt)
-                    self._telemetry.record_publish(name, kind, duration, 1, receipt)
-                    self.events.emit(
-                        EventKind.PUBLISH_FAILED,
-                        f"failed to publish prepared batch entry {index} to {kind} {name}",
-                        exception=receipt,
-                        destination=name,
-                        kind=kind,
-                        index=index,
-                        message_id=messages[index].message_id,
-                    )
-                else:
-                    results[index] = PublishResult.from_core(receipt, name)
-                    succeeded += 1
-            if succeeded:
-                self._telemetry.record_publish(name, kind, duration, succeeded, None)
-                if self.events.is_enabled(EventKind.PUBLISH_SUCCEEDED):
-                    self.events.emit(
-                        EventKind.PUBLISH_SUCCEEDED,
-                        f"published {succeeded} prepared messages to {kind} {name}",
-                        destination=name,
-                        kind=kind,
-                        count=succeeded,
-                        duration=round(duration, 6),
-                    )
+        limit = asyncio.Semaphore(_PUBLISH_CONCURRENCY)
+
+        async def publish(indexes: list[int]) -> None:
+            async with limit:
+                await self._publish_prepared_group(core, messages, indexes, results)
+
+        # One batch per destination, at most _PUBLISH_CONCURRENCY of them at once.
+        await asyncio.gather(*map(publish, groups.values()))
         batch = BatchPublishResult(tuple(r for r in results if r is not None))
         self._drain_core_events()
         if raise_on_failure:
             batch.raise_for_failures()
         return batch
+
+    async def _publish_prepared_group(
+        self,
+        core: CoreClient,
+        messages: Sequence[PreparedMessage],
+        indexes: list[int],
+        results: list[PublishResult | BatchFailure | None],
+    ) -> None:
+        """Publishes the prepared messages at ``indexes`` (one destination) into ``results``."""
+        first = messages[indexes[0]]
+        name = first.destination_name
+        kind = first.destination.get("kind", "queue")
+        started = monotonic()
+        with self._telemetry.publish_span(name, kind, None, batch_size=len(indexes)) as span:
+            try:
+                transport = await self._transport_for_destination(first)
+                receipts = await core.publish_batch(
+                    first.destination, [messages[i].core_entry() for i in indexes], transport=transport
+                )
+            except Exception as error:  # noqa: BLE001 - deliberate catch-all; the error is reported, never swallowed silently
+                self._telemetry.mark_error(span, error)
+                receipts = [error] * len(indexes)
+        duration = monotonic() - started
+        succeeded = 0
+        for index, receipt in zip(indexes, receipts, strict=True):
+            if isinstance(receipt, BaseException):
+                results[index] = BatchFailure(index, messages[index], receipt)
+                self._telemetry.record_publish(name, kind, duration, 1, receipt)
+                self.events.emit(
+                    EventKind.PUBLISH_FAILED,
+                    f"failed to publish prepared batch entry {index} to {kind} {name}",
+                    exception=receipt,
+                    destination=name,
+                    kind=kind,
+                    index=index,
+                    message_id=messages[index].message_id,
+                )
+            else:
+                results[index] = PublishResult.from_core(receipt, name)
+                succeeded += 1
+        if succeeded:
+            self._telemetry.record_publish(name, kind, duration, succeeded, None)
+            if self.events.is_enabled(EventKind.PUBLISH_SUCCEEDED):
+                self.events.emit(
+                    EventKind.PUBLISH_SUCCEEDED,
+                    f"published {succeeded} prepared messages to {kind} {name}",
+                    destination=name,
+                    kind=kind,
+                    count=succeeded,
+                    duration=round(duration, 6),
+                )
 
     async def _transport_for_destination(self, prepared: PreparedMessage) -> Any:
         # A topic and a queue may share a name (``orders`` and its subscriber queue ``orders``),

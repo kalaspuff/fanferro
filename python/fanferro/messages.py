@@ -716,13 +716,14 @@ class PublishResult:
     @classmethod
     def from_core(cls, data: Mapping[str, Any], destination: str) -> PublishResult:
         """Converts the core receipt."""
+        offloaded = data.get("offloaded")
         return cls(
-            message_id=data["message_id"],
-            transport_message_id=data["transport_message_id"],
-            destination=destination,
-            sequence_number=data.get("sequence_number"),
-            size=data.get("size", 0),
-            offloaded=PayloadPointer.from_core(data.get("offloaded")),
+            data["message_id"],
+            data["transport_message_id"],
+            destination,
+            data.get("sequence_number"),
+            data.get("size", 0),
+            PayloadPointer.from_core(offloaded) if offloaded else None,
         )
 
 

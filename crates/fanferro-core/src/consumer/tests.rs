@@ -6,10 +6,12 @@ use bytes::Bytes;
 
 use super::*;
 use crate::backend::memory::MemoryBroker;
-use crate::backend::testing::{SlowBatches, SlowDownloads, SlowReceives, StuckVisibility};
+use crate::backend::testing::{FailingVisibility, SlowBatches, SlowDownloads, SlowReceives, StuckVisibility};
 use crate::backend::{SendRequest, StringMap};
 use crate::client::ClientConfig;
+use crate::error::{AwsError, AwsErrorKind};
 use crate::events::EventKind;
+use crate::events::FieldValue;
 use crate::publish::{Destination, OutgoingMessage};
 use crate::transport::OffloadSettings;
 use crate::transport::claim_check::{EncryptionSettings, PointerFormat, ReferenceMode};
@@ -556,6 +558,145 @@ async fn a_stuck_extension_call_does_not_stall_heartbeats() {
     assert!(metrics["lease_extension_failures"] >= 1);
     assert!(metrics["lease_extensions"] >= 10);
     delivery.lease.ack().await.unwrap();
+    engine.close(true).await;
+}
+
+#[test]
+fn failed_extensions_back_off_unless_retrying_soon_may_help() {
+    let interval = Duration::from_secs(10);
+    let aws = |kind| Error::from(AwsError::new("sqs", "ChangeMessageVisibilityBatch", kind, "failed"));
+    let delays =
+        |error: &Error| (1..=7).map(|n| heartbeat::retry_delay(error, n, interval).as_secs()).collect::<Vec<_>>();
+    for kind in [AwsErrorKind::AccessDenied, AwsErrorKind::NotFound, AwsErrorKind::Throttling, AwsErrorKind::Kms] {
+        assert_eq!(delays(&aws(kind)), [1, 2, 4, 8, 10, 10, 10], "{kind:?}");
+    }
+    assert_eq!(delays(&aws(AwsErrorKind::Transient)), [1; 7]);
+    assert_eq!(delays(&Error::Timeout("stuck".into())), [0; 7]);
+    // Failures without end do not overflow; a short interval still waits a second.
+    assert_eq!(heartbeat::retry_delay(&aws(AwsErrorKind::AccessDenied), u32::MAX, interval), interval);
+    let short = Duration::from_millis(300);
+    assert_eq!(heartbeat::retry_delay(&aws(AwsErrorKind::AccessDenied), 5, short), Duration::from_secs(1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn denied_extensions_back_off_and_are_reported_once_per_round() {
+    // A policy without sqs:ChangeMessageVisibility: retrying every second would make two calls and
+    // two warnings a second for these 20 leases until their visibility runs out.
+    let broker = MemoryBroker::new("us-east-1", "000000000000");
+    let mut backend = broker.backend();
+    let denied = Arc::new(FailingVisibility::new(backend.sqs.clone()));
+    backend.sqs = denied.clone();
+    let client = Client::with_backend(backend, ClientConfig::default()).unwrap();
+    let url = client.backend().sqs.create_queue("work", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let fx = Fixture { broker, client, url };
+    fx.client.events().set_enabled(&[EventKind::LeaseExtensionFailed, EventKind::ConfigWarning]);
+    for i in 0..20 {
+        fx.send(&format!("m{i}")).await;
+    }
+    let engine = fx.engine(|c| {
+        c.visibility_timeout = 60.0;
+        c.heartbeat.interval = Some(10.0);
+        c.max_in_flight = 20;
+    });
+    let deliveries = collect(&engine, 20).await;
+    assert_eq!(deliveries.len(), 20);
+    tokio::time::sleep(Duration::from_secs(40)).await;
+    // Rounds at about 10, 11, 13, 17, 25 and 35 s (backing off from 1 s to the interval), each
+    // with two calls of ten.
+    let calls = denied.calls.load(std::sync::atomic::Ordering::SeqCst);
+    assert!((10..=14).contains(&calls), "{calls} calls");
+    let events = fx.client.events().drain(100);
+    let failed: Vec<_> = events.iter().filter(|e| e.kind == EventKind::LeaseExtensionFailed).collect();
+    assert_eq!(failed.len() * 2, calls, "one event per round");
+    assert!(failed.iter().all(|e| e.fields.get("messages") == Some(&FieldValue::from(20usize))));
+    assert_eq!(failed[0].error.as_ref().unwrap().code.as_deref(), Some("AccessDenied"));
+    let warnings: Vec<_> = events.iter().filter(|e| e.kind == EventKind::ConfigWarning).collect();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].message.contains("sqs:ChangeMessageVisibility"));
+    assert_eq!(engine.stats().metrics["lease_extension_failures"], i64::try_from(calls * 10).unwrap());
+    ack_all(deliveries).await;
+    engine.close(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn throttled_extensions_back_off() {
+    let broker = MemoryBroker::new("us-east-1", "000000000000");
+    let mut backend = broker.backend();
+    let throttled = Arc::new(
+        FailingVisibility::new(backend.sqs.clone()).with_error(AwsErrorKind::Throttling, "ThrottlingException"),
+    );
+    backend.sqs = throttled.clone();
+    let client = Client::with_backend(backend, ClientConfig::default()).unwrap();
+    let url = client.backend().sqs.create_queue("work", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let fx = Fixture { broker, client, url };
+    fx.client.events().set_enabled(&[EventKind::ConfigWarning]);
+    fx.send("slow").await;
+    let engine = fx.engine(|c| {
+        c.visibility_timeout = 60.0;
+        c.heartbeat.interval = Some(10.0);
+    });
+    let delivery = collect(&engine, 1).await.remove(0);
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let calls = throttled.calls.load(std::sync::atomic::Ordering::SeqCst);
+    assert!((5..=6).contains(&calls), "{calls} calls");
+    assert!(fx.client.events().drain(10).is_empty(), "throttling is not a configuration problem");
+    delivery.lease.ack().await.unwrap();
+    engine.close(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_slow_extension_call_does_not_delay_other_leases() {
+    // The first lease's extension call hangs until it times out (10 s); the second lease comes due
+    // meanwhile, with 5 s of visibility left, and is extended on time.
+    let broker = MemoryBroker::new("us-east-1", "000000000000");
+    let mut backend = broker.backend();
+    backend.sqs = Arc::new(StuckVisibility::new(backend.sqs.clone(), 1));
+    let client = Client::with_backend(backend, ClientConfig::default()).unwrap();
+    let url = client.backend().sqs.create_queue("work", &StringMap::new(), &StringMap::new()).await.unwrap();
+    let fx = Fixture { broker, client, url };
+    fx.send("first").await;
+    let start = tokio::time::Instant::now();
+    let engine = fx.engine(|c| {
+        c.visibility_timeout = 30.0;
+        c.heartbeat.interval = Some(25.0);
+    });
+    let first = collect(&engine, 1).await.remove(0);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    fx.send("second").await;
+    let second = collect(&engine, 1).await.remove(0);
+    // The first extension started at 25 s and hangs until 35 s; the second lease was due at 28 s.
+    tokio::time::sleep_until(start + Duration::from_secs(31)).await;
+    let remaining = second.lease.remaining_visibility();
+    assert!(remaining > Duration::from_secs(20), "the second lease was not extended: {remaining:?}");
+    ack_all(vec![first, second]).await;
+    engine.close(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_heartbeat_interval_above_half_the_visibility_is_warned_about() {
+    let fx = fixture(ClientConfig::default()).await;
+    fx.client.events().set_enabled(&[EventKind::ConfigWarning]);
+    let engine = fx.engine(|c| {
+        c.visibility_timeout = 30.0;
+        c.heartbeat.interval = Some(15.0);
+    });
+    assert!(fx.client.events().drain(10).is_empty(), "half the visibility is fine");
+    engine.close(true).await;
+    let engine = fx.engine(|c| {
+        c.visibility_timeout = 30.0;
+        c.heartbeat.interval = Some(20.0);
+    });
+    let warnings = fx.client.events().drain(10);
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].message.contains("heartbeat interval (20.0 s)"), "{}", warnings[0].message);
+    engine.close(true).await;
+    // extend_by counts as well.
+    let engine = fx.engine(|c| {
+        c.visibility_timeout = 30.0;
+        c.heartbeat.interval = Some(10.0);
+        c.heartbeat.extend_by = Some(15.0);
+    });
+    assert_eq!(fx.client.events().drain(10).len(), 1);
     engine.close(true).await;
 }
 

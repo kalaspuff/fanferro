@@ -100,7 +100,8 @@ await consumer.run()   # raises fanferro.ResourceNotFoundError once the queue is
 
 Choose a visibility timeout that covers retry delays you want SQS to apply (30-60 s is typical);
 heartbeats handle long processing. A short timeout recovers crashed workers' messages sooner; a long
-one tolerates longer stalls (GC, network partitions) before redelivery.
+one tolerates longer stalls (GC, network partitions) before redelivery. The consumer's IAM policy
+needs `sqs:ChangeMessageVisibility` for heartbeats (a `config.warning` names it when it is missing).
 
 ## Throughput tuning
 

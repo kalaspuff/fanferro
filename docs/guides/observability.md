@@ -104,6 +104,12 @@ offloaded payloads).
 Context is injected from the current span (your web request's span if tracing is off for
 fanferro), so `Telemetry(tracing=False)` still propagates. `Telemetry.disabled()` turns everything off.
 
+With `opentelemetry-api` installed but no SDK configured (a common transitive dependency), spans
+and metrics would record nothing, so fanferro skips them, and propagation runs only while a span is
+active (a context from an upstream request or the message being handled). Per message this costs
+well under a microsecond. An SDK configured later, after the client was created, is used from the
+next message on.
+
 ## Metrics
 
 With an OpenTelemetry `MeterProvider`, fanferro records the messaging semantic convention metrics

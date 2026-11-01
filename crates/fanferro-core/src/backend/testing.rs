@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use super::{
-    BatchResult, ObjectStoreApi, PublishOutput, PublishRequest, PutOptions, ReceiveRequest, ReceivedMessage,
-    SendOutput, SendRequest, SnsApi, SqsApi, StringMap, SubscriptionInfo, VisibilityChange,
+    BatchEntryError, BatchResult, ObjectStoreApi, PublishOutput, PublishRequest, PutOptions, ReceiveRequest,
+    ReceivedMessage, SendOutput, SendRequest, SnsApi, SqsApi, StringMap, SubscriptionInfo, VisibilityChange,
 };
 use crate::error::{AwsError, AwsErrorKind, Result};
 
@@ -264,16 +264,42 @@ impl SqsApi for SlowReceives {
     }
 }
 
-/// SQS whose first `failures` batch sends fail with a retryable (throttling) error.
+/// How a [`ThrottledBatches`] or [`ThrottledPublishBatches`] call fails.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BatchFailure {
+    /// The whole call fails with a throttling error (as after the SDK's own retries).
+    Call,
+    /// The call succeeds, but the service reports every entry as failed with a retryable
+    /// `InternalError`.
+    Entries,
+}
+
+fn failed_entries<T>(count: usize) -> BatchResult<T> {
+    (0..count)
+        .map(|_| {
+            Err(BatchEntryError {
+                code: "InternalError".into(),
+                message: Some("internal error".into()),
+                sender_fault: false,
+            })
+        })
+        .collect()
+}
+
+/// SQS whose first `failures` batch sends fail with a retryable error (`failure`), and that counts
+/// the batch sends it was asked for.
 #[derive(Debug)]
 pub(crate) struct ThrottledBatches {
     inner: Arc<dyn SqsApi>,
+    failure: BatchFailure,
     failures: parking_lot::Mutex<usize>,
+    /// `SendMessageBatch` calls made, failed ones included.
+    pub(crate) calls: parking_lot::Mutex<usize>,
 }
 
 impl ThrottledBatches {
-    pub(crate) fn new(inner: Arc<dyn SqsApi>, failures: usize) -> Self {
-        Self { inner, failures: parking_lot::Mutex::new(failures) }
+    pub(crate) fn new(inner: Arc<dyn SqsApi>, failure: BatchFailure, failures: usize) -> Self {
+        Self { inner, failure, failures: parking_lot::Mutex::new(failures), calls: parking_lot::Mutex::new(0) }
     }
 
     fn take_failure(&self) -> bool {
@@ -291,8 +317,14 @@ impl SqsApi for ThrottledBatches {
         self.inner.send_message(queue_url, request).await
     }
     async fn send_message_batch(&self, queue_url: &str, entries: Vec<SendRequest>) -> Result<BatchResult<SendOutput>> {
+        *self.calls.lock() += 1;
         if self.take_failure() {
-            return Err(AwsError::new("sqs", "SendMessageBatch", AwsErrorKind::Throttling, "Rate exceeded").into());
+            return match self.failure {
+                BatchFailure::Call => {
+                    Err(AwsError::new("sqs", "SendMessageBatch", AwsErrorKind::Throttling, "Rate exceeded").into())
+                }
+                BatchFailure::Entries => Ok(failed_entries(entries.len())),
+            };
         }
         self.inner.send_message_batch(queue_url, entries).await
     }
@@ -399,19 +431,20 @@ impl SqsApi for SlowBatches {
     }
 }
 
-/// SNS whose first `failures` batch publishes fail with a retryable (throttling) error, and that
+/// SNS whose first `failures` batch publishes fail with a retryable error (`failure`), and that
 /// records the trace header of every `PublishBatch` call that reached `inner`.
 #[derive(Debug)]
 pub(crate) struct ThrottledPublishBatches {
     inner: Arc<dyn SnsApi>,
+    failure: BatchFailure,
     failures: parking_lot::Mutex<usize>,
     /// The trace headers of the entries of each call that reached `inner`.
     pub(crate) calls: parking_lot::Mutex<Vec<Vec<Option<String>>>>,
 }
 
 impl ThrottledPublishBatches {
-    pub(crate) fn new(inner: Arc<dyn SnsApi>, failures: usize) -> Self {
-        Self { inner, failures: parking_lot::Mutex::new(failures), calls: parking_lot::Mutex::default() }
+    pub(crate) fn new(inner: Arc<dyn SnsApi>, failure: BatchFailure, failures: usize) -> Self {
+        Self { inner, failure, failures: parking_lot::Mutex::new(failures), calls: parking_lot::Mutex::default() }
     }
 }
 
@@ -429,7 +462,12 @@ impl SnsApi for ThrottledPublishBatches {
             }
         };
         if fail {
-            return Err(AwsError::new("sns", "PublishBatch", AwsErrorKind::Throttling, "Rate exceeded").into());
+            return match self.failure {
+                BatchFailure::Call => {
+                    Err(AwsError::new("sns", "PublishBatch", AwsErrorKind::Throttling, "Rate exceeded").into())
+                }
+                BatchFailure::Entries => Ok(failed_entries(entries.len())),
+            };
         }
         self.calls.lock().push(entries.iter().map(|entry| entry.trace_header.clone()).collect());
         self.inner.publish_batch(topic_arn, entries).await
@@ -560,6 +598,82 @@ impl SqsApi for FailingQueueAttributes {
     }
     async fn set_queue_attributes(&self, queue_url: &str, attributes: &StringMap) -> Result<()> {
         self.fail()?;
+        self.inner.set_queue_attributes(queue_url, attributes).await
+    }
+    async fn list_queue_tags(&self, queue_url: &str) -> Result<StringMap> {
+        self.inner.list_queue_tags(queue_url).await
+    }
+    async fn tag_queue(&self, queue_url: &str, tags: &StringMap) -> Result<()> {
+        self.inner.tag_queue(queue_url, tags).await
+    }
+    async fn delete_queue(&self, queue_url: &str) -> Result<()> {
+        self.inner.delete_queue(queue_url).await
+    }
+    async fn purge_queue(&self, queue_url: &str) -> Result<()> {
+        self.inner.purge_queue(queue_url).await
+    }
+}
+
+/// SQS that answers every `ChangeMessageVisibilityBatch` call with `error` (by default access
+/// denied, as for a policy without `sqs:ChangeMessageVisibility`), and counts the calls.
+#[derive(Debug)]
+pub(crate) struct FailingVisibility {
+    inner: Arc<dyn SqsApi>,
+    error: AwsError,
+    /// `ChangeMessageVisibilityBatch` calls.
+    pub(crate) calls: AtomicUsize,
+}
+
+impl FailingVisibility {
+    pub(crate) fn new(inner: Arc<dyn SqsApi>) -> Self {
+        let error = AwsError::new(
+            "sqs",
+            "ChangeMessageVisibilityBatch",
+            AwsErrorKind::AccessDenied,
+            "User is not authorized to perform: sqs:changemessagevisibility",
+        )
+        .with_code("AccessDenied");
+        Self { inner, error, calls: AtomicUsize::new(0) }
+    }
+
+    pub(crate) fn with_error(mut self, kind: AwsErrorKind, code: &str) -> Self {
+        self.error = AwsError::new("sqs", "ChangeMessageVisibilityBatch", kind, code).with_code(code);
+        self
+    }
+}
+
+#[async_trait]
+impl SqsApi for FailingVisibility {
+    async fn send_message(&self, queue_url: &str, request: SendRequest) -> Result<SendOutput> {
+        self.inner.send_message(queue_url, request).await
+    }
+    async fn send_message_batch(&self, queue_url: &str, entries: Vec<SendRequest>) -> Result<BatchResult<SendOutput>> {
+        self.inner.send_message_batch(queue_url, entries).await
+    }
+    async fn receive_messages(&self, request: ReceiveRequest) -> Result<Vec<ReceivedMessage>> {
+        self.inner.receive_messages(request).await
+    }
+    async fn delete_message_batch(&self, queue_url: &str, receipt_handles: Vec<String>) -> Result<BatchResult<()>> {
+        self.inner.delete_message_batch(queue_url, receipt_handles).await
+    }
+    async fn change_visibility_batch(
+        &self,
+        _queue_url: &str,
+        _entries: Vec<VisibilityChange>,
+    ) -> Result<BatchResult<()>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(self.error.clone().into())
+    }
+    async fn get_queue_url(&self, name: &str, owner_account_id: Option<&str>) -> Result<String> {
+        self.inner.get_queue_url(name, owner_account_id).await
+    }
+    async fn get_queue_attributes(&self, queue_url: &str) -> Result<StringMap> {
+        self.inner.get_queue_attributes(queue_url).await
+    }
+    async fn create_queue(&self, name: &str, attributes: &StringMap, tags: &StringMap) -> Result<String> {
+        self.inner.create_queue(name, attributes, tags).await
+    }
+    async fn set_queue_attributes(&self, queue_url: &str, attributes: &StringMap) -> Result<()> {
         self.inner.set_queue_attributes(queue_url, attributes).await
     }
     async fn list_queue_tags(&self, queue_url: &str) -> Result<StringMap> {
