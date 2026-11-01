@@ -166,7 +166,13 @@ While a message is buffered or processed, the engine extends its visibility befo
 (`Heartbeat(interval=..., extend_by=..., max_duration=...)`; default interval: a third of the
 timeout), batching ten messages per call. Heartbeats run on Rust threads, so a handler blocking the
 event loop does not lose its lease. If a receipt handle becomes invalid, a `lease.lost` event is
-emitted (the message may be processed twice; make handlers idempotent). Pass `heartbeat=False` to
+emitted (the message may be processed twice; make handlers idempotent). An extension that fails
+otherwise is retried: after a second for a transient error, and backing off from a second up to the
+heartbeat interval for throttling and errors a retry cannot fix, with one `lease.extension_failed`
+event per round of calls (its `messages` field counts the leases). When the queue denies the
+consumer `sqs:ChangeMessageVisibility`, a `config.warning` says so once. A heartbeat interval above
+half the visibility it extends is warned about too: one failed extension could then let a message
+become visible again while it is processed. Pass `heartbeat=False` to
 disable heartbeats. SQS counts visibility timeouts and delays in whole seconds: fanferro rounds
 fractions up (0.5 s becomes 1 s, never 0), and so does the in-memory broker.
 
