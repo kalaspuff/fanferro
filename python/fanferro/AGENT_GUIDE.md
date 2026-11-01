@@ -39,7 +39,9 @@ compact reference for writing applications with it. Print it with `fanferro guid
    `fanferro.aws.EventBridgeMetadata.of(message)` has the account, region and resources. Typed
    AWS events: `ScheduledEvent`, `EcsTaskStateChange`, `StepFunctionsExecutionStatusChange`,
    `Ec2SpotInstanceInterruptionWarning`, `Ec2InstanceStateChange`, `AutoScalingLifecycleAction`
-   (EventBridge or a hook's direct SQS/SNS notifications), `HealthEvent`.
+   (EventBridge or a hook's direct SQS/SNS notifications), `HealthEvent`. Also `CloudWatchAlarm`
+   (SNS) and `CloudWatchAlarmStateChange` (EventBridge), `LambdaInvocationRecord` (destinations);
+   Lambda dead letters are typed `aws.lambda.dead_letter` (`aws.LambdaDeadLetter.of(message)`).
 10. **Test with `fanferro.testing.memory_client()`**, end to end with MiniStack.
 
 ## Minimal service

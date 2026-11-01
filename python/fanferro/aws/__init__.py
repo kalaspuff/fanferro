@@ -24,6 +24,11 @@ Notifications sent to SNS and SQS (message type, class):
 * Auto Scaling lifecycle hook: ``aws.autoscaling.ec2_instance_launch_lifecycle_action``,
   ``..._terminate_lifecycle_action``; :class:`AutoScalingLifecycleAction` (and
   :class:`AutoScalingTestNotification`)
+* CloudWatch alarm: ``aws.cloudwatch.alarm``, :class:`CloudWatchAlarm`
+* Lambda destination record: ``aws.lambda.invocation_success``, ``aws.lambda.invocation_failure``;
+  :class:`LambdaInvocationRecord`
+* event in a Lambda function's dead-letter queue: ``aws.lambda.dead_letter``, the event's own
+  class (:class:`LambdaDeadLetter` reads the error)
 
 EventBridge events (their ``detail``):
 
@@ -38,6 +43,9 @@ EventBridge events (their ``detail``):
   :class:`Ec2InstanceRebalanceRecommendation`, :class:`Ec2InstanceStateChange`
 * Auto Scaling lifecycle hooks: as above
 * AWS Health: ``aws.health.event``, :class:`HealthEvent`
+* CloudWatch alarm state changes: ``aws.cloudwatch.alarm_state_change``,
+  :class:`CloudWatchAlarmStateChange`
+* Lambda destination records: as above
 * any other event: decoded into a class of your own (see below)
 
 SES notifications come in two formats, feedback notifications of an identity (``notificationType``)
@@ -60,6 +68,13 @@ document). They encode back into AWS's documents, so tests can publish them (wit
 
 from __future__ import annotations
 
+from fanferro.aws._cloudwatch import (
+    CloudWatchAlarm,
+    CloudWatchAlarmState,
+    CloudWatchAlarmStateChange,
+    CloudWatchAlarmTrigger,
+    CloudWatchDimension,
+)
 from fanferro.aws._document import AwsDocument
 from fanferro.aws._eventbridge import EventBridgeMetadata, S3EventBridgeBucket, S3EventBridgeObject, S3ObjectEvent
 from fanferro.aws._events import (
@@ -79,6 +94,7 @@ from fanferro.aws._events import (
     ScheduledEvent,
     StepFunctionsExecutionStatusChange,
 )
+from fanferro.aws._lambda import LambdaDeadLetter, LambdaInvocationRecord, LambdaRequestContext, LambdaResponseContext
 from fanferro.aws._s3 import S3Bucket, S3Event, S3EventRecord, S3Object, S3RestoreEventData, S3TestEvent
 from fanferro.aws._ses import (
     SesBounce,
@@ -99,6 +115,11 @@ __all__ = [
     "AutoScalingLifecycleAction",
     "AutoScalingTestNotification",
     "AwsDocument",
+    "CloudWatchAlarm",
+    "CloudWatchAlarmState",
+    "CloudWatchAlarmStateChange",
+    "CloudWatchAlarmTrigger",
+    "CloudWatchDimension",
     "Ec2InstanceRebalanceRecommendation",
     "Ec2InstanceStateChange",
     "Ec2SpotInstanceInterruptionWarning",
@@ -111,6 +132,10 @@ __all__ = [
     "HealthAffectedEntity",
     "HealthEvent",
     "HealthEventDescription",
+    "LambdaDeadLetter",
+    "LambdaInvocationRecord",
+    "LambdaRequestContext",
+    "LambdaResponseContext",
     "S3Bucket",
     "S3Event",
     "S3EventBridgeBucket",

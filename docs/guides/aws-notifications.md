@@ -1,7 +1,8 @@
 # Notifications and events of AWS services
 
-S3 (bucket event notifications) and SES (bounce, complaint and delivery notifications, and the
-events a configuration set publishes) send JSON documents to SNS topics and SQS queues, and
+S3 (bucket event notifications), SES (bounce, complaint and delivery notifications, and the events
+a configuration set publishes), CloudWatch alarms, Auto Scaling lifecycle hooks and Lambda
+(destinations and dead-letter queues) send JSON documents to SNS topics and SQS queues, and
 EventBridge rules send the events of AWS services, SaaS partners and applications to them. fanferro
 recognises them and decodes them into typed objects of `fanferro.aws` or [classes of your
 own](#eventbridge-events), so receiving them is like receiving any typed message:
@@ -191,6 +192,49 @@ async def on_autoscaling_test(notification: aws.AutoScalingTestNotification) -> 
 Events of other AWS services decode into classes of your own (or `Message[dict]`), routed by
 their type (`@consumer.route("aws.batch.job_state_change")`). A rule with an input transformer
 sends whatever its template makes, which is not an event: route such messages like any other.
+
+## CloudWatch alarms
+
+An alarm whose action is an SNS topic sends it a notification of its own (PascalCase, with the
+metric in `Trigger`): `aws.cloudwatch.alarm`, decoded into `aws.CloudWatchAlarm` (`alarm_name`,
+`new_state_value`, `alarming`, `ok`, `new_state_reason`, `old_state_value`, `state_change_time`,
+`trigger.metric_name`, `trigger.dimensions`, `trigger.threshold`...). Through EventBridge, an
+alarm's state change is `aws.cloudwatch.alarm_state_change`, decoded into
+`aws.CloudWatchAlarmStateChange` (`state` and `previous_state` with `value`, `reason`,
+`reason_data_json()`, `timestamp`; `configuration`; `alarm_tags`).
+
+```python
+@consumer.route
+async def on_alarm(alarm: aws.CloudWatchAlarm) -> None:
+    if alarm.alarming:
+        await page_on_call(alarm.alarm_name, alarm.new_state_reason)
+```
+
+## Lambda destinations and dead-letter queues
+
+The destinations of asynchronously invoked Lambda functions (an SQS queue, an SNS topic or
+EventBridge) receive a record of each invocation: `aws.lambda.invocation_success` and
+`aws.lambda.invocation_failure`, decoded into `aws.LambdaInvocationRecord` (`succeeded`,
+`request_context` with `function_arn`, `condition` and `approximate_invoke_count`,
+`request_payload`, the event, `response_payload` and `error_message`). The on-failure
+destinations of Kinesis and DynamoDB stream event source mappings send records of the same shape,
+with the batch in `kinesis_batch_info` or `ddb_stream_batch_info`. A record, lifecycle action or
+alarm state change that fanferro publishes (in a test, say) gets the message type of its own kind:
+`aws.lambda.invocation_success` for a successful invocation, `..._terminate_lifecycle_action` for a
+terminating instance.
+
+A function's dead-letter queue (or topic) receives the event itself, with the `RequestID`,
+`ErrorCode` and `ErrorMessage` attributes Lambda adds. Such messages are `aws.lambda.dead_letter`
+whatever their body, so that an event a function failed to process (an S3 notification, say) does
+not reach the routes of that event again; decode the body into the event's class and read the error
+with `aws.LambdaDeadLetter.of(message)`:
+
+```python
+@consumer.route("aws.lambda.dead_letter")
+async def on_failed_upload(message: fanferro.Message[aws.S3Event]) -> None:
+    failure = aws.LambdaDeadLetter.of(message)  # request_id, error_code, error_message
+    await report(failure.error_message, message.body.records)
+```
 
 ## Setting up the subscription
 

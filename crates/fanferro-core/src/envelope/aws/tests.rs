@@ -243,3 +243,68 @@ fn recognises_auto_scaling_lifecycle_hook_notifications() {
     assert_eq!(unwrap(r#"{"Service":"AWS Auto Scaling"}"#), None);
     assert_eq!(unwrap(r#"{"Service":"Other","Event":"AWS Auto Scaling"}"#), None);
 }
+
+/// A CloudWatch alarm's notification to SNS.
+const CLOUDWATCH_ALARM: &str = r#"{"AlarmName":"ServerCpuTooHigh","AlarmDescription":"CPU too high","AWSAccountId":"123456789012","AlarmConfigurationUpdatedTimestamp":"2019-10-01T13:00:00.000+0000","NewStateValue":"ALARM","NewStateReason":"Threshold Crossed: 1 out of the last 1 datapoints [99.5 (02/10/19 16:59:00)] was greater than the threshold (50.0).","StateChangeTime":"2019-10-02T17:04:40.989+0000","Region":"US East (N. Virginia)","AlarmArn":"arn:aws:cloudwatch:us-east-1:123456789012:alarm:ServerCpuTooHigh","OldStateValue":"OK","OKActions":[],"AlarmActions":["arn:aws:sns:us-east-1:123456789012:alarms"],"InsufficientDataActions":[],"Trigger":{"MetricName":"CPUUtilization","Namespace":"AWS/EC2","StatisticType":"Statistic","Statistic":"AVERAGE","Unit":null,"Dimensions":[{"value":"i-12345678901234567","name":"InstanceId"}],"Period":300,"EvaluationPeriods":1,"ComparisonOperator":"GreaterThanThreshold","Threshold":50.0,"TreatMissingData":"missing","EvaluateLowSampleCountPercentile":""}}"#;
+
+/// AWS's example record of a failed asynchronous Lambda invocation.
+const LAMBDA_FAILURE: &str = r#"{"version":"1.0","timestamp":"2019-11-14T18:16:05.568Z","requestContext":{"requestId":"e4b46cbf-b738-xmpl-8880-a18cdf61200e","functionArn":"arn:aws:lambda:us-east-1:123456789012:function:my-function:$LATEST","condition":"RetriesExhausted","approximateInvokeCount":3},"requestPayload":{"ORDER_IDS":["9e07af03-ce31-4ff3-xmpl-36dce652cb4f"]},"responseContext":{"statusCode":200,"executedVersion":"$LATEST","functionError":"Unhandled"},"responsePayload":{"errorMessage":"RequestId: e4b46cbf-b738-xmpl-8880-a18cdf61200e Process exited before completing request"}}"#;
+
+#[test]
+fn parses_timestamps_with_offsets_without_a_colon() {
+    for (text, timestamp) in [
+        ("2019-10-02T17:04:40.989+0000", 1_570_035_880),
+        ("2018-10-08T14:05:45 +0000", 1_539_007_545),
+        ("2019-10-02T19:04:40+0200", 1_570_035_880),
+        ("2019-10-02T17:04:40Z", 1_570_035_880),
+    ] {
+        assert_eq!(parse_timestamp(text).map(OffsetDateTime::unix_timestamp), Some(timestamp), "{text}");
+    }
+    assert_eq!(parse_timestamp("+0000"), None);
+    assert_eq!(parse_timestamp("yesterday"), None);
+}
+
+#[test]
+fn recognises_cloudwatch_alarm_notifications() {
+    let payload = unwrap(CLOUDWATCH_ALARM).unwrap();
+    assert_eq!(payload.message_type.as_deref(), Some("aws.cloudwatch.alarm"));
+    assert_eq!(payload.source.as_deref(), Some("aws.cloudwatch"));
+    assert_eq!(payload.time.unwrap().unix_timestamp(), 1_570_035_880);
+    assert_eq!(unwrap(r#"{"AlarmName":"x","NewStateValue":1}"#), None);
+}
+
+#[test]
+fn recognises_lambda_invocation_records() {
+    let payload = unwrap(LAMBDA_FAILURE).unwrap();
+    assert_eq!(payload.message_type.as_deref(), Some("aws.lambda.invocation_failure"));
+    assert_eq!(payload.source.as_deref(), Some("aws.lambda"));
+    assert_eq!(payload.time.unwrap().unix_timestamp(), 1_573_755_365);
+    let success = LAMBDA_FAILURE.replace("RetriesExhausted", "Success");
+    assert_eq!(unwrap(&success).unwrap().message_type.as_deref(), Some("aws.lambda.invocation_success"));
+    // Through EventBridge: source `lambda`.
+    let detail = LAMBDA_FAILURE;
+    let wrapped = eventbridge("lambda", "Lambda Function Invocation Result - Failure", detail);
+    let payload = unwrap(&wrapped).unwrap();
+    assert_eq!(payload.message_type.as_deref(), Some("aws.lambda.invocation_failure"));
+    assert_eq!(&payload.data[..], detail.as_bytes());
+    let wrapped = eventbridge("lambda", "Lambda Function Invocation Result - Success", detail);
+    assert_eq!(unwrap(&wrapped).unwrap().message_type.as_deref(), Some("aws.lambda.invocation_success"));
+}
+
+#[test]
+fn recognises_lambda_dead_letters_by_their_attributes() {
+    let mut wire = wire(S3_PUT);
+    wire.attributes.insert("RequestID".into(), AttributeValue::string("e4b46cbf"));
+    wire.attributes.insert("ErrorCode".into(), AttributeValue::number("200"));
+    wire.attributes.insert("ErrorMessage".into(), AttributeValue::string("boom"));
+    let payload = AwsNotifications.unwrap(&wire).unwrap().unwrap();
+    // A failed S3 event: its type says it failed, its body is the S3 event.
+    assert_eq!(payload.message_type.as_deref(), Some("aws.lambda.dead_letter"));
+    assert_eq!(payload.content_type.as_deref(), Some("application/json"));
+    assert_eq!(&payload.data[..], S3_PUT.as_bytes());
+    wire.body = Bytes::from_static(b"not json");
+    let payload = AwsNotifications.unwrap(&wire).unwrap().unwrap();
+    assert_eq!((payload.message_type.as_deref(), payload.content_type), (Some("aws.lambda.dead_letter"), None));
+    wire.attributes.remove("ErrorMessage");
+    assert_eq!(AwsNotifications.unwrap(&wire).unwrap(), None);
+}

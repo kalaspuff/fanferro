@@ -5,9 +5,12 @@ The message type travels in the envelope (CloudEvents ``type``) and, by default,
 a class, in order:
 
 1. names registered with :meth:`MessageTypes.register`,
-2. the ``@message_type("...")`` decorator (``__fanferro_type__``),
-3. a codec-provided canonical name (protobuf: ``DESCRIPTOR.full_name``),
-4. the naming function (default: the class ``__name__``).
+2. for an instance (a message being published), the name its ``__fanferro_message_type__()``
+   method returns, if it has one and it returns a name: a class whose routes accept several types
+   (``fanferro.aws.LambdaInvocationRecord``: success or failure) names each message's own,
+3. the ``@message_type("...")`` decorator (``__fanferro_type__``),
+4. a codec-provided canonical name (protobuf: ``DESCRIPTOR.full_name``),
+5. the naming function (default: the class ``__name__``).
 
 Prefer explicit, versioned names for anything that crosses service boundaries::
 
@@ -79,6 +82,11 @@ class MessageTypes:
         cls = target if isinstance(target, type) else type(target)
         if cls in self._names:
             return self._names[cls]
+        if cls is not target:
+            own = getattr(target, "__fanferro_message_type__", None)
+            name = own() if callable(own) else None
+            if isinstance(name, str) and name:
+                return name
         explicit = cls.__dict__.get(_ATTRIBUTE)
         if isinstance(explicit, str):
             return explicit

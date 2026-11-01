@@ -221,3 +221,88 @@ HEALTH_INSTANCE_RETIREMENT: dict[str, Any] = {
     "personas": ["OPERATIONS"],
     "actionability": "ACTION_REQUIRED",
 }
+
+CLOUDWATCH_ALARM: dict[str, Any] = {
+    "AlarmName": "ServerCpuTooHigh",
+    "AlarmDescription": "Goes into alarm when server CPU utilization is too high!",
+    "AWSAccountId": "123456789012",
+    "AlarmConfigurationUpdatedTimestamp": "2019-10-01T13:00:00.000+0000",
+    "NewStateValue": "ALARM",
+    "NewStateReason": "Threshold Crossed: 1 out of the last 1 datapoints [99.5 (02/10/19 16:59:00)] was greater than the threshold (50.0).",  # noqa: E501 - verbatim
+    "StateChangeTime": "2019-10-02T17:04:40.989+0000",
+    "Region": "US East (N. Virginia)",
+    "AlarmArn": "arn:aws:cloudwatch:us-east-1:123456789012:alarm:ServerCpuTooHigh",
+    "OldStateValue": "OK",
+    "OKActions": [],
+    "AlarmActions": ["arn:aws:sns:us-east-1:123456789012:alarms"],
+    "InsufficientDataActions": [],
+    "Trigger": {
+        "MetricName": "CPUUtilization",
+        "Namespace": "AWS/EC2",
+        "StatisticType": "Statistic",
+        "Statistic": "AVERAGE",
+        "Unit": None,
+        "Dimensions": [{"value": "i-12345678901234567", "name": "InstanceId"}],
+        "Period": 300,
+        "EvaluationPeriods": 1,
+        "ComparisonOperator": "GreaterThanThreshold",
+        "Threshold": 50.0,
+        "TreatMissingData": "missing",
+        "EvaluateLowSampleCountPercentile": "",
+    },
+}
+"""A CloudWatch alarm's notification to SNS."""
+
+# The `detail` of AWS's example `CloudWatch Alarm State Change` event (single metric alarm).
+CLOUDWATCH_ALARM_STATE_CHANGE: dict[str, Any] = {
+    "alarmName": "ServerCpuTooHigh",
+    "configuration": {
+        "description": "Goes into alarm when server CPU utilization is too high!",
+        "metrics": [
+            {
+                "id": "30b6c6b2-a864-43a2-4877-c09a1afc3b87",
+                "metricStat": {
+                    "metric": {
+                        "dimensions": {"InstanceId": "i-12345678901234567"},
+                        "name": "CPUUtilization",
+                        "namespace": "AWS/EC2",
+                    },
+                    "period": 300,
+                    "stat": "Average",
+                },
+                "returnData": True,
+            }
+        ],
+    },
+    "previousState": {
+        "reason": "Threshold Crossed: 1 out of the last 1 datapoints [0.0666851903306472 (01/10/19 13:46:00)] was not greater than the threshold (50.0) (minimum 1 datapoint for ALARM -> OK transition).",  # noqa: E501 - verbatim
+        "reasonData": '{"version":"1.0","queryDate":"2019-10-01T13:56:40.985+0000","startDate":"2019-10-01T13:46:00.000+0000","statistic":"Average","period":300,"recentDatapoints":[0.0666851903306472],"threshold":50.0}',  # noqa: E501 - verbatim
+        "timestamp": "2019-10-01T13:56:40.987+0000",
+        "value": "OK",
+    },
+    "state": {
+        "reason": "Threshold Crossed: 1 out of the last 1 datapoints [99.50160229693434 (02/10/19 16:59:00)] was greater than the threshold (50.0) (minimum 1 datapoint for OK -> ALARM transition).",  # noqa: E501 - verbatim
+        "reasonData": '{"version":"1.0","queryDate":"2019-10-02T17:04:40.985+0000","startDate":"2019-10-02T16:59:00.000+0000","statistic":"Average","period":300,"recentDatapoints":[99.50160229693434],"threshold":50.0}',  # noqa: E501 - verbatim
+        "timestamp": "2019-10-02T17:04:40.989+0000",
+        "value": "ALARM",
+    },
+    "alarmTags": {"Environment": "prod", "Team": "cloudwatch"},
+    "alarmTagsStatus": "SUCCESS",
+}
+
+# AWS's example record of an asynchronous invocation that failed three attempts.
+LAMBDA_FAILURE: dict[str, Any] = {
+    "version": "1.0",
+    "timestamp": "2019-11-14T18:16:05.568Z",
+    "requestContext": {
+        "requestId": "e4b46cbf-b738-xmpl-8880-a18cdf61200e",
+        "functionArn": "arn:aws:lambda:us-east-1:123456789012:function:my-function:$LATEST",
+        "condition": "RetriesExhausted",
+        "approximateInvokeCount": 3,
+    },
+    "requestPayload": {"ORDER_IDS": ["9e07af03-ce31-4ff3-xmpl-36dce652cb4f", "637de236-e7b2-464e-xmpl-baf57f86bb53"]},
+    "responseContext": {"statusCode": 200, "executedVersion": "$LATEST", "functionError": "Unhandled"},
+    "responsePayload": {
+        "errorMessage": "RequestId: e4b46cbf-b738-xmpl-8880-a18cdf61200e Process exited before completing request"
+    },
+}

@@ -140,6 +140,14 @@ def _convert(value: Any, hint: Any, path: tuple[str, ...]) -> Any:
             return value
         if isinstance(value, str) and value.lower() in ("true", "false"):  # SES documents it as a string too
             return value.lower() == "true"
+    elif hint is float:
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value)
+            except ValueError:
+                pass
     elif hint is int:
         if isinstance(value, int) and not isinstance(value, bool):
             return value
