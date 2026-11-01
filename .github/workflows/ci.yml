@@ -119,22 +119,22 @@ jobs:
           targets: aarch64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
         with:
-          # A new key: an exact hit is never saved again, and the cache saved so far lacks the
-          # cross-built crates (see the CACHEDIR.TAG step).
-          key: wheel-release
+          # A new key: an exact hit is never saved again, and the caches saved before lacked the
+          # cross-built crates or were built with other linker paths (see the steps below).
+          key: wheel-release-tools
       - uses: astral-sh/setup-uv@v10.3.2
-      - run: uvx --from "maturin==$MATURIN_VERSION" maturin sdist --out dist
-      - name: DIAGNOSTIC restored target
-        run: ls -la target target/aarch64-unknown-linux-musl target/aarch64-unknown-linux-musl/release 2>&1 | head -40; ls target/aarch64-unknown-linux-musl/release/deps 2>/dev/null | wc -l; ls target/aarch64-unknown-linux-musl/release/.fingerprint 2>/dev/null | wc -l
+      - name: Install maturin and zig
+        # At a path that stays the same between runs: maturin's zig linker and compiler wrappers
+        # are named after the zig command, and a changed linker rebuilds every crate, so uvx's
+        # temporary environments made the Rust cache useless (#169).
+        run: uv tool install "maturin==$MATURIN_VERSION" --with "ziglang==$ZIG_VERSION"
+      - run: maturin sdist --out dist
       - name: Cross-build an optimized aarch64 musl wheel with zig (as the release does)
         # The release profile, not the release's fat-LTO dist profile (too slow for every run), so
         # that the wheel is optimized and of about the size that ships.
-        env:
-          CARGO_LOG: cargo::core::compiler::fingerprint=info
-        run: uvx --from "maturin==$MATURIN_VERSION" --with "ziglang==$ZIG_VERSION" maturin build --release --locked --zig --target aarch64-unknown-linux-musl --compatibility musllinux_1_2 --out dist
+        run: maturin build --release --locked --zig --target aarch64-unknown-linux-musl --compatibility musllinux_1_2 --out dist
       - name: Keep the cross-built crates in the Rust cache
         # rust-cache treats target/<triple>/ as a profile directory unless it holds a CACHEDIR.TAG,
-        # and then deletes target/<triple>/release with every crate built for the target, so each
-        # run compiled all of them again (#169).
+        # and then deletes target/<triple>/release with every crate built for the target (#169).
         run: touch target/aarch64-unknown-linux-musl/CACHEDIR.TAG
       - run: ls -l dist
