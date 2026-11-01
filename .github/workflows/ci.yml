@@ -118,8 +118,19 @@ jobs:
         with:
           targets: aarch64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
+        with:
+          # A new key: an exact hit is never saved again, and the cache saved so far lacks the
+          # cross-built crates (see the CACHEDIR.TAG step).
+          key: wheel-release
       - uses: astral-sh/setup-uv@v10.3.2
       - run: uvx --from "maturin==$MATURIN_VERSION" maturin sdist --out dist
-      - name: Cross-build an aarch64 musl wheel with zig (as the release does)
-        run: uvx --from "maturin==$MATURIN_VERSION" --with "ziglang==$ZIG_VERSION" maturin build --locked --zig --target aarch64-unknown-linux-musl --compatibility musllinux_1_2 --out dist
+      - name: Cross-build an optimized aarch64 musl wheel with zig (as the release does)
+        # The release profile, not the release's fat-LTO dist profile (too slow for every run), so
+        # that the wheel is optimized and of about the size that ships.
+        run: uvx --from "maturin==$MATURIN_VERSION" --with "ziglang==$ZIG_VERSION" maturin build --release --locked --zig --target aarch64-unknown-linux-musl --compatibility musllinux_1_2 --out dist
+      - name: Keep the cross-built crates in the Rust cache
+        # rust-cache treats target/<triple>/ as a profile directory unless it holds a CACHEDIR.TAG,
+        # and then deletes target/<triple>/release with every crate built for the target, so each
+        # run compiled all of them again (#169).
+        run: touch target/aarch64-unknown-linux-musl/CACHEDIR.TAG
       - run: ls -l dist
