@@ -176,3 +176,73 @@ class TestTomodachi:
     )
     def test_tomodachi_topic_names(self, topic: str, encoded: str) -> None:
         assert envelopes.compat.tomodachi_topic(topic) == encoded
+
+
+class TestMetadataProtobuf:
+    def test_importable_from_the_package(self) -> None:
+        assert envelopes.compat.MetadataProtobuf is fanferro._core.MetadataProtobufEnvelope
+        assert envelopes.compat.CORRELATION_ID_HEADER == "correlationid"
+        assert envelopes.compat.DATA_CLASS_HEADER == "dataclass"
+
+    def test_options_equality_and_repr(self) -> None:
+        envelope = envelopes.compat.MetadataProtobuf("example-envelope", version="1.0.0", service_name="billing")
+        assert envelope.name == "metadata-protobuf"
+        assert (envelope.envelope, envelope.version, envelope.marker) == (
+            "example-envelope",
+            "1.0.0",
+            "example-envelope--1.0.0",
+        )
+        assert envelope.service_name == "billing"
+        assert envelope.correlation_id is None
+        assert envelope.generate_missing_correlation_id
+        assert envelope.compress_threshold == 60_000
+        assert envelope.type_attribute == "fanferro.type"
+        assert envelopes.compat.MetadataProtobuf("x").marker == "x"
+        assert not envelopes.supports_headers(envelope)
+
+        def correlation_id() -> str:
+            return "c-1"
+
+        same = envelopes.compat.MetadataProtobuf("x", correlation_id=correlation_id)
+        assert same == envelopes.compat.MetadataProtobuf("x", correlation_id=correlation_id)
+        assert hash(same) == hash(envelopes.compat.MetadataProtobuf("x", correlation_id=correlation_id))
+        assert same != envelopes.compat.MetadataProtobuf("x", correlation_id=lambda: "c-1")
+        assert same != envelopes.compat.MetadataProtobuf("x")
+        assert envelopes.compat.MetadataProtobuf("x") != envelopes.compat.MetadataProtobuf("y")
+        assert same.correlation_id is correlation_id
+        assert repr(envelopes.compat.MetadataProtobuf("x", generate_missing_correlation_id=False)) == (
+            "MetadataProtobufEnvelope(envelope='x', version=None, service_name=None, correlation_id=None, "
+            "generate_missing_correlation_id=False, type_attribute='fanferro.type', compress_threshold=60000)"
+        )
+
+    def test_invalid_options(self) -> None:
+        with pytest.raises(fanferro.ConfigurationError, match=r"metadata\.envelope"):
+            envelopes.compat.MetadataProtobuf("")
+        with pytest.raises(fanferro.ConfigurationError, match="version"):
+            envelopes.compat.MetadataProtobuf("x", version="")
+        with pytest.raises(fanferro.ConfigurationError, match="correlation_id must be a function"):
+            envelopes.compat.MetadataProtobuf("x", correlation_id="c-1")  # type: ignore[arg-type]
+        with pytest.raises(fanferro.ConfigurationError, match="compress_threshold"):
+            envelopes.compat.MetadataProtobuf("x", compress_threshold=-1)
+        with pytest.raises(fanferro.ConfigurationError, match="'topic' or 'queue'"):
+            envelopes.compat.MetadataProtobuf("x").wrap_for(payload(), "bucket", "x")  # type: ignore[arg-type]
+
+    def test_round_trips_with_headers(self) -> None:
+        envelope = envelopes.compat.MetadataProtobuf("example-envelope", version="2")
+        outgoing = fanferro.Payload(
+            b'{"a":1}',
+            content_type="application/json",
+            id="m-1",
+            headers={"correlationid": "c-1", "tenant": "acme"},
+        )
+        wire = envelope.wrap_for(outgoing, "topic", "orders")
+        assert set(wire.attributes) == {"tenant"}
+        decoded = envelope.unwrap(wire)
+        assert decoded is not None
+        assert (decoded.id, decoded.data, decoded.message_type) == ("m-1", b'{"a":1}', "orders")
+        assert decoded.headers == {"correlationid": "c-1"}
+        assert envelopes.compat.MetadataProtobuf("other-envelope").unwrap(wire) is None
+
+    def test_refuses_data_without_an_encoding(self) -> None:
+        with pytest.raises(fanferro.EnvelopeError, match="application/msgpack"):
+            envelopes.compat.MetadataProtobuf("x").wrap(payload(b"\x80", "application/msgpack"))

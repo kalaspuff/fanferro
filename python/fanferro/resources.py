@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal, Unpack
 
 from fanferro._core import (
     AttributeValue,
+    MetadataProtobufEnvelope,
     Payload,
     TomodachiJSONEnvelope,
     TomodachiProtobufEnvelope,
@@ -23,6 +24,7 @@ from fanferro._core import (
     validate_wire,
 )
 from fanferro._utils import Duration, LoopLocal, optional_seconds, seconds
+from fanferro.envelopes.compat import _outgoing_metadata
 from fanferro.errors import ConfigurationError, ResourceUnavailableError, ValidationError
 from fanferro.events import EventKind
 from fanferro.messages import (
@@ -66,7 +68,7 @@ _UNSET: Any = object()
 _RETRY_AFTER_FAILURE = (1.0, 60.0)
 _MAX_ATTRIBUTES = 10
 """Message attributes SQS and SNS accept per message."""
-_DESTINATION_ENVELOPES = (TomodachiJSONEnvelope, TomodachiProtobufEnvelope)
+_DESTINATION_ENVELOPES = (TomodachiJSONEnvelope, TomodachiProtobufEnvelope, MetadataProtobufEnvelope)
 """Envelopes whose layout depends on the destination (``wrap_for(payload, kind, name)``)."""
 
 type GroupId = str | Callable[[OutgoingMessage], str]
@@ -305,16 +307,20 @@ class _Destination(_Resource):
         message_type = message.type
         if message_type is None and _structured(message.body):
             message_type = client.types.name_of(message.body)
+        content_type = message.content_type or encoded.content_type
+        headers, data_schema = message.headers, message.data_schema
+        if isinstance(envelope, MetadataProtobufEnvelope):
+            headers, data_schema = _outgoing_metadata(envelope, message.body, content_type, headers, data_schema)
         payload = Payload(
             encoded.data,
-            content_type=message.content_type or encoded.content_type,
+            content_type=content_type,
             message_type=message_type,
             id=message.id,
             time=message.time,
             source=message.source or client.source,
             subject=message.subject,
-            data_schema=message.data_schema,
-            headers=message.headers,
+            data_schema=data_schema,
+            headers=headers,
         )
         if isinstance(envelope, _DESTINATION_ENVELOPES):
             # The topic as tomodachi names it: without the prefix (its aws_sns_sqs.topic_prefix).

@@ -28,8 +28,9 @@ in code: `await dlq.peek()`, `await dlq.redrive()`).
 8. ≤ 10 message attributes (fanferro uses 1-2, +1-2 for tracing); `fanferro.*` names are reserved.
    Messages are raw JSON bodies by default; opt into CloudEvents with
    `Client(envelope=fanferro.envelopes.CloudEvents())`. tomodachi services: envelopes
-   `fanferro.envelopes.compat.TomodachiJSON()`/`TomodachiProtobuf()` (also in `accept_envelopes`,
-   before `Raw`); the tomodachi topic is the message type. S3 events and SES bounces, complaints
+   `fanferro.envelopes.compat.TomodachiJSON()`/`TomodachiProtobuf()`, or `MetadataProtobuf(name)`
+   for a protobuf data + metadata envelope of their own (also in `accept_envelopes`, before `Raw`);
+   the tomodachi topic is the message type. S3 events and SES bounces, complaints
    and deliveries are recognised by default: annotate handlers with `fanferro.aws.S3Event`,
    `SesBounceNotification`, `SesComplaintNotification`, `SesDeliveryNotification`. EventBridge
    events: the body is the `detail`; type `aws.<service>.<event>`, or the `detail-type` for other
