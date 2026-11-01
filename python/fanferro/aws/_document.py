@@ -164,7 +164,10 @@ def _convert(value: Any, hint: Any, path: tuple[str, ...]) -> Any:
 def _time(value: Any, path: tuple[str, ...]) -> datetime:
     """A time in any format AWS writes: ISO 8601, RFC 2822 or epoch milliseconds."""
     if isinstance(value, int | float) and not isinstance(value, bool):
-        return datetime.fromtimestamp(value / 1000, UTC)
+        try:
+            return datetime.fromtimestamp(value / 1000, UTC)
+        except (OverflowError, OSError, ValueError):  # out of range, or NaN
+            raise DecodeError(f"{_render(path)}: expected a time, got {value!r}") from None
     if isinstance(value, str):
         try:
             parsed = datetime.fromisoformat(value)
