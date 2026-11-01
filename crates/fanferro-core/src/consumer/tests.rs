@@ -1671,3 +1671,36 @@ async fn only_external_engines_accept_records() {
     let error = engine.accept_records(Vec::new()).await.unwrap_err();
     assert!(error.to_string().contains("created"), "{error}");
 }
+
+#[tokio::test(start_paused = true)]
+async fn decoding_keeps_the_body_intact_and_shares_a_raw_one() {
+    let fx = fixture(ClientConfig::default()).await;
+    let raw = "raw héllo";
+    fx.send(raw).await;
+    let request = SendRequest {
+        body: "AAEC/w==".into(),
+        attributes: [(reserved::ENCODING.to_string(), AttributeValue::string("base64"))].into(),
+        ..SendRequest::default()
+    };
+    fx.client.backend().sqs.send_message(&fx.url, request).await.unwrap();
+    fx.send(
+        r#"{"Type":"Notification","MessageId":"1","TopicArn":"arn:aws:sns:us-east-1:000000000000:x","Message":"wrapped \"body\""}"#,
+    )
+    .await;
+    let engine = fx.engine(|config| config.fifo = false);
+    let deliveries = collect(&engine, 3).await;
+    let mut bodies: Vec<&[u8]> =
+        deliveries.iter().map(|delivery| &delivery.decoded.as_ref().unwrap().wire.body[..]).collect();
+    bodies.sort();
+    let mut expected: Vec<&[u8]> = vec![raw.as_bytes(), &[0, 1, 2, 255], b"wrapped \"body\""];
+    expected.sort();
+    assert_eq!(bodies, expected);
+    let delivery = deliveries.iter().find(|delivery| delivery.lease.message.body == raw).unwrap();
+    let wire = &delivery.decoded.as_ref().unwrap().wire;
+    assert_eq!(wire.body.as_ptr(), delivery.lease.message.body.as_ptr(), "the raw body is shared, not copied");
+    for delivery in &deliveries {
+        delivery.lease.mark_active();
+        delivery.lease.ack().await.unwrap();
+    }
+    engine.close(true).await;
+}

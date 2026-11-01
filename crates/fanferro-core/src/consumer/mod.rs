@@ -33,13 +33,13 @@ mod poller;
 pub mod records;
 mod settle;
 
-use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use bytes::Bytes;
 use parking_lot::Mutex;
 use time::OffsetDateTime;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
@@ -307,6 +307,15 @@ impl DeliveryBuffer {
     }
 }
 
+/// The body of a received message, as the owner of a `Bytes` (see `Bytes::from_owner`).
+struct ReceivedBody(Arc<ReceivedMessage>);
+
+impl AsRef<[u8]> for ReceivedBody {
+    fn as_ref(&self) -> &[u8] {
+        self.0.body.as_bytes()
+    }
+}
+
 impl EngineInner {
     /// The settle queue, once the engine started.
     pub(crate) fn settle_queue(&self) -> Option<&SettleQueue> {
@@ -506,9 +515,11 @@ impl EngineInner {
                     self.handle_sns_control(lease, unwrapped.info).await;
                     return None;
                 }
-                (Cow::Owned(unwrapped.message), unwrapped.attributes, Some(unwrapped.info))
+                (Bytes::from(unwrapped.message), unwrapped.attributes, Some(unwrapped.info))
             }
-            Ok(None) => (Cow::Borrowed(message.body.as_str()), message.attributes.clone(), None),
+            // The body stays in the lease's message (for raw_body, dead-letter forwards and
+            // requeues): the wire message shares it instead of copying it.
+            Ok(None) => (Bytes::from_owner(ReceivedBody(message.clone())), message.attributes.clone(), None),
             Err(error) => {
                 self.metrics.decode_failures.inc();
                 return Some(Delivery {
@@ -529,7 +540,7 @@ impl EngineInner {
                 }
             }
         }
-        let decoded = self.client.transport().decode(&body, attributes).await;
+        let decoded = self.client.transport().decode(body, attributes).await;
         match &decoded {
             Ok(DecodedBody { pointer: Some(pointer), wire }) => {
                 self.metrics.payloads_fetched.inc();
