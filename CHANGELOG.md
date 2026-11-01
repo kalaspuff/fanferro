@@ -8,6 +8,21 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-01
+
+### Features
+
+- Envelopes of tomodachi services (fanferro.envelopes.compat) (#269)
+- S3 event and SES email notifications as typed messages (fanferro.aws) (#270)
+- **aws:** EventBridge events, their detail decoded into the handler's class (#271)
+- **aws:** Typed scheduled, ECS, Step Functions, EC2, Auto Scaling and Health events (#272)
+- **aws:** CloudWatch alarms, Lambda destination records and dead letters (#273)
+- **envelopes:** MetadataProtobuf, a protobuf data + metadata envelope for tomodachi services (#274)
+
+### Documentation
+
+- How fanferro compares with tomodachi exchanging the same messages (#275)
+
 ## [0.9.0] - 2026-11-01
 
 ### Features
