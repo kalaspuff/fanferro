@@ -23,6 +23,7 @@ anything non-trivial; update it in the same change when you move a responsibilit
                             publish.rs     send/publish, batches, FIFO dedup, MD5 checks
                             consumer/      pollers · leases · heartbeats · settlement · shutdown
                             provision/     lookup → verify → update/create, drift, policies
+                            redrive.rs     peek and redrive of dead-letter queues
                             events.rs      typed events (filtered, bounded buffer)
                             metrics.rs     lock-free counters, on-demand snapshots
                             backend/       ports: SqsApi · SnsApi · ObjectStoreApi · HttpFetch

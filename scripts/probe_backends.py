@@ -1224,6 +1224,143 @@ async def sqs_native_redrive(probe: Probe) -> None:
     )
 
 
+async def dead_letter_two(probe: Probe, client: fanferro.Client, label: str) -> fanferro.Queue:
+    """A queue with a dead-letter queue holding two messages fanferro dead-lettered: ``requeued``
+    (after two requeued attempts) and ``rejected`` (at its first attempt)."""
+    queue = client.queue(
+        probe.name(label), dead_letter=fanferro.DeadLetterQueue(probe.name(f"{label}-dlq"), max_receive_count=10)
+    )
+    dead: list[fanferro.Event] = []
+    client.on("message.dead_lettered", dead.append)
+    retry = fanferro.RetryPolicy(max_attempts=2, backoff=Backoff.constant(0), strategy="requeue")
+
+    async def fail(message: fanferro.Message[Any]) -> None:
+        if label_of(message) == "rejected":
+            raise fanferro.Reject("invalid order")
+        raise ConnectionError("downstream unavailable")
+
+    polite = fanferro.ShutdownPolicy(abort_receives=False)
+    consumer = client.consumer(queue, fail, wait_time=1, retry=retry, shutdown=polite)
+    for name in ("requeued", "rejected"):
+        await queue.send({"label": name}, attributes={"tenant": "acme"})
+    await consumer.start()
+    try:
+        await wait_until(lambda: len(dead) >= 2, probe.target.delivery_timeout)
+    finally:
+        await consumer.stop()
+    return queue
+
+
+@scenario("sqs.dead_letter_redrive", timeout=240)
+async def sqs_dead_letter_redrive(probe: Probe) -> None:
+    """``queue.peek()`` and ``queue.redrive()`` of messages fanferro dead-lettered: back to their
+    source without fanferro's metadata, processed at their first attempt again."""
+    client = probe.client()
+    queue = await dead_letter_two(probe, client, "dlqtools")
+    dlq = queue.dead_letter_queue
+    assert dlq is not None
+    peeked = await dlq.peek()
+    probe.fact(
+        "peeked",
+        sorted(
+            (
+                {
+                    "label": json.loads(message.body).get("label"),
+                    "reason": (message.dead_letter_info or {}).get("reason"),
+                    "source_is_queue": message.source == queue.arn,
+                    "requeued_attempts": message.requeued_attempts,
+                    "raw_attribute_names": sorted(message.raw_attributes),
+                }
+                for message in peeked
+            ),
+            key=lambda fact: str(fact["label"]),
+        ),
+    )
+    probe.fact("peeked_again", len(await dlq.peek()))
+    result = await dlq.redrive()
+    probe.fact(
+        "redrive",
+        {
+            "moved": result.moved,
+            "destinations": result.destinations,
+            "not_moved": [describe_error(failure.error) for failure in result.not_moved],
+            "not_deleted": [describe_error(failure.error) for failure in result.not_deleted],
+        },
+    )
+    redriven = await collect(probe, client, queue, 2)
+    probe.fact(
+        "redriven",
+        sorted(
+            (
+                {"label": label_of(m), "attempt": m.attempt, "raw_attribute_names": sorted(m.raw_attributes)}
+                for m in redriven
+            ),
+            key=lambda fact: str(fact["label"]),
+        ),
+    )
+    probe.fact("dead_letter_queue_counts", await dlq.approximate_count())
+
+
+@scenario("sqs.message_move_task", targets=("ministack", "localstack", "aws"), timeout=300)
+async def sqs_message_move_task(probe: Probe) -> None:
+    """SQS's own redrive (``StartMessageMoveTask``) of messages fanferro forwarded to a dead-letter
+    queue, which SQS's redrive policy did not move there: to their source, and to a named queue."""
+    client = probe.client()
+    queue = await dead_letter_two(probe, client, "movetask")
+    dlq = queue.dead_letter_queue
+    assert dlq is not None
+    sqs = probe.target.boto3_client("sqs")
+
+    async def move(key: str, destination: str | None) -> None:
+        arguments = {"SourceArn": dlq.arn} | ({"DestinationArn": destination} if destination else {})
+        from botocore.exceptions import BotoCoreError, ClientError
+
+        try:
+            await asyncio.to_thread(sqs.start_message_move_task, **arguments)
+        except (BotoCoreError, ClientError) as error:  # also an emulator without the operation
+            code = getattr(error, "response", {}).get("Error", {}).get("Code")
+            probe.fact(f"{key}.start", {"error": type(error).__name__, "code": code, "info.message": str(error)})
+            return
+        probe.fact(f"{key}.start", "ok")
+        status: dict[str, Any] = {}
+
+        def finished() -> bool:
+            tasks = sqs.list_message_move_tasks(SourceArn=dlq.arn, MaxResults=1).get("Results", [])
+            status.update(tasks[0] if tasks else {})
+            return status.get("Status") not in {"RUNNING", "CANCELLING", None}
+
+        deadline = time.monotonic() + probe.target.delivery_timeout
+        while not await asyncio.to_thread(finished) and time.monotonic() < deadline:  # noqa: ASYNC110 - polls AWS
+            await asyncio.sleep(1)
+        probe.fact(
+            f"{key}.task",
+            {
+                "status": status.get("Status"),
+                "moved": status.get("ApproximateNumberOfMessagesMoved"),
+                "failure_reason": status.get("FailureReason"),
+            },
+        )
+
+    await move("to_source", None)
+    moved = await collect(probe, client, queue, 2)
+    probe.fact(
+        "to_source.received",
+        sorted(
+            (
+                {"label": label_of(m), "attempt": m.attempt, "raw_attribute_names": sorted(m.raw_attributes)}
+                for m in moved
+            ),
+            key=lambda fact: str(fact["label"]),
+        ),
+    )
+    probe.fact("to_source.dead_letter_queue_counts", await dlq.approximate_count())
+    if moved:
+        return
+    await move("to_queue", queue.arn)
+    moved = await collect(probe, client, queue, 2)
+    probe.fact("to_queue.received", sorted(label_of(m) for m in moved))
+
+
 @scenario("sqs.late_settlement")
 async def sqs_late_settlement(probe: Probe) -> None:
     """Settling with the receipt handle of an earlier receive (the message became visible again and

@@ -80,9 +80,63 @@ declaration, or the queue's `RedrivePolicy`. Without one, `on_missing_queue` app
 
 ## Poison messages and redrive
 
-Inspect a DLQ with a consumer (`queue.dead_letter_queue`) or the AWS console. After fixing the
-cause, use SQS "Start DLQ redrive" (`StartMessageMoveTask`): forwarded messages are byte-identical
-to the originals plus the metadata attribute.
+Look at what is in a dead-letter queue with `peek`, and move the messages back with `redrive` once
+the cause is fixed:
+
+```python
+dlq = queue.dead_letter_queue
+for message in await dlq.peek(limit=20):
+    info = message.dead_letter_info or {}
+    print(message.sqs_message_id, info.get("reason"), info.get("error_type"), message.body[:200])
+
+result = await dlq.redrive(max_per_second=50)
+print(result.moved, result.destinations, result.not_moved)
+```
+
+`peek(limit=10)` receives up to `limit` messages, keeps them hidden until it has them all (or the
+queue has no more visible ones) and makes them visible again before it returns. Each
+`PeekedMessage` has the SQS body as received (the encoded message, or an SNS notification or
+claim-check pointer, which are not unwrapped or fetched), `raw_attributes` and `attributes`,
+`dead_letter_info`, `source` and `requeued_attempts`. A peek is a receive: it adds one to each
+message's `ApproximateReceiveCount`, which matters only for a dead-letter queue that has a redrive
+policy of its own.
+
+`redrive(to=None, *, limit=None, max_per_second=None, reset_attempts=True)` moves messages until
+the queue has no visible messages left or `limit` were moved:
+
+* Each message goes back to its source: the queue fanferro dead-lettered it from (`source` in
+  `fanferro.dead-letter`) or, for messages SQS's redrive policy moved, `DeadLetterQueueSourceArn`.
+  `to=` (a queue or a queue name) sends every message there instead.
+* It is sent with its body and attributes, without `fanferro.dead-letter` and, unless
+  `reset_attempts=False`, without `fanferro.attempt`. With `RetryPolicy(strategy="requeue")` that
+  attribute counts the attempts: a message dead-lettered after 4 requeues would otherwise start at
+  attempt 5 and, with `max_attempts=5`, go back to the dead-letter queue after one try. (With the
+  default `strategy="visibility"`, the receive count starts over anyway, since the redriven message
+  is a new SQS message.)
+* It is deleted from the dead-letter queue once it was sent. FIFO messages keep their message group
+  and their order within it.
+* Messages that cannot be moved (no known source, a source queue that no longer exists, a failed
+  send) stay in the dead-letter queue, visible again, and are listed in `result.not_moved` with the
+  error; `result.ok` is false then. Redrive them with `to=` once you know where they belong.
+
+Both are built on receive, send and delete, so they work the same on SQS, emulators and the
+in-memory broker, and need `sqs:ReceiveMessage`, `sqs:ChangeMessageVisibility`, `sqs:SendMessage`,
+`sqs:DeleteMessage` (and `sqs:GetQueueUrl` for sources given as ARNs).
+
+The same from a shell, for any queue URL (with the usual AWS credentials and region):
+
+```bash
+fanferro dlq stats --queue-url https://sqs.eu-north-1.amazonaws.com/123456789012/orders-dlq
+fanferro dlq peek --queue-url ... --limit 20          # --json for every attribute and the full body
+fanferro dlq redrive --queue-url ... --max-per-second 50 [--to-url ...] [--limit N] [--keep-attempts]
+```
+
+`fanferro dlq redrive` exits with 1 when messages were left behind.
+
+SQS's own "Start DLQ redrive" (`StartMessageMoveTask`) also moves messages back, but it keeps
+`fanferro.dead-letter` and `fanferro.attempt`, and whether it moves messages a consumer sent to the
+dead-letter queue (rather than SQS's redrive policy) to their source has not been checked yet: the
+`sqs.message_move_task` probe of `scripts/probe_backends.py` answers it on AWS.
 
 ## Robustness built in
 

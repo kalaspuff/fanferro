@@ -3,9 +3,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use fanferro_core::backend::BackendKind;
 use fanferro_core::backend::aws::AwsConfig;
 use fanferro_core::backend::memory::{MemoryBroker, MemoryOptions};
+use fanferro_core::backend::{BackendKind, ReceivedMessage};
 use fanferro_core::consumer::{ConsumerConfig, ConsumerEngine};
 use fanferro_core::envelope::EnvelopeSet;
 use fanferro_core::events::{Event, EventKind, FieldValue};
@@ -13,6 +13,7 @@ use fanferro_core::provision::{
     Drift, QueueInfo, QueueSpec, Report, SubscriptionInfo, SubscriptionSpec, TopicInfo, TopicSpec,
 };
 use fanferro_core::publish::{Destination, OutgoingMessage, Receipt};
+use fanferro_core::redrive::{NotMoved, PeekOptions, RedriveOptions, RedriveReport, dead_letter_source};
 use fanferro_core::transport::claim_check::PointerFormat;
 use fanferro_core::transport::{OffloadSettings, PayloadPointer, Transport};
 use fanferro_core::{Client, ClientConfig};
@@ -130,6 +131,48 @@ fn subscription_info_to_py(py: Python<'_>, subscription: &SubscriptionInfo) -> P
 }
 
 /// Converts an event into a `dict`.
+fn received_message_to_py(py: Python<'_>, message: &ReceivedMessage) -> PyResult<Py<PyAny>> {
+    let dict = PyDict::new(py);
+    let system = &message.system;
+    dict.set_item("sqs_message_id", &message.message_id)?;
+    dict.set_item("body", &message.body)?;
+    dict.set_item("raw_attributes", attributes_to_py(py, &message.attributes)?)?;
+    dict.set_item("receive_count", system.approximate_receive_count)?;
+    dict.set_item("sent_at", system.sent_timestamp.map(|t| time_to_py(py, t)).transpose()?)?;
+    dict.set_item(
+        "first_received_at",
+        system.approximate_first_receive_timestamp.map(|t| time_to_py(py, t)).transpose()?,
+    )?;
+    dict.set_item("group_id", system.message_group_id.as_deref())?;
+    dict.set_item("deduplication_id", system.message_deduplication_id.as_deref())?;
+    dict.set_item("sequence_number", system.sequence_number.as_deref())?;
+    dict.set_item("trace_header", system.aws_trace_header.as_deref())?;
+    dict.set_item("dead_letter_source_arn", system.dead_letter_queue_source_arn.as_deref())?;
+    dict.set_item("source", dead_letter_source(message))?;
+    dict.into_py_any(py)
+}
+
+fn not_moved_to_py(py: Python<'_>, entries: &[NotMoved]) -> PyResult<Py<PyAny>> {
+    let list = PyList::empty(py);
+    for entry in entries {
+        let dict = PyDict::new(py);
+        dict.set_item("sqs_message_id", &entry.sqs_message_id)?;
+        dict.set_item("destination", entry.destination.as_deref())?;
+        dict.set_item("error", to_py_err_with(py, &entry.error).into_value(py))?;
+        list.append(dict)?;
+    }
+    list.into_py_any(py)
+}
+
+fn redrive_report_to_py(py: Python<'_>, report: &RedriveReport) -> PyResult<Py<PyAny>> {
+    let dict = PyDict::new(py);
+    dict.set_item("moved", report.moved)?;
+    dict.set_item("destinations", &report.destinations)?;
+    dict.set_item("not_moved", not_moved_to_py(py, &report.not_moved)?)?;
+    dict.set_item("not_deleted", not_moved_to_py(py, &report.not_deleted)?)?;
+    dict.into_py_any(py)
+}
+
 pub fn event_to_py(py: Python<'_>, event: &Event) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     dict.set_item("kind", event.kind.as_str())?;
@@ -246,7 +289,7 @@ impl PyMemoryBroker {
             let dict = PyDict::new(py);
             dict.set_item("message_id", message.message_id)?;
             dict.set_item("body", message.body)?;
-            dict.set_item("attributes", attributes_to_py(py, &message.attributes)?)?;
+            dict.set_item("raw_attributes", attributes_to_py(py, &message.attributes)?)?;
             dict.set_item("receive_count", message.receive_count)?;
             dict.set_item("in_flight", message.in_flight)?;
             dict.set_item("group_id", message.group_id)?;
@@ -525,6 +568,63 @@ impl PyCoreClient {
     fn purge_queue<'py>(&self, py: Python<'py>, url: String) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client()?;
         future_into_py(py, async move { client.purge_queue(&url).await })
+    }
+
+    /// Up to `limit` messages of a queue, made visible again (awaitable list of dicts).
+    #[pyo3(signature = (url, *, limit=10, visibility_timeout=30.0, wait_time=1.0))]
+    fn peek<'py>(
+        &self,
+        py: Python<'py>,
+        url: String,
+        limit: usize,
+        visibility_timeout: f64,
+        wait_time: f64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client()?;
+        let options = PeekOptions {
+            limit,
+            visibility_timeout: seconds(Some(visibility_timeout), "visibility_timeout")?.unwrap_or_default(),
+            wait_time: seconds(Some(wait_time), "wait_time")?.unwrap_or_default(),
+        };
+        future_into_py(py, async move {
+            let result = client.peek(&url, &options).await;
+            convert(result, |py, messages| {
+                let list = PyList::empty(py);
+                for message in &messages {
+                    list.append(received_message_to_py(py, message)?)?;
+                }
+                list.into_py_any(py)
+            })
+        })
+    }
+
+    /// Moves the messages of a dead-letter queue to their source or `to` (awaitable dict).
+    #[pyo3(signature = (url, *, to=None, limit=None, max_per_second=None, reset_attempts=true, visibility_timeout=60.0, wait_time=1.0))]
+    #[allow(clippy::too_many_arguments)]
+    fn redrive<'py>(
+        &self,
+        py: Python<'py>,
+        url: String,
+        to: Option<String>,
+        limit: Option<usize>,
+        max_per_second: Option<f64>,
+        reset_attempts: bool,
+        visibility_timeout: f64,
+        wait_time: f64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client()?;
+        let options = RedriveOptions {
+            to,
+            limit,
+            max_per_second,
+            reset_attempts,
+            visibility_timeout: seconds(Some(visibility_timeout), "visibility_timeout")?.unwrap_or_default(),
+            wait_time: seconds(Some(wait_time), "wait_time")?.unwrap_or_default(),
+        };
+        future_into_py(py, async move {
+            let result = client.redrive(&url, &options).await;
+            convert(result, |py, report| redrive_report_to_py(py, &report))
+        })
     }
 
     /// Reads queue attributes (awaitable dict).
