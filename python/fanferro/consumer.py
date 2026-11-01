@@ -150,8 +150,18 @@ class _Slot:
 class _Settler:
     """Settles messages for the consumer (used by :class:`Message` methods)."""
 
-    def __init__(self, consumer: Consumer) -> None:
+    __slots__ = ("_consumer", "_dead_letter")
+
+    def __init__(self, consumer: Consumer, *, dead_letter: bool | None = None) -> None:
         self._consumer = consumer
+        # Whether a dead-letter queue is known: the consumer's resolved one (None), or what a
+        # settler of fanferro.testing.dispatch() was told.
+        self._dead_letter = dead_letter
+
+    def _has_dead_letter_queue(self) -> bool:
+        if self._dead_letter is not None:
+            return self._dead_letter
+        return bool(self._consumer._dead_letter_url)
 
     def _delivery(self, message: Message[Any]) -> Delivery:
         if message.delivery is None:
@@ -249,7 +259,7 @@ class _Settler:
 
     async def dead_letter(self, message: Message[Any], reason: str, error: BaseException | None) -> None:
         consumer = self._consumer
-        if not consumer._dead_letter_url:
+        if not self._has_dead_letter_queue():
             fallback = consumer.dead_letter_policy.on_missing_queue
             consumer._emit(
                 EventKind.CONFIG_WARNING,
@@ -1339,8 +1349,17 @@ class Consumer:
         # None when a settlement failed: the message comes back, so a FIFO group must wait for it.
         return None if message._settlement_failed else message.outcome
 
-    async def _dispatch(self, message: Message[Any]) -> Outcome | None:
-        """Processes one message outside the receive loop (:func:`fanferro.testing.dispatch`)."""
+    def _settler_of(self, message: Message[Any]) -> _Settler:
+        """The settler of ``message``: the consumer's, or the one :func:`fanferro.testing.dispatch` gave it."""
+        settler = message._settler
+        return settler if isinstance(settler, _Settler) else self._settler
+
+    async def _dispatch(self, message: Message[Any], *, dead_letter_queue: bool | None) -> Outcome | None:
+        """Processes one message outside the receive loop (:func:`fanferro.testing.dispatch`).
+
+        ``dead_letter_queue``: whether a dead-letter queue is known (``None``: the consumer's).
+        """
+        message._settler = _Settler(self, dead_letter=dead_letter_queue)
         semaphore = asyncio.Semaphore(1)
         await semaphore.acquire()
         self._active += 1
@@ -1412,7 +1431,7 @@ class Consumer:
                 ):
                     # Awaited: a sequenced group's next message starts once the delete is confirmed.
                     message._begin("acked")
-                    await self._settler.ack(message)
+                    await self._settler_of(message).ack(message)
                 else:
                     # The engine deletes the message in the background (batched, tracked until the
                     # consumer closes, failures reported as `message.ack_failed` events): no
@@ -1577,12 +1596,14 @@ class Consumer:
             if copy:
                 # The copy's receive is attempt (attempt - 1) + 1: the same attempt as this one.
                 attempt = message.attempt - 1
-                await self._settler._call(
+                await self._settler_of(message)._call(
                     message, lambda delivery: delivery.requeue(attempt, min(delay, _MAX_REQUEUE_DELAY))
                 )
             else:
                 self._note_handed_back(delivery)  # its next receive here is not an attempt
-                await self._settler._call(message, lambda delivery: delivery.nack(min(delay, _MAX_VISIBILITY_DELAY)))
+                await self._settler_of(message)._call(
+                    message, lambda delivery: delivery.nack(min(delay, _MAX_VISIBILITY_DELAY))
+                )
         except (LeaseError, ShutdownError) as settle_error:
             self._emit(
                 EventKind.MESSAGE_ACK_FAILED,
@@ -1605,7 +1626,7 @@ class Consumer:
             return
         message._begin("retried")
         try:
-            await self._settler.perform(message, action, reason, error)
+            await self._settler_of(message).perform(message, action, reason, error)
         except (LeaseError, ShutdownError) as settle_error:
             self._emit(
                 EventKind.MESSAGE_ACK_FAILED,

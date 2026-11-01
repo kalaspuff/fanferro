@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import datetime
 from typing import Any
@@ -317,3 +318,24 @@ async def test_dispatch_gives_the_outcome_of_a_consumer_on_the_memory_broker(act
     else:
         assert expected.outcome in ("retried", "requeued")
         assert (remaining, dead) == (1, 0)
+
+
+async def test_overlapping_dispatches_keep_their_own_dead_letter_queue() -> None:
+    client = memory_client()
+    router = fanferro.Router()
+
+    @router.route(Order)
+    async def slow(order: Order) -> None:
+        await asyncio.sleep(0.01 * order.id)
+        raise fanferro.Reject("rejected")
+
+    consumer = client.consumer("orders", router)
+    with_dlq, without = await asyncio.gather(
+        dispatch(consumer, Order(2), dead_letter_queue=True),
+        dispatch(consumer, Order(1), dead_letter_queue=False),
+    )
+    assert with_dlq.outcome == "dead_lettered"
+    assert without.outcome == "retried"
+    after = await dispatch(consumer, Order(1))
+    assert after.outcome == "retried"  # the queue declares no dead-letter queue
+    assert consumer._dead_letter_url is None

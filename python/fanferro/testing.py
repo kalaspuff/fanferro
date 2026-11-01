@@ -411,23 +411,13 @@ async def dispatch(
         codecs = consumer._client.codecs
         built = build_message(message, codecs=codecs, queue=consumer.queue.name)
     delivery = cast("FakeDelivery", built.delivery)
-    built._settler = consumer._settler
-    resolved = consumer._dead_letter_url
-    if dead_letter_queue is not None:
-        consumer._dead_letter_url = _dead_letter_placeholder(consumer) if dead_letter_queue else None
-    elif consumer.state == "created":
-        declared = consumer.dead_letter_policy.queue is not None or consumer.queue.dead_letter_queue is not None
-        consumer._dead_letter_url = _dead_letter_placeholder(consumer) if declared else None
-    try:
-        outcome = await consumer._dispatch(built)
-    finally:
-        consumer._dead_letter_url = resolved
+    if dead_letter_queue is None and consumer.state == "created":
+        policy_queue = consumer.dead_letter_policy.queue
+        dead_letter_queue = policy_queue is not None or consumer.queue.dead_letter_queue is not None
+    # The message gets a settler of its own that knows about the dead-letter queue: the consumer
+    # is left as it is, also when dispatches on it overlap.
+    outcome = await consumer._dispatch(built, dead_letter_queue=dead_letter_queue)
     return DispatchResult(outcome=outcome, message=built, calls=list(delivery.calls))
-
-
-def _dead_letter_placeholder(consumer: Consumer) -> str:
-    name = consumer.queue.dead_letter_queue.name if consumer.queue.dead_letter_queue is not None else "dlq"
-    return f"memory://{_TEST_REGION}/{_TEST_ACCOUNT}/{name}"
 
 
 async def receive_sqs_event(
