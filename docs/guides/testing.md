@@ -15,6 +15,10 @@ async def test_rejects_empty_invoices() -> None:
 with the default codecs and returns a decoded `Message`. Explicit settlements are recorded:
 `message.outcome` and `settler.calls` (pass `settler=RecordingSettler()`).
 
+The routing decorators (`@consumer.route`, `@consumer.default`, `@router.route`, `@client.on` and
+the Lambda handler's) return the function they decorate with its own type, so type checkers check
+these calls like any other.
+
 ## Flows with the in-memory broker
 
 ```python
