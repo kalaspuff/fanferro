@@ -132,3 +132,7 @@ counts.visible, counts.in_flight, counts.delayed, counts.total
 They are frozen dataclasses (`fanferro.stats`), so type checkers catch a misspelt name and editors
 complete them; `as_dict()` gives the plain dictionary, e.g. to log it as JSON
 (`json.dumps(client.metrics().as_dict())`). Their docstrings describe every counter.
+
+For liveness and readiness (when a receive last succeeded, the failures since, whether the event
+loop still dispatches), use `client.health()` and `consumer.health()`; see
+[health checks](deployment.md#health-checks).

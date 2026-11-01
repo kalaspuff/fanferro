@@ -113,6 +113,7 @@ created.
 | `sns_unwrap` | `True` | Unwrap SNS notification JSON |
 | `auto_confirm_subscriptions` | `False` | Confirm SNS subscription confirmation messages |
 | `delete_offloaded_payloads` | `False` | Delete S3 payload objects after acking; a message whose object is missing (`NoSuchKey`) is then acked as an already processed duplicate (`message.duplicate`), including one whose object expired or was deleted for another reason (see [large payloads](../guides/large-payloads.md#cleanup)) |
+| `max_receive_failures` | `None` | Stop the consumer after this many failed receives in a row when the last one is not retryable (the queue does not exist, access is denied); `run()` then raises that error. `None` retries forever, since a queue may be recreated or a permission granted (see [health checks](../guides/deployment.md#health-checks)) |
 
 ## `fanferro.aws_lambda.sqs_handler(client, handler_or_router, ...)`
 

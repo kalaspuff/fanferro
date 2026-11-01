@@ -120,7 +120,16 @@ from fanferro.provisioning import (
 )
 from fanferro.resources import Queue, Subscription, Topic
 from fanferro.routing import Route, Router
-from fanferro.stats import ClientCounters, ClientMetrics, ConsumerStats, EngineStats, QueueCounts
+from fanferro.stats import (
+    ClientCounters,
+    ClientHealth,
+    ClientMetrics,
+    ConsumerHealth,
+    ConsumerStats,
+    EngineStats,
+    QueueCounts,
+    ReceiveFailure,
+)
 from fanferro.telemetry import Carrier, Propagation, Telemetry
 
 __all__ = [
@@ -136,6 +145,7 @@ __all__ = [
     "Carrier",
     "Client",
     "ClientCounters",
+    "ClientHealth",
     "ClientMetrics",
     "Codec",
     "CodecError",
@@ -143,6 +153,7 @@ __all__ = [
     "ConfigurationError",
     "ConsumeMiddleware",
     "Consumer",
+    "ConsumerHealth",
     "ConsumerStateError",
     "ConsumerStats",
     "Credentials",
@@ -195,6 +206,7 @@ __all__ = [
     "QueueCounts",
     "QueueInfo",
     "RateLimit",
+    "ReceiveFailure",
     "Reject",
     "Requeue",
     "ResourceNotFoundError",
