@@ -37,6 +37,7 @@ from fanferro.events import EventKind
 from fanferro.messages import Message, Outcome
 from fanferro.middleware import ConsumeMiddleware, chain_consume
 from fanferro.policies import DeadLetterPolicy, FailureAction, Heartbeat, RateLimit, RetryPolicy, ShutdownPolicy
+from fanferro.stats import ConsumerStats, EngineStats
 from fanferro.telemetry import monotonic
 
 if TYPE_CHECKING:
@@ -100,16 +101,6 @@ class _Stats:
         self.unroutable = 0
         self.decode_failures = 0
         self.handler_seconds = 0.0
-
-    def snapshot(self) -> dict[str, Any]:
-        return {
-            "processed": self.processed,
-            "failed": self.failed,
-            "duplicates": self.duplicates,
-            "unroutable": self.unroutable,
-            "decode_failures": self.decode_failures,
-            "handler_seconds": round(self.handler_seconds, 6),
-        }
 
 
 class _Slot:
@@ -512,20 +503,26 @@ class Consumer:
         """Messages currently being processed by handlers."""
         return self._active
 
-    def stats(self) -> dict[str, Any]:
-        """Processing statistics (Python outcomes plus the Rust engine's counters)."""
-        engine: dict[str, Any] = {}
-        if self._engine is not None:
-            raw = self._engine.stats()
-            engine = {**raw.get("metrics", {}), "state": raw.get("state"), "leases": raw.get("leases")}
-        return {
-            "name": self.name,
-            "queue": self.queue.name,
-            "state": self._state,
-            "active": self._active,
-            **self._stats.snapshot(),
-            "engine": engine,
-        }
+    def stats(self) -> ConsumerStats:
+        """Processing statistics: Python outcomes and the Rust engine's counters.
+
+        ``consumer.stats().processed``, ``consumer.stats().engine.messages_acked``; ``as_dict()``
+        gives the plain dictionary.
+        """
+        stats = self._stats
+        return ConsumerStats(
+            name=self.name,
+            queue=self.queue.name,
+            state=self._state,
+            active=self._active,
+            processed=stats.processed,
+            failed=stats.failed,
+            duplicates=stats.duplicates,
+            unroutable=stats.unroutable,
+            decode_failures=stats.decode_failures,
+            handler_seconds=round(stats.handler_seconds, 6),
+            engine=EngineStats._from_core(self._engine.stats() if self._engine is not None else None),
+        )
 
     def pause(self) -> None:
         """Stops receiving new messages (in-flight messages continue)."""
@@ -753,7 +750,7 @@ class Consumer:
                 if idle and now - self._last_activity >= idle_for:
                     # Locally idle: make sure the queue has nothing visible left either.
                     counts = await self.queue.approximate_count()
-                    if counts["visible"] == 0:
+                    if counts.visible == 0:
                         return
                     self._last_activity = time.monotonic()
                 if now >= deadline:

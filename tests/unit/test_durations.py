@@ -124,7 +124,7 @@ async def test_publish_delay_takes_timedelta(memory_client: fanferro.Client) -> 
         prepared = await queue.prepare({"a": 1}, delay=timedelta(seconds=3))
         assert prepared.delay == 3.0
         counts = await queue.approximate_count()
-        assert counts["delayed"] == 1
+        assert counts.delayed == 1
 
 
 @pytest.mark.parametrize("value", SECONDS, ids=["float", "timedelta"])

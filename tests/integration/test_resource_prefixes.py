@@ -73,7 +73,7 @@ async def test_failures_dead_letter_into_the_prefixed_queue(client_factory: Clie
     assert [message.json()["order_id"] for message in messages] == [9]
     info = messages[0].dead_letter_info
     assert info is not None
-    assert info["queue"] == f"staging-{base}"
+    assert info.queue == f"staging-{base}"
 
 
 async def test_outbox_relay_publishes_to_the_prefixed_destination(client_factory: ClientFactory, name: Any) -> None:

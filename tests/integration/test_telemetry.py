@@ -108,7 +108,7 @@ async def test_each_publish_carries_its_own_trace_context(otel: Any, name: Any) 
         received = await drain_queue(client, queue)
     assert common == {"tenant": "acme"}
     requests = {span.name: span for span in exporter.get_finished_spans() if span.name in ("first", "second")}
-    trace_ids = {message.attribute("traceparent").split("-")[1] for message in received}
+    trace_ids = {str(message.attribute("traceparent")).split("-")[1] for message in received}
     assert trace_ids == {f"{span.context.trace_id:032x}" for span in requests.values()}
 
 
@@ -197,7 +197,7 @@ async def test_link_mode_and_errors(otel: Any, name: Any) -> None:
 
     async with client:
         await queue.send(OrderCreated(order_id=1))
-        await consume_until(consumer, lambda: consumer.stats()["failed"] == 1)
+        await consume_until(consumer, lambda: consumer.stats().failed == 1)
     spans = {span.name: span for span in exporter.get_finished_spans()}
     process = spans[f"process {queue.name}"]
     producer = spans[f"send {queue.name}"]

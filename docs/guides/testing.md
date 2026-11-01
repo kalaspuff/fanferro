@@ -78,4 +78,5 @@ integration scenario against both the in-memory broker and MiniStack.
 * Use unique resource names per test when sharing an emulator.
 * Lower `wait_time` (e.g. 1) in tests so consumers stop quickly.
 * Assert on events: `client.on("message.dead_lettered", seen.append)`.
-* `consumer.stats()` and `client.metrics()` expose counters for assertions.
+* `consumer.stats()`, `client.metrics()` and `queue.approximate_count()` expose counters for
+  assertions (`consumer.stats().engine.messages_acked == 1`, `(await queue.approximate_count()).visible == 0`).

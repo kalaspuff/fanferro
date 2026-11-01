@@ -13,8 +13,9 @@ import base64
 import json
 from collections.abc import Coroutine, Generator, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, overload
 
 from fanferro._core import AttributeValue, Delivery, Payload, WireMessage, is_sqs_safe_text, new_message_id
 from fanferro._utils import Duration, optional_seconds, seconds
@@ -22,15 +23,15 @@ from fanferro.codecs._base import loads_json
 from fanferro.errors import DecodeError
 
 if TYPE_CHECKING:
-    from datetime import datetime
-
     from fanferro.codecs import Codec
     from fanferro.envelopes import Envelope
 
 __all__ = [
     "AttributeInput",
+    "AttributeScalar",
     "BatchFailure",
     "BatchPublishResult",
+    "DeadLetterInfo",
     "HeaderValue",
     "Message",
     "Outcome",
@@ -49,6 +50,9 @@ type HeaderValue = str | int | bool
 
 type AttributeInput = AttributeValue | str | int | float | Decimal | bool | bytes
 """Accepted message attribute values: ``str`` -> String, numbers -> Number, ``bytes`` -> Binary."""
+
+type AttributeScalar = str | int | float | Decimal | bytes
+"""The Python value of a received message attribute (see :func:`attribute_python_value`)."""
 
 type Outcome = Literal["acked", "retried", "requeued", "dead_lettered", "released", "discarded"]
 """How a message was settled."""
@@ -72,7 +76,7 @@ def to_attribute_value(value: AttributeInput) -> AttributeValue:
     raise TypeError(f"unsupported attribute value type {type(value).__name__}")
 
 
-def attribute_python_value(value: AttributeValue) -> str | int | float | Decimal | bytes:
+def attribute_python_value(value: AttributeValue) -> AttributeScalar:
     """The natural Python value of an attribute (``Number`` -> ``int``/``Decimal``)."""
     raw = value.value
     if value.base_type == "Number" and isinstance(raw, str):
@@ -107,6 +111,78 @@ class PayloadPointer:
             size=data.get("size"),
             sha256=data.get("sha256"),
             format=data.get("format", "fanferro"),
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DeadLetterInfo:
+    """Why fanferro dead-lettered a message (its ``fanferro.dead-letter`` attribute).
+
+    Attributes:
+        reason: Why the message was dead-lettered (``"retries exhausted"``, a :class:`Reject` reason, ...).
+        source: The ARN (or URL) of the queue the message was dead-lettered from.
+        queue: The name of that queue, as the consumer declared it.
+        message_id: The fanferro message id, when the message was decoded.
+        sqs_message_id: The SQS message id in that queue.
+        receive_count: How many times SQS had delivered the message there.
+        attempt: The processing attempt that dead-lettered it.
+        message_type: The message type, when the message was decoded.
+        error_type: The qualified name of the exception's type, when an exception caused it.
+        error_message: The exception's message (truncated).
+        time: When the message was dead-lettered.
+        document: The whole JSON document, including keys this class does not describe.
+    """
+
+    reason: str
+    source: str | None = None
+    queue: str | None = None
+    message_id: str | None = None
+    sqs_message_id: str | None = None
+    receive_count: int | None = None
+    attempt: int | None = None
+    message_type: str | None = None
+    error_type: str | None = None
+    error_message: str | None = None
+    time: datetime | None = None
+    document: Mapping[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+    @classmethod
+    def from_json(cls, text: str) -> DeadLetterInfo | None:
+        """Parses the attribute's JSON document (``None`` when it is not one fanferro wrote)."""
+        try:
+            document = json.loads(text)
+        except ValueError:
+            return None
+        if not isinstance(document, dict) or not isinstance(document.get("reason"), str):
+            return None
+
+        def text_of(key: str) -> str | None:
+            value = document.get(key)
+            return None if value is None else str(value)
+
+        def int_of(key: str) -> int | None:
+            try:
+                return int(document[key])
+            except (KeyError, TypeError, ValueError):
+                return None
+
+        try:
+            time = datetime.fromisoformat(str(document["time"]))
+        except (KeyError, ValueError):
+            time = None
+        return cls(
+            reason=document["reason"],
+            source=text_of("source"),
+            queue=text_of("queue"),
+            message_id=text_of("message_id"),
+            sqs_message_id=text_of("sqs_message_id"),
+            receive_count=int_of("receive_count"),
+            attempt=int_of("attempt"),
+            message_type=text_of("message_type"),
+            error_type=text_of("error_type"),
+            error_message=text_of("error_message"),
+            time=time,
+            document=document,
         )
 
 
@@ -392,8 +468,12 @@ class Message[T]:
         """Envelope headers (CloudEvents extension attributes)."""
         return self.payload.headers
 
-    def attribute(self, name: str, default: Any = None) -> Any:
-        """The Python value of attribute ``name`` (``str``, ``int``, ``Decimal`` or ``bytes``)."""
+    @overload
+    def attribute(self, name: str) -> AttributeScalar | None: ...
+    @overload
+    def attribute[D](self, name: str, default: D) -> AttributeScalar | D: ...
+    def attribute(self, name: str, default: object = None) -> object:
+        """The Python value of attribute ``name`` (``str``, ``int``, ``float``, ``Decimal`` or ``bytes``)."""
         value = self.raw_attributes.get(name)
         return default if value is None else attribute_python_value(value)
 
@@ -463,16 +543,10 @@ class Message[T]:
         return PayloadPointer.from_core(self.delivery.pointer if self.delivery is not None else None)
 
     @property
-    def dead_letter_info(self) -> dict[str, Any] | None:
+    def dead_letter_info(self) -> DeadLetterInfo | None:
         """Why fanferro dead-lettered this message (when consuming a dead-letter queue)."""
         value = self.raw_attributes.get("fanferro.dead-letter")
-        if value is None:
-            return None
-        try:
-            info = json.loads(str(value.value))
-        except ValueError:
-            return None
-        return info if isinstance(info, dict) else None
+        return None if value is None else DeadLetterInfo.from_json(str(value.value))
 
     @property
     def remaining_visibility(self) -> float | None:

@@ -32,6 +32,7 @@ from fanferro.provisioning import (
 )
 from fanferro.resources import _UNSET, GroupId, Queue, Subscription, Topic
 from fanferro.routing import Router
+from fanferro.stats import ClientCounters, ClientMetrics
 from fanferro.telemetry import Telemetry, TelemetryRuntime, monotonic
 
 if TYPE_CHECKING:
@@ -1063,13 +1064,16 @@ class Client:
 
     # -- introspection ---------------------------------------------------------------------
 
-    def metrics(self) -> dict[str, Any]:
-        """On-demand metrics: client counters (from Rust) and per-consumer statistics."""
-        client_metrics = self._core_client.metrics() if self._core_client is not None else {}
-        return {
-            "client": client_metrics,
-            "consumers": {consumer.name: consumer.stats() for consumer in self._consumers},
-        }
+    def metrics(self) -> ClientMetrics:
+        """On-demand metrics: client counters (from Rust) and per-consumer statistics.
+
+        ``client.metrics().client.messages_published``, ``client.metrics().consumers["orders"].processed``;
+        ``as_dict()`` gives the plain dictionary.
+        """
+        return ClientMetrics(
+            client=ClientCounters._from_core(self._core_client.metrics() if self._core_client is not None else None),
+            consumers={consumer.name: consumer.stats() for consumer in self._consumers},
+        )
 
     async def account(self) -> str:
         """The AWS account id of the configured credentials."""

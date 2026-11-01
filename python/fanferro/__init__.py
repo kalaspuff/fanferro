@@ -44,6 +44,7 @@ from fanferro import policies as policies
 from fanferro import provisioning as provisioning
 from fanferro import resources as resources
 from fanferro import routing as routing
+from fanferro import stats as stats
 from fanferro import telemetry as telemetry
 from fanferro._core import (
     AttributeValue,
@@ -89,6 +90,7 @@ from fanferro.message_types import MessageTypes, message_type
 from fanferro.messages import (
     BatchFailure,
     BatchPublishResult,
+    DeadLetterInfo,
     Message,
     OutgoingMessage,
     PayloadPointer,
@@ -116,6 +118,7 @@ from fanferro.provisioning import (
 )
 from fanferro.resources import Queue, Subscription, Topic
 from fanferro.routing import Route, Router
+from fanferro.stats import ClientCounters, ClientMetrics, ConsumerStats, EngineStats, QueueCounts
 from fanferro.telemetry import Carrier, Propagation, Telemetry
 
 __all__ = [
@@ -129,6 +132,8 @@ __all__ = [
     "BatchPublishResult",
     "Carrier",
     "Client",
+    "ClientCounters",
+    "ClientMetrics",
     "Codec",
     "CodecError",
     "CodecRegistry",
@@ -136,13 +141,16 @@ __all__ = [
     "ConsumeMiddleware",
     "Consumer",
     "ConsumerStateError",
+    "ConsumerStats",
     "Credentials",
+    "DeadLetterInfo",
     "DeadLetterPolicy",
     "DeadLetterQueue",
     "DecodeError",
     "Discard",
     "Drift",
     "EncodeError",
+    "EngineStats",
     "Envelope",
     "EnvelopeError",
     "ErrorInfo",
@@ -181,6 +189,7 @@ __all__ = [
     "PublishResult",
     "Queue",
     "QueueAttributes",
+    "QueueCounts",
     "QueueInfo",
     "RateLimit",
     "Reject",

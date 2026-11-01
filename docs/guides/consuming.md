@@ -27,15 +27,15 @@ the message.
 
 `Message` exposes the decoded `body`, envelope metadata (`id`, `type`, `time`, `source`,
 `subject`, `headers`, `content_type`), user `attributes` (`message.attribute("tenant")` returns
-`str`/`int`/`Decimal`/`bytes`), transport metadata (`receive_count`, `attempt`, `group_id`,
+`str`/`int`/`float`/`Decimal`/`bytes`, or `None` or the given default when it is missing), transport metadata (`receive_count`, `attempt`, `group_id`,
 `sent_at`, `topic_arn`, `trace_header`, `pointer`) and settlement methods.
 
 Return normally to **ack** (delete) the message. Raise to apply the [retry policy](failure-handling.md).
 Automatic acks are not awaited: the delete is batched with others and completes in the background
 (`consumer.stop()` waits for it; a failed delete is reported as a `message.ack_failed` event and
 the message is redelivered). On FIFO queues, the next message of the group waits for the delete
-instead (see [FIFO queues](#fifo-queues)). `consumer.stats()["processed"]` counts messages whose
-handler succeeded, `stats()["engine"]["messages_acked"]` the confirmed deletes.
+instead (see [FIFO queues](#fifo-queues)). `consumer.stats().processed` counts messages whose
+handler succeeded, `stats().engine.messages_acked` the confirmed deletes.
 
 ## Routing
 
@@ -145,7 +145,7 @@ of up to ten messages: a batch goes out as soon as it is full, also while earlie
 flight, or `settle_linger` after its first settlement. When every running handler awaits an
 explicit settlement (`await message.ack()`) and the batch holds all of them, nothing else can join
 it, so it is sent right away.
-`consumer.stats()["engine"]` counts the calls (`delete_requests`, `visibility_requests`).
+`consumer.stats().engine` counts the calls (`delete_requests`, `visibility_requests`).
 
 Receives are full by default: a poller waits until `min_receive_batch` handler slots are free
 (after the first one, for at most `receive_batch_wait`), so a busy consumer asks SQS for ten
