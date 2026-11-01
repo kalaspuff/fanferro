@@ -79,7 +79,14 @@ Notifications and events that AWS services send to SNS and SQS are recognised by
 decoded into typed classes of `fanferro.aws`: annotate a handler with one and it is routed there.
 
 ```python
+import fanferro
 from fanferro import aws
+
+client = fanferro.Client()
+events = client.queue("aws-events")
+client.subscription("bucket-events", events)   # the topic S3 sends bucket notifications to
+client.subscription("ses-feedback", events)    # the topic SES sends notifications and events to
+consumer = client.consumer(events)
 
 
 @consumer.route
@@ -98,6 +105,11 @@ async def on_bounce(notification: aws.SesBounceNotification) -> None:  # an SES 
 @consumer.route("aws.ses.open")                                        # an SES configuration set's event
 async def on_open(message: fanferro.Message[aws.SesNotification]) -> None:
     await record_open(message.body.mail.message_id, message.json()["open"]["ipAddress"])
+
+
+async def main() -> None:
+    async with client:
+        await consumer.run()
 ```
 
 Also typed: SES complaints and deliveries, CloudWatch alarms, Lambda destination records and
