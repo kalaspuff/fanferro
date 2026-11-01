@@ -5,6 +5,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use fanferro_core::consumer::records::SqsEventRecord;
 use fanferro_core::consumer::{ConsumerEngine, Delivery, Unwrapped};
 use fanferro_core::types::reserved;
 use pyo3::IntoPyObjectExt;
@@ -13,7 +14,7 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::client::pointer_to_py;
 use crate::convert::{attributes_to_py, seconds, time_to_py};
-use crate::errors::{EnvelopeError, ShutdownError, to_py_err, to_py_err_with};
+use crate::errors::{EnvelopeError, ShutdownError, ValidationError, to_py_err, to_py_err_with};
 use crate::runtime::{Convert, future_into_py, handle, pending_future};
 use crate::types::{PyAttributeValue, PyPayload, wire_to_py};
 
@@ -64,6 +65,39 @@ impl PyConsumerEngine {
         future_into_py(py, async move {
             let deliveries = engine.next_batch(max, timeout).await;
             Convert(move |py: Python<'_>| deliveries_to_py(py, deliveries))
+        })
+    }
+
+    /// Leases and decodes the records of an SQS event an AWS Lambda event source mapping
+    /// received (`event["Records"]`); resolves to their deliveries, in order (engines configured
+    /// with `external` only).
+    fn accept_records<'py>(&self, py: Python<'py>, records: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let engine = self.engine()?;
+        let records: Vec<SqsEventRecord> = pythonize::depythonize(records)
+            .map_err(|err| ValidationError::new_err(format!("invalid SQS event records: {err}")))?;
+        let messages = records.into_iter().map(SqsEventRecord::into_received).collect::<Result<Vec<_>, _>>();
+        let messages = messages.map_err(|error| to_py_err_with(py, &error))?;
+        future_into_py(py, async move {
+            let deliveries = engine.accept_records(messages).await;
+            Convert(move |py: Python<'_>| match deliveries {
+                Ok(deliveries) => deliveries_to_py(py, deliveries),
+                Err(error) => Err(to_py_err_with(py, &error)),
+            })
+        })
+    }
+
+    /// Takes the receipt handles of the accepted records settled with a delete since the last
+    /// call (acked, dead-lettered, requeued).
+    fn take_deleted(&self) -> Vec<String> {
+        self.engine.take_deleted()
+    }
+
+    /// Waits until settlements running in the background completed (awaitable).
+    fn wait_settlements<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let engine = self.engine()?;
+        future_into_py(py, async move {
+            engine.wait_settlements().await;
+            fanferro_core::Result::Ok(())
         })
     }
 

@@ -50,6 +50,29 @@ uv add fanferro                   # pip install fanferro
 uv add "fanferro[all]"            # + pydantic, protobuf, msgspec, opentelemetry-api
 ```
 
+## AWS Lambda
+
+Consume a queue in a Lambda function with an SQS event source mapping: each record is decoded,
+routed and retried like a message a consumer received, and failed records come back as
+`batchItemFailures`.
+
+```python
+client = fanferro.Client(source="urn:service:billing")   # module level: reused while warm
+billing = client.queue("billing", dead_letter=fanferro.DeadLetterQueue("billing-dlq"))
+router = fanferro.Router()
+
+
+@router.route(OrderPlaced)
+async def charge(order: OrderPlaced) -> None:
+    ...                                    # return → done · raise → retried · Reject → DLQ
+
+
+handler = fanferro.aws_lambda.sqs_handler(client, router, queue=billing)   # handler(event, context)
+```
+
+Turn on `ReportBatchItemFailures` on the event source mapping. Permissions, outcomes and testing
+with `fanferro.testing.invoke_sqs_handler`: [Deployment → Lambda](docs/guides/deployment.md#lambda).
+
 ## Highlights
 
 * **Handlers are plain typed functions.** Return to ack, raise to retry. No receipt handles.
@@ -57,6 +80,7 @@ uv add "fanferro[all]"            # + pydantic, protobuf, msgspec, opentelemetry
 * **Routing on anything.** Message type, attribute, body field or topic.
 * **Safe by default.** Heartbeats, retries with backoff, dead-letter queues, graceful shutdown.
 * **Infrastructure in code.** Declared queues, topics and subscriptions are checked or created.
+* **Long-running workers or AWS Lambda.** The same handlers and policies for SQS event sources.
 * **Tests without AWS or Docker.** An in-memory broker runs the same engine you deploy.
 * **Mistakes caught early.** Bad names, sizes and signatures fail before any network call.
 * **Observable.** Typed events, structured logs, hooks and OpenTelemetry.

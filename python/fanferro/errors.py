@@ -31,7 +31,8 @@ Hierarchy::
     ├── RoutingError
     ├── BatchPublishError
     ├── HandlerTimeoutError
-    └── ConsumerStateError
+    ├── ConsumerStateError
+    └── BatchItemFailuresError
 """
 
 from __future__ import annotations
@@ -66,6 +67,7 @@ if TYPE_CHECKING:
 __all__ = [
     "AccessDeniedError",
     "AwsError",
+    "BatchItemFailuresError",
     "BatchPublishError",
     "CodecError",
     "ConfigurationError",
@@ -157,6 +159,21 @@ class ConsumerStateError(FanferroError):
     """An operation is not valid in the consumer's current state (e.g. starting it twice)."""
 
     retryable = False
+
+
+class BatchItemFailuresError(FanferroError):
+    """Records of an SQS event failed, and the Lambda function does not report batch item failures.
+
+    Raised by :mod:`fanferro.aws_lambda` handlers created with ``report_batch_item_failures=False``,
+    so that Lambda returns the whole batch to the queue instead of deleting it. ``item_identifiers``
+    are the SQS message ids of the records that failed.
+    """
+
+    retryable = True
+
+    def __init__(self, message: str, item_identifiers: list[str]) -> None:
+        super().__init__(message)
+        self.item_identifiers = item_identifiers
 
 
 def error_details(error: BaseException) -> dict[str, Any]:

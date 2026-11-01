@@ -184,9 +184,63 @@ resources of `dev-eu-`.
 
 ## Lambda
 
-fanferro is designed for long-running consumers. In Lambda with an SQS event source mapping,
-use fanferro for publishing (create the client outside the handler and `asyncio.run(...)` the
-publish per invocation) and read records directly: with the default raw envelope the record body
-is the message (e.g. the JSON document) and `fanferro.id` / `fanferro.type` are in its
-`messageAttributes`; with CloudEvents, parse the body with
-`fanferro.envelopes.CloudEvents().unwrap(fanferro.WireMessage(record["body"]))`.
+A Lambda function with an SQS event source mapping consumes a queue with
+`fanferro.aws_lambda.sqs_handler`: Lambda receives the messages, and fanferro processes each record
+of the event as a consumer processes a message it received (SNS notifications are unwrapped,
+offloaded payloads downloaded, base64 undone, envelopes unwrapped; then the attempts check,
+routing, codecs, middleware, the handler, and the retry and dead-letter policies), concurrently up
+to `concurrency` (FIFO queues: in order per message group).
+
+```python
+import fanferro
+
+client = fanferro.Client(source="urn:service:billing")    # at module level: reused while warm
+payments = client.queue("payments", dead_letter=fanferro.DeadLetterQueue("payments-dlq"))
+router = fanferro.Router()
+
+
+@router.route(PaymentCaptured)
+async def book(payment: PaymentCaptured) -> None: ...
+
+
+handler = fanferro.aws_lambda.sqs_handler(client, router, queue=payments)  # handler(event, context)
+```
+
+The function returns `{"batchItemFailures": [...]}`, so the event source mapping must report batch
+item failures (`FunctionResponseTypes: ["ReportBatchItemFailures"]`; without it Lambda ignores the
+response and deletes every record of an invocation that returned, retried ones too). For a mapping
+without it, pass `report_batch_item_failures=False`: an invocation with failed records then raises
+`BatchItemFailuresError`, and the whole batch comes back.
+
+| Outcome of a record | Response | Effect |
+| --- | --- | --- |
+| acked (handler returned), discarded, duplicate | not listed | Lambda deletes it |
+| dead-lettered (`Reject`, exhausted retries, decode errors) | not listed | fanferro forwarded a copy to the dead-letter queue first (with `fanferro.dead-letter`); without one, `on_missing_queue` applies |
+| requeued | not listed | fanferro sent a copy with the next attempt number first |
+| retried (an exception, `Retry`) | listed | its visibility timeout is set to the retry policy's backoff (`ChangeMessageVisibility`; if that fails, it comes back after the queue's visibility timeout) |
+| released, not settled (`auto_ack=False`), settlement failed | listed | it comes back |
+| still running `timeout_margin` (1 s) before the invocation times out | listed | the handler is cancelled (`consumer.error`) |
+| FIFO: a later record of a group with a listed or requeued record | listed, unprocessed | the group comes back in order |
+
+* The handler keeps one event loop between invocations, and with it the client's connections; Rust
+  events and running event hooks are flushed before each invocation returns. In code that runs an
+  event loop already (tests, async adapters), `await handler.handle(event, context)`.
+* The queue is resolved the first time records of it arrive (a cold start), like a consumer's,
+  with its dead-letter queue (`DeadLetterPolicy(queue=...)`, the declaration's, or the redrive
+  policy's target). Without `queue=`, the handler takes the queue each record names
+  (`eventSourceARN`): a declared queue of that name, or the queue as it exists.
+* Keep `RetryPolicy.max_attempts` below the redrive policy's `maxReceiveCount`, as for consumers,
+  and the queue's visibility timeout at least six times the function timeout (AWS's advice:
+  Lambda may retry an invocation of a batch that is still invisible).
+* Besides what the event source mapping needs (`sqs:ReceiveMessage`, `sqs:DeleteMessage`,
+  `sqs:GetQueueAttributes`), the function's role needs `sqs:GetQueueUrl` (queue resolution, unless
+  the queue is declared with `Provisioning.assume()`), `sqs:ChangeMessageVisibility` (retry
+  backoff), `sqs:SendMessage` on the dead-letter queue (and on the queue for `Requeue`),
+  `s3:GetObject` on payload buckets (claim checks), and `kms:Decrypt` for encrypted queues.
+* Test functions with `fanferro.testing.invoke_sqs_handler(handler, queue)`, which receives a
+  batch, invokes the handler and deletes what it did not report, like the event source mapping
+  (see [testing](testing.md#lambda-functions) and `examples/lambda_function.py`).
+
+Publishing from Lambda needs nothing special: publish in a handler (it runs on the handler's
+loop), or create the client outside the function's handler and `asyncio.run(...)` the publish per
+invocation.

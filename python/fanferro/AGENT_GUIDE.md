@@ -94,6 +94,7 @@ result = await events.publish(InvoicePaid(invoice_id="inv-1", amount_cents=1299)
 | Settle manually | `await message.ack() / retry(delay=) / requeue() / dead_letter(reason) / release() / discard(reason)` (settles when called; await the returned `Settlement` for SQS's confirmation) |
 | Observe | `client.on("message.*", hook)`, `LoggingConfig(...)`, `Telemetry(...)`, `client.metrics().consumers[name].engine.messages_acked`, `consumer.stats().processed`, `(await queue.approximate_count()).visible` (typed objects; `.as_dict()` for a dict) |
 | Test | `fanferro.testing.memory_client()`, `fanferro.testing.build_message(obj)`, `consumer.run_until_idle()` |
+| Consume in AWS Lambda | `handler = fanferro.aws_lambda.sqs_handler(client, router, queue=queue)` (SQS event source mapping with `ReportBatchItemFailures`); test with `fanferro.testing.invoke_sqs_handler(handler, queue)` |
 
 Publish options (keywords or `fanferro.OutgoingMessage`): `type`, `attributes`, `headers`, `id`,
 `time`, `subject`, `source`, `data_schema`, `content_type`, `group_id` (FIFO), `deduplication_id`,
@@ -276,6 +277,34 @@ async def test_flow() -> None:
         await consumer.run_until_idle()
 ```
 
+## AWS Lambda
+
+A Lambda function with an SQS event source mapping uses the consumer's routing and policies through
+`fanferro.aws_lambda.sqs_handler`; create the client, the router and the handler at module level:
+
+```python
+client = fanferro.Client(source="urn:service:billing")
+payments = client.queue("payments", dead_letter=fanferro.DeadLetterQueue("payments-dlq"))
+router = fanferro.Router()
+
+
+@router.route(PaymentCaptured)
+async def book(payment: PaymentCaptured) -> None: ...
+
+
+handler = fanferro.aws_lambda.sqs_handler(client, router, queue=payments, retry=fanferro.RetryPolicy(max_attempts=3))
+```
+
+The function returns `batchItemFailures`: acked, discarded, dead-lettered and requeued records are
+left out (Lambda deletes them), retried and unsettled ones listed (a retry also sets the backoff as
+the record's visibility timeout). The event source mapping must have
+`FunctionResponseTypes: ["ReportBatchItemFailures"]`, or pass `report_batch_item_failures=False`
+(failures then raise `BatchItemFailuresError`). Options: `queue`, `report_batch_item_failures`,
+`timeout_margin`, and the consumer's `concurrency`, `retry`, `dead_letter`, `handler_timeout`,
+`ordering`, `strict_ordering`, `envelopes`, `middleware`, `auto_ack`, `sns_unwrap`,
+`auto_confirm_subscriptions`, `delete_offloaded_payloads`, `name`. Permissions and details:
+[deployment guide](https://github.com/kalaspuff/fanferro/blob/main/docs/guides/deployment.md#lambda).
+
 ## Common mistakes
 
 * Publishing before subscriptions exist: declare subscriptions on the client and enter it (`async with
@@ -283,6 +312,9 @@ async def test_flow() -> None:
   Subscriptions declared inside `async with client:` are resolved before their topic's next publish;
   with `auto_provision=False`, `await subscription.resolve()` before publishing.
 * Sync handlers: handlers must be `async def`.
+* Reading SQS records by hand in Lambda: use `fanferro.aws_lambda.sqs_handler`, which undoes SNS
+  wrapping, claim checks and envelopes, and an event source mapping without
+  `ReportBatchItemFailures` (or the handler with `report_batch_item_failures=False`).
 * Creating a client per request: create it once and share it.
 * `max_receive_count` (SQS redrive) lower than `RetryPolicy.max_attempts`: SQS moves messages before
   fanferro's retries finish (fanferro logs a `config.warning`). On FIFO queues keep it well above:

@@ -30,6 +30,7 @@ Read ``fanferro guide`` (or ``python -m fanferro guide``) for the full usage gui
 # Public submodules: `from x import m as m` (or `__all__`) makes type checkers see `fanferro.errors`
 # and the others after `import fanferro`; `from fanferro.errors import ...` alone does not.
 from fanferro import actions as actions
+from fanferro import aws_lambda as aws_lambda
 from fanferro import client as client
 from fanferro import codecs, envelopes, idempotency, matchers, outbox, testing
 from fanferro import config as config
@@ -63,6 +64,7 @@ from fanferro.envelopes import Envelope
 from fanferro.errors import (
     AccessDeniedError,
     AwsError,
+    BatchItemFailuresError,
     BatchPublishError,
     CodecError,
     ConfigurationError,
@@ -128,6 +130,7 @@ __all__ = [
     "AwsRetry",
     "Backoff",
     "BatchFailure",
+    "BatchItemFailuresError",
     "BatchPublishError",
     "BatchPublishResult",
     "Carrier",

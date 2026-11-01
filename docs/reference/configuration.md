@@ -114,6 +114,20 @@ created.
 | `auto_confirm_subscriptions` | `False` | Confirm SNS subscription confirmation messages |
 | `delete_offloaded_payloads` | `False` | Delete S3 payload objects after acking; a message whose object is missing (`NoSuchKey`) is then acked as an already processed duplicate (`message.duplicate`), including one whose object expired or was deleted for another reason (see [large payloads](../guides/large-payloads.md#cleanup)) |
 
+## `fanferro.aws_lambda.sqs_handler(client, handler_or_router, ...)`
+
+A Lambda function handler for an SQS event source mapping (see the
+[deployment guide](../guides/deployment.md#lambda)). It takes the consumer options that apply to
+records Lambda received: `name`, `concurrency`, `retry`, `dead_letter`, `handler_timeout`,
+`ordering`, `strict_ordering`, `envelopes`, `middleware`, `auto_ack`, `sns_unwrap`,
+`auto_confirm_subscriptions` and `delete_offloaded_payloads` (as above), and:
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `queue` | each record's `eventSourceARN` | The queue the mapping receives from (a handle, or a name the `queue_prefix` is prepended to); records of other queues raise `ConfigurationError` |
+| `report_batch_item_failures` | `True` | Return failed records as `batchItemFailures` (the mapping must report them); `False` raises `BatchItemFailuresError` when records failed, so the whole batch comes back |
+| `timeout_margin` | `1.0` | Seconds before the invocation times out at which running handlers are cancelled and their records reported as failed (0-60) |
+
 ## Policies
 
 `RetryPolicy`: `max_attempts` (5), `backoff` (`Backoff()`), `strategy` (`"visibility"`),

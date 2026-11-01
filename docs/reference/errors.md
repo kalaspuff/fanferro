@@ -39,6 +39,7 @@ every attribute. `AttributeValue` and `WireMessage` pickle too.
 | `BatchPublishError` | Some batch entries failed after retries (`.result`) | if all failures are |
 | `HandlerTimeoutError` | A handler exceeded `handler_timeout` (also a `TimeoutError`) | yes |
 | `ConsumerStateError` | Invalid consumer state transition (start twice, no routes) | no |
+| `BatchItemFailuresError` | Records of an SQS event failed in a `fanferro.aws_lambda` handler created with `report_batch_item_failures=False` (`.item_identifiers`); Lambda returns the batch to the queue | yes |
 
 Handler control flow uses `fanferro.Retry`, `Requeue`, `Reject` and `Discard` (subclasses of
 `HandlerAction`, not `FanferroError`).

@@ -169,6 +169,15 @@ pub struct ConsumerConfig {
     /// Backoff after failed receive calls.
     #[serde(default = "default_receive_backoff")]
     pub receive_backoff: RetrySettings,
+    /// Process messages received by someone else (an AWS Lambda event source mapping) instead of
+    /// receiving: the engine runs no receive loops, takes messages through
+    /// [`ConsumerEngine::accept_records`](super::ConsumerEngine::accept_records), and records the
+    /// deletes of their settlements instead of sending them (whoever received the messages
+    /// deletes them, see [`ConsumerEngine::take_deleted`](super::ConsumerEngine::take_deleted)).
+    /// Visibility changes, dead-letter and requeue copies are sent as usual. Leases dropped
+    /// without a settlement are left to time out instead of released.
+    #[serde(default)]
+    pub external: bool,
 }
 
 fn default_receive_backoff() -> RetrySettings {
@@ -206,6 +215,7 @@ pub(crate) struct Settings {
     pub auto_confirm_subscriptions: bool,
     pub verify_md5: bool,
     pub receive_backoff: Backoff,
+    pub external: bool,
 }
 
 impl ConsumerConfig {
@@ -338,6 +348,7 @@ impl ConsumerConfig {
             auto_confirm_subscriptions: self.auto_confirm_subscriptions,
             verify_md5: self.verify_md5,
             receive_backoff: self.receive_backoff.backoff()?,
+            external: self.external,
         })
     }
 
@@ -376,6 +387,7 @@ impl ConsumerConfig {
             auto_confirm_subscriptions: false,
             verify_md5: false,
             receive_backoff: default_receive_backoff(),
+            external: false,
         }
     }
 }
