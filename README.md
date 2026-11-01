@@ -13,7 +13,7 @@ src="https://raw.githubusercontent.com/kalaspuff/fanferro/main/docs/assets/logo/
 
 ```python
 import fanferro
-from pydantic import BaseModel                  # or dataclasses, msgspec, protobuf, ...
+from pydantic import BaseModel              # or dataclasses, msgspec, protobuf, ...
 
 
 @fanferro.message_type("checkout.order_placed.v1")
@@ -24,7 +24,7 @@ class OrderPlaced(BaseModel):
 
 client = fanferro.Client(
     source="urn:service:checkout",
-    # create missing resources (by default they must exist)
+    # create missing resources (default: they must exist)
     provisioning=fanferro.Provisioning.ensure(),
 )
 orders = client.topic("orders")
@@ -35,13 +35,13 @@ consumer = client.consumer(billing, concurrency=20)
 
 @consumer.route(OrderPlaced)
 async def charge(order: OrderPlaced) -> None:
-    ...                               # return → ack · raise → retry with backoff → DLQ
+    ...                                     # return → ack · raise → retry with backoff → DLQ
 
 
 async def main() -> None:
-    async with client:                # connect + provision declared resources
+    async with client:                      # connect + provision declared resources
         await orders.publish(OrderPlaced(order_id="o-1", amount_cents=1299))
-        await consumer.run()          # SIGTERM → graceful drain
+        await consumer.run()                # SIGTERM → graceful drain
 ```
 
 > Status: **0.x** - the API may still change between minor versions.
@@ -60,14 +60,15 @@ decoded, routed and retried like a message a consumer received, and failed recor
 as `batchItemFailures`.
 
 ```python
-client = fanferro.Client(source="urn:service:billing")   # module level: reused while warm
+# at module level, so it is reused while the function is warm
+client = fanferro.Client(source="urn:service:billing")
 billing = client.queue("billing", dead_letter=fanferro.DeadLetterQueue("billing-dlq"))
 router = fanferro.Router()
 
 
 @router.route(OrderPlaced)
 async def charge(order: OrderPlaced) -> None:
-    ...                               # return → done · raise → retried · Reject → DLQ
+    ...                                     # return → done · raise → retried · Reject → DLQ
 
 
 # the function Lambda calls: handler(event, context)
@@ -94,20 +95,20 @@ client = fanferro.Client()
 consumer = client.consumer(client.queue("aws-events"))
 
 
-@consumer.route                                   # an S3 event notification
+@consumer.route                             # an S3 event notification
 async def on_upload(event: aws.S3Event) -> None:
-    for record in event.records:                  # none in S3's test event
-        if record.created:                        # object keys come URL-decoded
+    for record in event.records:            # none in S3's test event
+        if record.created:                  # object keys come URL-decoded
             await index(record.bucket.name, record.object.key, record.object.size)
 
 
-@consumer.route                                   # an SES identity's notification
+@consumer.route                             # an SES identity's notification
 async def on_bounce(notification: aws.SesBounceNotification) -> None:
     if notification.bounce.permanent:
         await suppress([r.email_address for r in notification.bounce.bounced_recipients])
 
 
-@consumer.route("aws.ses.open")                   # an SES configuration set's event
+@consumer.route("aws.ses.open")             # an SES configuration set's event
 async def on_open(message: fanferro.Message[aws.SesNotification]) -> None:
     await record_open(message.body.mail.message_id, message.json()["open"]["ipAddress"])
 
@@ -136,8 +137,7 @@ from fanferro.testing import build_message, dispatch
 async def test_charge() -> None:
     message = build_message(OrderPlaced(order_id="o-1", amount_cents=1299), attempt=3)
     result = await dispatch(consumer, message)
-    # or "retried", "requeued", "dead_lettered", "discarded"
-    assert result.outcome == "acked"
+    assert result.outcome == "acked"        # or "retried", "requeued", "dead_lettered", ...
 ```
 
 Flows run on an in-memory broker (`fanferro.testing.memory_client()`) or an emulator:
