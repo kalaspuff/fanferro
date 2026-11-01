@@ -289,7 +289,7 @@ impl PyMemoryBroker {
             let dict = PyDict::new(py);
             dict.set_item("message_id", message.message_id)?;
             dict.set_item("body", message.body)?;
-            dict.set_item("raw_attributes", attributes_to_py(py, &message.attributes)?)?;
+            dict.set_item("attributes", attributes_to_py(py, &message.attributes)?)?;
             dict.set_item("receive_count", message.receive_count)?;
             dict.set_item("in_flight", message.in_flight)?;
             dict.set_item("group_id", message.group_id)?;

@@ -99,7 +99,8 @@ queue has no more visible ones) and makes them visible again before it returns. 
 claim-check pointer, which are not unwrapped or fetched), `raw_attributes` and `attributes`,
 `dead_letter_info`, `source` and `requeued_attempts`. A peek is a receive: it adds one to each
 message's `ApproximateReceiveCount`, which matters only for a dead-letter queue that has a redrive
-policy of its own.
+policy of its own. On a FIFO queue, SQS hands out no further messages of a group while
+some are hidden, so a peek shows at most the first 10 messages of each group.
 
 `redrive(to=None, *, limit=None, max_per_second=None, reset_attempts=True)` moves messages until
 the queue has no visible messages left or `limit` were moved:
