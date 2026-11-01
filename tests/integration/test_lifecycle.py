@@ -1006,3 +1006,26 @@ async def test_the_drain_deadline_cuts_short_a_stop_waiting_for_downloads(
         finally:
             engine._aborted.set()  # lets a stop that waits forever end, so that the test fails
     assert engine.calls == [False, True], "the drain deadline aborted receiving"
+
+
+async def test_a_later_stop_request_cuts_short_a_stop_waiting_for_downloads(
+    memory_client: fanferro.Client, name: Any
+) -> None:
+    queue = memory_client.queue(name("slow-downloads-later"))
+    consumer = memory_client.consumer(queue, wait_time=1, shutdown=fanferro.ShutdownPolicy(abort_receives=False))
+
+    @consumer.route(OrderCreated)
+    async def handle(order: OrderCreated) -> None: ...
+
+    async with memory_client:
+        await consumer.start()
+        engine = consumer._engine = _SlowDecodingEngine(consumer._engine)
+        try:
+            first = asyncio.ensure_future(consumer.stop(drain_timeout=None))  # waits forever
+            await wait_for(lambda: engine.calls == [False])
+            await asyncio.sleep(0.5)  # the first stop is waiting for receiving to stop by now
+            await asyncio.wait_for(consumer.stop(drain_timeout=0), timeout=5)
+            await asyncio.wait_for(first, timeout=5)
+        finally:
+            engine._aborted.set()
+    assert engine.calls == [False, True], "the later deadline aborted receiving"
