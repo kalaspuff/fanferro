@@ -21,7 +21,7 @@ memory run with the recorded AWS run without AWS access:
 
 ```bash
 uv run python scripts/probe_backends.py run --target memory
-uv run python scripts/probe_backends.py compare docs/parity/2026-10-31/probe-aws.json probe-memory.json
+uv run python scripts/probe_backends.py compare docs/parity/2026-11-01/probe-aws.json probe-memory.json
 ```
 
 ## Recorded runs
@@ -30,10 +30,16 @@ uv run python scripts/probe_backends.py compare docs/parity/2026-10-31/probe-aws
 | --- | --- | --- |
 | [2026-10-31](2026-10-31/) | AWS `eu-north-1`, LocalStack, MiniStack, memory | fanferro 0.6.0, AWS CLI v2, MiniStack 1.5.27, LocalStack 2026.x |
 | [2026-10-31-second](2026-10-31-second/) | AWS `eu-north-1` (with the cases of the open questions), memory | fanferro with #146-#154, AWS CLI v2 |
+| [2026-11-01](2026-11-01/) | AWS `eu-north-1` (and four reruns of `sns.filter_policies`), LocalStack, MiniStack, memory (no AWS CLI run) | fanferro 0.7.0 with #163-#240, MiniStack 1.5.27, LocalStack pro 2026.10.4 |
 
 The second run used fanferro with the fixes of #146-#154. Where those changed fanferro itself (the 60
 second limits as throttling, FIFO ids refused before sending, payload buckets with unknown
 credentials), it shows the fixes on AWS; it answered the open questions of the first run.
+
+The third run checked the day's fixes (#163-#240) on every target. Memory and MiniStack answered as
+in the earlier runs, apart from fanferro's own changes (FIFO ids refused before sending, M8);
+LocalStack's filter matching, which the first run could not reach, differed (S6); and on AWS one
+subscription of a topic failed to provision (R1).
 
 Each directory holds `probe-<target>.json` (scenarios through fanferro) and
 `probe-cli-<target>.txt` (raw AWS CLI calls). Names, account ids, ids, receipt handles and times are
@@ -86,7 +92,7 @@ quoted as the services return them; `<v>` stands for a value from the request.
 | S3 | Every topic operation with a topic ARN of another region (`Publish`, `PublishBatch`, `GetTopicAttributes`, `SetTopicAttributes`, `Subscribe`, `ListSubscriptionsByTopic`, `DeleteTopic`; second run) answers `InvalidParameter` (400) "Invalid parameter: TopicArn" | memory, MiniStack: `NotFound`; LocalStack like AWS | **Fixed** (#152, #159): memory follows AWS in every topic operation |
 | S4 | Subscribing a FIFO queue to a standard topic: "Invalid parameter: Invalid parameter: Endpoint Reason: FIFO SQS Queues can not be subscribed to standard SNS topics"; again with other attributes: "Invalid parameter: Attributes Reason: Subscription already exists with different attributes" | memory's code and texts differ; MiniStack accepts both | **Fixed** (#152): memory follows AWS (fanferro refuses the first before the network) |
 | S5 | Filter policies are validated with "Invalid parameter: Attributes Reason: FilterPolicy: `<reason>`": "Unrecognized match type glob", "Filter policy can not have more than 5 keys", "Filter policy is too complex", "Value of > must be numeric", "Empty arrays are not allowed", "exists match pattern must be either true or false.", "failed to parse JSON. ..."; nested in the attribute scope: "Invalid parameter: Attributes Reason: Filter policy scope MessageAttributes does not support nested filter policy" | memory refuses the same policies with other texts; MiniStack accepts them all; LocalStack does not support `wildcard` | **Fixed** (#152): memory uses the AWS reasons; it leaves out the JSON parser position SNS appends to some (" at [Source: ...; line: 1, column: N]"), which differs between AWS APIs |
-| S6 | Filter policy matching, 19 policies (attributes and body, every operator) over 8 messages | memory matches AWS exactly; MiniStack lets numeric operators match `String` attributes | No change |
+| S6 | Filter policy matching, 19 policies (attributes and body, every operator) over 8 messages | memory matches AWS exactly; MiniStack and LocalStack let numeric operators match `String` attributes; LocalStack matches no message with an exact number (`{"price": [15]}`) and does not support `wildcard` (third run) | No change |
 | S7 | With `TracingConfig=Active`, SNS passes the X-Ray trace header on with its own `Parent` (same `Root` and `Sampled`); with `PassThrough` unchanged | memory passes it unchanged; MiniStack drops it | **Fixed** (#153): memory replaces `Parent` on active topics |
 | S8 | SNS does not deliver to a queue encrypted with the AWS managed key `alias/aws/sqs` (its key policy cannot allow SNS); nothing reports it | memory, emulators deliver | **Fixed** (#153): memory drops such deliveries; provisioning emits a `config.warning` for such subscriptions |
 | S9 | Notifications (raw delivery off) keep `Number` values as published (`3.0`) and carry `Binary` values in base64; the document is pretty-printed | memory like AWS; MiniStack sends `Binary` values empty | No change (fanferro reads both layouts) |
@@ -100,6 +106,12 @@ quoted as the services return them; `<v>` stands for a value from the request.
 | P1 | `HeadBucket` with credentials AWS does not know answers 403 without a body, like for a bucket of another account; `GetBucketLocation` answers `InvalidAccessKeyId` (403) for such credentials (second run). | emulators do not check credentials | **Fixed** (#154): after a 403 fanferro asks `GetBucketLocation`, whose error names unknown credentials, so provisioning no longer reports the bucket as found |
 | P2 | A presigned URL of a missing object: 404 "Not Found" (`NoSuchKey`); an expired one: 403 `AccessDenied` | memory's text says "HTTP 404" instead of "HTTP 404 Not Found"; LocalStack does not expire URLs | **Fixed** (#150): memory uses the AWS status text |
 | P3 | `CreateBucket` for an owned bucket outside `us-east-1`: 409 `BucketAlreadyOwnedByYou` | emulators succeed | No change (fanferro treats both as success) |
+
+### Provisioning
+
+| ID | Real AWS | Differences | Status |
+| --- | --- | --- | --- |
+| R1 | In the third run, `client.provision()` (concurrent since #226) created a topic, 20 queues and their 20 subscriptions; one subscription (the `suffix` filter's, a filter AWS accepted in the earlier runs) failed, so it received nothing. The probe disabled logging, so the cause was not recorded. Four reruns of the scenario (`probe-aws-filters-*.json`, recording failed reports in `provisioning_failures`) created every subscription: the failure is intermittent | memory, emulators: every subscription is created | **Open** (#244): the probe records the failed reports from now on; suspected causes are SQS's eventual consistency right after `CreateQueue` (AWS asks to wait a second before using a new queue) and SNS throttling (`ListSubscriptionsByTopic` allows 30 calls a second) |
 
 ### Credentials
 
@@ -137,5 +149,6 @@ behaviour runs on the in-memory broker only, with a comment naming the finding.
 
 LocalStack (2026.x) differs in: queue attribute ranges (Q1), the other dead-letter queue type (Q4),
 `QueueDeletedRecently` and the purge limit, FIFO receipt handles (M3), `Number` normalisation,
-presigned URL expiry (P2), `wildcard` filters (S5), FIFO duplicates (S10), KMS-encrypted
+presigned URL expiry (P2), `wildcard` filters (S5), numeric filters on `String` attributes and exact
+numbers (S6), FIFO duplicates (S10), KMS-encrypted
 subscribers and credentials.
