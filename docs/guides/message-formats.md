@@ -110,25 +110,59 @@ built-in envelopes (consumers unwrap them in the engine, off the event loop):
 | `compat.TomodachiJSON()` | `JsonBase` | JSON (text payloads become JSON strings) | the tomodachi topic |
 | `compat.TomodachiProtobuf()` | `ProtobufBase` | a serialized protobuf message (`application/x-protobuf`) | the tomodachi topic |
 
+The data inside a tomodachi envelope is decoded and encoded by the codecs, like any payload:
+handlers get pydantic models, dataclasses, msgspec structs or protobuf messages, and published
+objects reach tomodachi handlers as the `data` they expect (a dict for JSON, the protobuf message
+for `ProtobufBase`).
+
 ```python
 from fanferro.envelopes import default_envelopes
 from fanferro.envelopes.compat import TomodachiJSON, TomodachiProtobuf
+
+
+@fanferro.message_type("order-created")  # the tomodachi topic is the message type
+class OrderCreated(BaseModel):
+    order_id: int
+    total: Decimal
+    placed_at: datetime
+    lines: list[Line]
+
+
+@fanferro.message_type("invoice-created")
+class InvoiceCreated(BaseModel):
+    invoice_id: int
+    order_id: int
+
 
 client = fanferro.Client(
     topic_prefix="production-",  # tomodachi's aws_sns_sqs.topic_prefix, if it has one
     # Before Raw, which accepts any message.
     accept_envelopes=[TomodachiJSON(), TomodachiProtobuf(), *default_envelopes()],
 )
-client.types.register(OrderCreated, "order-created")  # the tomodachi topic is the message type
-client.types.register(orders_pb2.OrderShipped, "order-shipped")
+client.types.register(orders_pb2.OrderShipped, "order-shipped")  # a protobuf class for a topic
 
-# A queue of this service, subscribed to the topics tomodachi publishes to.
+# A queue of this service, subscribed to the topics tomodachi services publish to.
 client.subscription("order-created", "billing-orders")
 client.subscription("order-shipped", "billing-orders")
+consumer = client.consumer(client.queue("billing-orders"))
 
-# Publishing to topics tomodachi services subscribe to, and to queues they consume.
-invoiced = client.topic("invoice-created", envelope=TomodachiJSON(service_name="billing"))
+# Topics tomodachi services subscribe to, and a queue one consumes.
+invoices = client.topic("invoice-created", envelope=TomodachiJSON(service_name="billing"))
 legacy_inbox = client.queue("legacy-inbox", envelope=TomodachiJSON(service_name="billing"))
+
+
+@consumer.route(OrderCreated)
+async def on_order_created(message: fanferro.Message[OrderCreated]) -> None:
+    order = message.body  # an OrderCreated, validated by pydantic
+    await invoices.publish(InvoiceCreated(invoice_id=1, order_id=order.order_id))  # data: {"invoice_id": 1, ...}
+
+
+@consumer.route(orders_pb2.OrderShipped)
+async def on_order_shipped(message: fanferro.Message[orders_pb2.OrderShipped]) -> None: ...
+
+
+@consumer.default  # messages tomodachi sent straight to the queue (no topic)
+async def on_direct(message: fanferro.Message[OrderCreated]) -> None: ...  # decoded by the annotation
 ```
 
 **Consuming.** Both envelopes recognise their messages by `metadata.protocol_version` in the body,

@@ -11,9 +11,12 @@ import base64
 import json
 import zlib
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 from google.protobuf import descriptor_pb2, descriptor_pool, message_factory, wrappers_pb2
+from pydantic import BaseModel
 
 import fanferro
 from fanferro.envelopes import Raw, default_envelopes
@@ -42,6 +45,44 @@ NO_ATTRIBUTES = Raw(content_type_attribute=None, type_attribute=None, id_attribu
 class Order:
     order_id: int
     total: float
+
+
+class Line(BaseModel):
+    sku: str
+    quantity: int
+
+
+@fanferro.message_type("order-shipped")
+class OrderShipped(BaseModel):
+    """A pydantic model for the data of tomodachi's ``order-shipped`` topic."""
+
+    order_id: int
+    total: Decimal
+    shipped_at: datetime
+    lines: list[Line]
+
+
+SHIPPED = OrderShipped(
+    order_id=5,
+    total=Decimal("12.50"),
+    shipped_at=datetime(2026, 11, 1, 12, tzinfo=UTC),
+    lines=[Line(sku="a", quantity=2)],
+)
+SHIPPED_DATA = {
+    "order_id": 5,
+    "total": "12.50",
+    "shipped_at": "2026-11-01T12:00:00Z",
+    "lines": [{"sku": "a", "quantity": 2}],
+}
+"""``SHIPPED`` as a tomodachi service publishes it: a plain dict."""
+
+
+def _tomodachi_json(data: Any, topic: str) -> str:
+    """A JsonBase envelope as tomodachi 0.29 builds it."""
+    document = json.loads(TOMODACHI_JSON)
+    document["metadata"]["topic"] = topic
+    document["data"] = data
+    return json.dumps(document)
 
 
 def _sns_sqs_message_class() -> Any:
@@ -230,3 +271,39 @@ async def test_round_trips_between_fanferro_services(client_factory: ClientFacto
     assert message.id == sent.message_id
     assert message.type == "orders.v1"
     assert message.json() == {"order_id": 3, "total": 1.0}
+
+
+async def test_tomodachi_data_is_read_into_and_written_from_models(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory(accept_envelopes=[TomodachiJSON(), *default_envelopes()])
+    reader = client_factory(accept_envelopes=[NO_ATTRIBUTES])
+    topic_name, queue_name, out_name = name("tomodachi-models"), name("tomodachi-models"), name("tomodachi-models-out")
+    topic = client.topic(topic_name)
+    queue = client.queue(queue_name)
+    client.subscription(topic_name, queue_name, raw_message_delivery=False)
+    out = client.queue(out_name, envelope=TomodachiJSON(service_name="shipping"))
+    routed: list[fanferro.Message[OrderShipped]] = []
+    annotated: list[fanferro.Message[OrderShipped]] = []
+    consumer = client.consumer(queue, wait_time=1)
+
+    @consumer.route(OrderShipped)  # message_type "order-shipped": the tomodachi topic
+    async def on_shipped(message: fanferro.Message[OrderShipped]) -> None:
+        routed.append(message)
+
+    @consumer.default  # no topic (sent straight to a queue): decoded by the annotation
+    async def on_other(message: fanferro.Message[OrderShipped]) -> None:
+        annotated.append(message)
+
+    async with client, reader:
+        await topic.publish(_tomodachi_json(SHIPPED_DATA, "order-shipped"), envelope=NO_ATTRIBUTES)
+        await topic.publish(_tomodachi_json(SHIPPED_DATA, ""), envelope=NO_ATTRIBUTES)
+        await consume_until(consumer, lambda: len(routed) == 1 and len(annotated) == 1)
+        await out.send(SHIPPED)
+        [sent] = await _bodies(reader, reader.queue(out_name))
+
+    assert routed[0].body == SHIPPED
+    assert routed[0].type == "order-shipped"
+    assert annotated[0].body == SHIPPED
+    # A tomodachi service gets the model as the dict it would have published itself.
+    message = TomodachiReader.json(sent)
+    assert message["data"] == SHIPPED_DATA
+    assert message["service"]["name"] == "shipping"

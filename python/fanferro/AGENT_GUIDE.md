@@ -28,7 +28,9 @@ compact reference for writing applications with it. Print it with `fanferro guid
    `Client(envelope=fanferro.envelopes.CloudEvents())` when consumers need CloudEvents metadata
    (`source`, `subject`, headers inside the body). To exchange messages with tomodachi services,
    use `fanferro.envelopes.compat.TomodachiJSON()`/`TomodachiProtobuf()` (envelope of their
-   topics and queues, and in `accept_envelopes` before `Raw`); the tomodachi topic is the message type.
+   topics and queues, and in `accept_envelopes` before `Raw`); the tomodachi topic is the message
+   type (`@fanferro.message_type("order-created")` on the model), and the data decodes into and
+   encodes from models like any payload.
 10. **Test with `fanferro.testing.memory_client()`**, end to end with MiniStack.
 
 ## Minimal service
