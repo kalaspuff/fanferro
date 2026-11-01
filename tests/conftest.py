@@ -28,6 +28,22 @@ import pytest
 
 import fanferro
 from fanferro import testing
+from tests.global_state import GlobalState
+
+
+@pytest.fixture(autouse=True)
+def _leaves_global_state_alone() -> Iterator[None]:
+    """Fails a test that leaves a global tracer or meter provider or a changed root logger behind.
+
+    Such state changes what later tests see, so results depended on test order (#168).
+    """
+    before = GlobalState.capture()
+    yield
+    after = GlobalState.capture()
+    if changes := before.changes(after):
+        before.restore()
+        pytest.fail("the test changed process-wide state: " + "; ".join(changes), pytrace=False)
+
 
 _EVENT_LOOP = os.environ.get("FANFERRO_TEST_EVENT_LOOP", "asyncio")
 
