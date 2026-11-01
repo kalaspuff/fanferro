@@ -71,6 +71,14 @@ Rust    settle loop batches DeleteMessage / ChangeMessageVisibility (ten at once
         fanferro.dead-letter / fanferro.attempt)
 ```
 
+Consuming in AWS Lambda (`fanferro.aws_lambda.sqs_handler`): the event source mapping receives
+the messages, so the engine runs in *external* mode (`ConsumerConfig::external`): no pollers and
+no heartbeats; `accept_records` converts the event's records (`consumer/records.rs`) into received
+messages, leases and decodes them exactly as above, and the Python consumer dispatches them as
+usual. Settlements that delete a message (ack, dead-letter and requeue after their copy) are
+recorded instead of sent (`take_deleted`); visibility changes are sent. The records not deleted
+become the response's `batchItemFailures`, and Lambda deletes the others.
+
 ## Invariants
 
 These are relied upon across layers; tests cover each of them.

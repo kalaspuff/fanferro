@@ -25,6 +25,7 @@ FANFERRO_USE_AWS=1 AWS_REGION=eu-west-1 uv run python -m examples.quickstart   #
 | [`observability.py`](observability.py) | Log configuration, async event hooks, OpenTelemetry spans and on-demand metrics |
 | [`fifo_ordering.py`](fifo_ordering.py) | FIFO topic → FIFO queue, per-group ordering, deduplication, derived group ids |
 | [`worker_service.py`](worker_service.py) | A worker with several consumers, rate limits, retry and shutdown policies, `client.run()` |
+| [`lambda_function.py`](lambda_function.py) | An AWS Lambda function consuming an SQS event source mapping with `fanferro.aws_lambda.sqs_handler` |
 | [`testing_handlers.py`](testing_handlers.py) | Unit-testing handlers with `build_message` and flows with the in-memory broker |
 
 `tests/unit/test_examples.py` runs all of them, so they stay in sync with the library.
