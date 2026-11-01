@@ -28,7 +28,14 @@ import time
 from collections import deque
 from typing import TYPE_CHECKING, Any, Literal, Self, overload
 
-from fanferro._core import Delivery, FanferroError, LeaseError, ShutdownError
+from fanferro._core import (
+    Delivery,
+    FanferroError,
+    LeaseError,
+    ShutdownError,
+    TomodachiJSONEnvelope,
+    TomodachiProtobufEnvelope,
+)
 from fanferro._utils import Duration, optional_seconds, seconds
 from fanferro.actions import Discard, HandlerAction, Reject, Requeue, Retry
 from fanferro.codecs import is_json_content_type, media_type
@@ -67,7 +74,7 @@ _MAX_HANDED_BACK = 10_000
 """Messages whose hand-backs a consumer remembers (the oldest are forgotten first)."""
 _DELIVERY_WAIT = 0.5
 """Seconds the dispatcher waits for deliveries per call (stopping wakes it at once)."""
-_BUILTIN_ENVELOPES = (CloudEvents, CloudEventsProtobuf, Raw)
+_BUILTIN_ENVELOPES = (CloudEvents, CloudEventsProtobuf, Raw, TomodachiJSONEnvelope, TomodachiProtobufEnvelope)
 
 
 class Duplicate(Discard):

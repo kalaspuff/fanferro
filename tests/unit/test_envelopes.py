@@ -110,3 +110,69 @@ def test_broken_custom_envelope_is_wrapped() -> None:
 
     with pytest.raises(fanferro.EnvelopeError, match="broken"):
         envelopes.unwrap_first([Broken()], fanferro.WireMessage(b"x"))
+
+
+class TestTomodachi:
+    def test_importable_from_the_package(self) -> None:
+        assert fanferro.envelopes.compat.TomodachiJSON is fanferro._core.TomodachiJSONEnvelope
+        assert envelopes.compat.TomodachiProtobuf is fanferro._core.TomodachiProtobufEnvelope
+
+    def test_options_equality_and_repr(self) -> None:
+        envelope = envelopes.compat.TomodachiJSON(service_name="billing", service_uuid="u-1", compress_threshold=None)
+        assert envelope.name == "tomodachi-json"
+        assert (envelope.service_name, envelope.service_uuid, envelope.type_attribute) == (
+            "billing",
+            "u-1",
+            "fanferro.type",
+        )
+        assert envelope.compress_threshold is None
+        assert envelopes.compat.TomodachiProtobuf().compress_threshold == 60_000
+        assert envelopes.compat.TomodachiProtobuf().name == "tomodachi-protobuf"
+        # Equal settings, equal envelopes (declaring a resource again compares them).
+        assert envelopes.compat.TomodachiJSON() == envelopes.compat.TomodachiJSON()
+        assert hash(envelopes.compat.TomodachiJSON()) == hash(envelopes.compat.TomodachiJSON())
+        assert envelopes.compat.TomodachiJSON() != envelopes.compat.TomodachiJSON(service_uuid="x")
+        assert repr(envelope) == (
+            "TomodachiJSONEnvelope(service_name='billing', service_uuid='u-1', type_attribute='fanferro.type', "
+            "compress_threshold=None)"
+        )
+        assert not envelopes.supports_headers(envelope)
+
+    def test_invalid_options(self) -> None:
+        with pytest.raises(fanferro.ConfigurationError, match="compress_threshold"):
+            envelopes.compat.TomodachiProtobuf(compress_threshold=-1)
+        with pytest.raises(fanferro.ConfigurationError, match="'topic' or 'queue'"):
+            envelopes.compat.TomodachiJSON().wrap_for(payload(), "bucket", "x")  # type: ignore[arg-type]
+
+    def test_wraps_for_topics_and_queues(self) -> None:
+        envelope = envelopes.compat.TomodachiJSON(service_uuid="u")
+        document = json.loads(envelope.wrap_for(payload(), "topic", "order___2e_created").body)
+        assert document["metadata"]["topic"] == "order.created"
+        assert document["metadata"]["message_uuid"] == "u.m-1"
+        assert document["service"]["name"] == "urn:svc"
+        queued = json.loads(envelope.wrap_for(payload(), "queue", "orders").body)
+        assert queued["Type"] == "Message"
+        assert json.loads(queued["Message"])["data"] == {"a": 1}
+        decoded = envelope.unwrap(fanferro.WireMessage(json.dumps(queued)))
+        assert decoded is not None
+        assert (decoded.id, decoded.data) == ("m-1", b'{"a":1}')
+
+    def test_refuses_payloads_it_cannot_carry(self) -> None:
+        with pytest.raises(fanferro.EnvelopeError, match="protobuf envelope"):
+            envelopes.compat.TomodachiJSON().wrap(payload(b"\x00", "application/x-protobuf"))
+        with pytest.raises(fanferro.EnvelopeError, match="JSON envelope"):
+            envelopes.compat.TomodachiProtobuf().wrap(payload())
+
+    @pytest.mark.parametrize(
+        ("topic", "encoded"),
+        [
+            # What tomodachi 0.29's AWSSNSSQSTransport.encode_topic() returns.
+            ("orders", "orders"),
+            ("order.created", "order___2e_created"),
+            ("order.created/v1.fifo", "order___2e_created___2f_v1.fifo"),
+            ("åäö.x", "___c3a5____c3a4____c3b6____2e_x"),
+            ("a_.b-c", "a____2e_b-c"),
+        ],
+    )
+    def test_tomodachi_topic_names(self, topic: str, encoded: str) -> None:
+        assert envelopes.compat.tomodachi_topic(topic) == encoded

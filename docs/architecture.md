@@ -172,7 +172,7 @@ These are relied upon across layers; tests cover each of them.
 | Extension | How | Where |
 | --- | --- | --- |
 | Message formats | implement `Codec` (Python protocol) | `python/fanferro/codecs/_base.py` |
-| Wire layouts | implement `Envelope` (Python protocol) or add a Rust envelope | `python/fanferro/envelopes.py`, `crates/fanferro-core/src/envelope/` |
+| Wire layouts | implement `Envelope` (Python protocol) or add a Rust envelope | `python/fanferro/envelopes/__init__.py`, `crates/fanferro-core/src/envelope/` |
 | Behaviour around publishing/handling | publish/consume middleware | `python/fanferro/middleware.py` |
 | Observability | event hooks, `LoggingConfig`, OpenTelemetry providers | `python/fanferro/events.py`, `telemetry.py` |
 | Failure decisions | `RetryPolicy(classify=...)`, handler actions, `Fallback` | `policies.py`, `actions.py`, `provisioning.py` |
