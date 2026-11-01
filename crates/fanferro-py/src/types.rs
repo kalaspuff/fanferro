@@ -7,8 +7,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyType};
 
 use crate::convert::{
-    attribute_value_to_py, attributes_from_py, attributes_to_py, body_from_py, bytes_from_py, headers_from_py,
-    headers_to_py, time_from_py, time_to_py,
+    Repr, attribute_value_to_py, attributes_from_py, attributes_to_py, body_from_py, bytes_from_py, headers_from_py,
+    headers_to_py, size_repr, time_from_py, time_to_py,
 };
 use crate::errors::{ValidationError, to_py_err};
 
@@ -83,13 +83,13 @@ impl PyAttributeValue {
         Ok((slf.get_type(), (inner.data_type().to_owned(), attribute_value_to_py(slf.py(), inner)?)))
     }
 
-    fn __repr__(&self) -> String {
-        match self.inner.data() {
-            AttributeData::Text(text) => format!("AttributeValue({:?}, {text:?})", self.inner.data_type()),
-            AttributeData::Binary(bytes) => {
-                format!("AttributeValue({:?}, <{} bytes>)", self.inner.data_type(), bytes.len())
-            }
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        let repr = Repr::new(py, "AttributeValue").value(self.inner.data_type())?;
+        Ok(match self.inner.data() {
+            AttributeData::Text(text) => repr.value(text.as_str())?,
+            AttributeData::Binary(bytes) => repr.raw(&size_repr(bytes.len())),
         }
+        .finish())
     }
 }
 
@@ -236,14 +236,20 @@ impl PyPayload {
         other.cast::<Self>().is_ok_and(|other| other.get().inner == self.inner)
     }
 
-    fn __repr__(&self) -> String {
-        format!(
-            "Payload(<{} bytes>, content_type={:?}, message_type={:?}, id={:?})",
-            self.inner.data.len(),
-            self.inner.content_type,
-            self.inner.message_type,
-            self.inner.id
-        )
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        let payload = &self.inner;
+        let headers = (!payload.headers.is_empty()).then(|| payload.headers.keys().collect::<Vec<_>>());
+        Ok(Repr::new(py, "Payload")
+            .raw(&size_repr(payload.data.len()))
+            .field("content_type", payload.content_type.as_deref())?
+            .field("message_type", payload.message_type.as_deref())?
+            .field("id", payload.id.as_deref())?
+            .optional("time", payload.time.map(|time| time_to_py(py, time)).transpose()?)?
+            .optional("source", payload.source.as_deref())?
+            .optional("subject", payload.subject.as_deref())?
+            .optional("data_schema", payload.data_schema.as_deref())?
+            .optional("headers", headers)?
+            .finish())
     }
 }
 
@@ -304,12 +310,11 @@ impl PyWireMessage {
         Ok((slf.get_type(), (PyBytes::new(py, &inner.body), attributes_to_py(py, &inner.attributes)?)))
     }
 
-    fn __repr__(&self) -> String {
-        format!(
-            "WireMessage(<{} bytes>, attributes={:?})",
-            self.inner.body.len(),
-            self.inner.attributes.keys().collect::<Vec<_>>()
-        )
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(Repr::new(py, "WireMessage")
+            .raw(&size_repr(self.inner.body.len()))
+            .field("attributes", self.inner.attributes.keys().collect::<Vec<_>>())?
+            .finish())
     }
 }
 

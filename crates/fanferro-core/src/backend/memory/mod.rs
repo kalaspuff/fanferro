@@ -289,6 +289,19 @@ struct Inner {
     options: MemoryOptions,
 }
 
+/// How many resources a [`MemoryBroker`] holds (see [`MemoryBroker::resource_counts`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ResourceCounts {
+    /// Queues.
+    pub queues: usize,
+    /// Topics.
+    pub topics: usize,
+    /// Subscriptions.
+    pub subscriptions: usize,
+    /// Buckets.
+    pub buckets: usize,
+}
+
 /// Options of a [`MemoryBroker`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MemoryOptions {
@@ -394,6 +407,17 @@ impl MemoryBroker {
     /// URLs of all queues.
     pub fn queue_urls(&self) -> Vec<String> {
         self.inner.state.lock().queues.keys().cloned().collect()
+    }
+
+    /// How many queues, topics, subscriptions and buckets the broker holds.
+    pub fn resource_counts(&self) -> ResourceCounts {
+        let state = self.inner.state.lock();
+        ResourceCounts {
+            queues: state.queues.len(),
+            topics: state.topics.len(),
+            subscriptions: state.subscriptions.len(),
+            buckets: state.buckets.len(),
+        }
     }
 
     /// Removes every queue, topic, subscription and bucket.

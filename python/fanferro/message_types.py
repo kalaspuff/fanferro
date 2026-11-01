@@ -109,6 +109,11 @@ class MessageTypes:
         self._accepted[cls] = names
         return names
 
+    def __repr__(self) -> str:
+        """The registered type names (aliases included) and their classes, by qualified name."""
+        names = ", ".join(f"{name!r}: {cls.__qualname__}" for name, cls in self._classes.items())
+        return f"MessageTypes({{{names}}})"
+
     def class_for(self, name: str) -> type | None:
         """The class registered for ``name``."""
         return self._classes.get(name)

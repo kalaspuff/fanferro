@@ -13,7 +13,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::client::pointer_to_py;
-use crate::convert::{attributes_to_py, seconds, time_to_py};
+use crate::convert::{Repr, attributes_to_py, seconds, time_to_py};
 use crate::errors::{EnvelopeError, ShutdownError, ValidationError, to_py_err, to_py_err_with};
 use crate::runtime::{Convert, future_into_py, handle, pending_future};
 use crate::types::{PyAttributeValue, PyPayload, wire_to_py};
@@ -460,12 +460,12 @@ impl PyDelivery {
         self.settle(py, move |delivery| async move { delivery.lease.requeue(delay, attempt).await })
     }
 
-    fn __repr__(&self) -> String {
-        format!(
-            "Delivery(sqs_message_id={:?}, receive_count={}, lease_status={:?})",
-            self.inner.message().message_id,
-            self.inner.message().system.approximate_receive_count,
-            self.inner.lease.status().as_str()
-        )
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        let message = self.inner.message();
+        Ok(Repr::new(py, "Delivery")
+            .field("sqs_message_id", message.message_id.as_str())?
+            .field("receive_count", message.system.approximate_receive_count)?
+            .field("lease_status", self.inner.lease.status().as_str())?
+            .finish())
     }
 }
