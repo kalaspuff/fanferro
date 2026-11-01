@@ -53,7 +53,7 @@ uv add "fanferro[all]"            # + pydantic, protobuf, msgspec, opentelemetry
 
 Every message carries a type name (the `fanferro.type` attribute, and `type` in CloudEvents):
 consumers route on it, and SNS filter policies can match it. Without a decorator it is the class
-name; give classes that cross service boundaries an explicit, versioned name instead:
+name (for protobuf messages, their full protobuf name); give classes that cross service boundaries an explicit, versioned name instead:
 
 ```python
 @fanferro.message_type("checkout.order_placed.v1")
