@@ -127,7 +127,10 @@ jobs:
         # At a path that stays the same between runs: maturin's zig linker and compiler wrappers
         # are named after the zig command, and a changed linker rebuilds every crate, so uvx's
         # temporary environments made the Rust cache useless (#169).
-        run: uv tool install "maturin==$MATURIN_VERSION" --with "ziglang==$ZIG_VERSION"
+        # The tool environment's bin goes on PATH too: maturin runs zig as `python3 -m ziglang`.
+        run: |
+          uv tool install "maturin==$MATURIN_VERSION" --with "ziglang==$ZIG_VERSION"
+          echo "$(uv tool dir)/maturin/bin" >> "$GITHUB_PATH"
       - run: maturin sdist --out dist
       - name: Cross-build an optimized aarch64 musl wheel with zig (as the release does)
         # The release profile, not the release's fat-LTO dist profile (too slow for every run), so
