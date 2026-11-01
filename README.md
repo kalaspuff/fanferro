@@ -73,6 +73,25 @@ handler = fanferro.aws_lambda.sqs_handler(client, router, queue=billing)   # han
 Turn on `ReportBatchItemFailures` on the event source mapping. Permissions, outcomes and testing
 with `fanferro.testing.invoke_sqs_handler`: [Deployment → Lambda](docs/guides/deployment.md#lambda).
 
+## Testing
+
+Test routing and handlers without a broker: `fanferro.testing.dispatch` runs one message through
+the consumer's routing, decoding, middleware, handler and retry and dead-letter policies, and
+returns how it was settled. `build_message` gives a message the transport metadata a handler may
+depend on (`attempt`, `group_id`, the SNS `topic`, `sent_at`...).
+
+```python
+from fanferro.testing import build_message, dispatch
+
+
+async def test_charge() -> None:
+    result = await dispatch(consumer, build_message(OrderPlaced(order_id="o-1", amount_cents=1299), attempt=3))
+    assert result.outcome == "acked"     # or "retried", "requeued", "dead_lettered", "discarded"
+```
+
+Flows run on an in-memory broker (`fanferro.testing.memory_client()`) or an emulator:
+[Testing](docs/guides/testing.md).
+
 ## Highlights
 
 * **Handlers are plain typed functions.** Return to ack, raise to retry. No receipt handles.

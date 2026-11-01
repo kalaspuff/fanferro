@@ -29,7 +29,8 @@ in code: `await dlq.peek()`, `await dlq.redrive()`).
    Messages are raw JSON bodies by default; opt into CloudEvents with
    `Client(envelope=fanferro.envelopes.CloudEvents())`.
 9. Tests: `fanferro.testing.memory_client()` + `consumer.run_until_idle()`; handler unit tests with
-   `fanferro.testing.build_message(obj)`; end-to-end against MiniStack (`endpoint_url=http://localhost:4566`).
+   `fanferro.testing.build_message(obj, attempt=..., topic=...)`, routers and outcomes with
+   `await fanferro.testing.dispatch(router, obj)`; end-to-end against MiniStack (`endpoint_url=http://localhost:4566`).
    Lambda functions: `fanferro.testing.invoke_sqs_handler(handler, queue)`.
 10. Environments sharing an AWS account: `fanferro.Client(queue_prefix=f"{env}-", topic_prefix=f"{env}-")`,
     never hand-built `f"{env}-..."` names. Write names without the prefix everywhere (strings passed to

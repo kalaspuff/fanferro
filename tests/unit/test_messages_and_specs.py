@@ -36,7 +36,7 @@ async def test_message_api_and_settlement() -> None:
     assert message.headers == {"x": 1}
     assert message.receive_count == 1
     assert message.attempt == 1
-    assert message.sqs_message_id is None
+    assert message.sqs_message_id  # a built message looks received (fanferro.testing.FakeDelivery)
     assert not message.settled
     await message.retry(delay=5)
     assert message.outcome == "retried"

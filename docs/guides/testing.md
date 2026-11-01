@@ -15,9 +15,57 @@ async def test_rejects_empty_invoices() -> None:
 with the default codecs and returns a decoded `Message`. Explicit settlements are recorded:
 `message.outcome` and `settler.calls` (pass `settler=RecordingSettler()`).
 
+The message looks received, with the transport metadata a handler may depend on: `attempt=`,
+`receive_count=`, `group_id=`, `deduplication_id=`, `sequence_number=`, `topic=` (a name or an
+ARN, so that `m.topic() == "orders"` matches) and `sent_at=`. `attempt=4` alone means the fourth
+receive (`receive_count == 4`, as visibility retries give); with `receive_count=` the earlier
+attempts were requeued copies.
+
+```python
+async def test_gives_up_on_late_reminders() -> None:
+    message = build_message(InvoiceDue("inv-1", amount=100), attempt=4)
+    await remind(message)
+    assert message.outcome == "discarded"
+```
+
 The routing decorators (`@consumer.route`, `@consumer.default`, `@router.route`, `@client.on` and
 the Lambda handler's) return the function they decorate with its own type, so type checkers check
 these calls like any other.
+
+## Routing and outcomes without a broker
+
+`dispatch(target, message_or_body)` runs what a consumer does with one received message, with the
+consumer's own code: `RetryPolicy.max_attempts`, route selection, decoding into the route's type,
+middleware, the handler (with `handler_timeout`), and the settlement the retry and dead-letter
+policies choose for its result (`Retry`, `Reject`, `Requeue`, `Discard`, other errors, unroutable
+messages, decode errors). Nothing is sent: it returns the outcome and the delivery calls the
+consumer made.
+
+```python
+from fanferro.testing import build_message, dispatch
+
+async def test_router() -> None:
+    result = await dispatch(router, build_message(OrderCreated(id=1), topic="orders"))
+    assert result.outcome == "acked"
+    assert result.message.body == OrderCreated(id=1)
+
+    rejected = await dispatch(router, OrderCreated(id=-1), dead_letter_queue=True)
+    assert rejected.outcome == "dead_lettered"
+    assert rejected.calls[0][0] == "dead_letter"   # ("dead_letter", {"reason": ..., "details": {...}})
+```
+
+* `target` is a `Router`, a handler, or a `Consumer` (not started; its client, queue, policies and
+  middleware apply). For a router or handler, consumer options go in as keywords
+  (`retry=RetryPolicy(max_attempts=3)`, `middleware=[...]`, `auto_ack=False`...) and the client is
+  `memory_client()` unless `client=` is given.
+* `calls` lists the delivery calls: `("ack", {})` (an ack or a discard), `("nack", {"delay": s})`
+  (a retry), `("requeue", {"attempt": n, "delay": s})`, `("dead_letter", {"reason": ..., "details":
+  {...}})`, `("release", {})`, `("extend", {"timeout": s})` and `("leave", {})` (left to time
+  out, outcome `None`).
+* Dead-lettering forwards a message only when the queue has a dead-letter queue; otherwise
+  `DeadLetterPolicy.on_missing_queue` applies (by default the message is retried after the
+  backoff's maximum), as on a broker. `dispatch` assumes a dead-letter queue when the queue or the
+  dead-letter policy declares one; `dead_letter_queue=True` or `False` says so explicitly.
 
 ## Flows with the in-memory broker
 
