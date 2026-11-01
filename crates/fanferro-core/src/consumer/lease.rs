@@ -127,13 +127,13 @@ impl Lease {
         id: u64,
         inner: Arc<EngineInner>,
         message: Arc<ReceivedMessage>,
-        permit: OwnedSemaphorePermit,
+        permit: Option<OwnedSemaphorePermit>,
     ) -> Self {
         Self {
             id,
             inner,
             message,
-            permit: Mutex::new(Some(permit)),
+            permit: Mutex::new(permit),
             settling: Mutex::new(None),
             settled: AtomicBool::new(false),
             awaited: AtomicBool::new(false),
@@ -275,6 +275,12 @@ impl Lease {
     /// Hands a settlement command to the settle loop, which sends the outcome to `reply` (right
     /// away if the consumer is closed).
     pub(crate) fn queue(&self, kind: SettleKind, reply: Reply) {
+        if kind == SettleKind::Delete && self.inner.settings.external {
+            // Whoever received the message deletes it (see `ConsumerConfig::external`).
+            self.inner.deleted.lock().push(self.message.receipt_handle.clone());
+            reply.send(Ok(()));
+            return;
+        }
         let Some(queue) = self.inner.settle_queue() else {
             reply.send(Err(Error::Shutdown("the consumer is closed".into())));
             return;
