@@ -8,6 +8,8 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-01
+
 ### Bug fixes
 
 - Errors cross process boundaries: `ProvisioningError` and `BatchPublishError` could not be
@@ -16,6 +18,45 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
   so raised in a `ProcessPoolExecutor` worker, multiprocessing or a task queue they never reached
   the caller. Errors now unpickle with their attributes, leaving out (`None`) only the values that
   do not pickle; copies keep every attribute, and `AttributeValue` and `WireMessage` pickle (#167)
+- **errors:** Native errors name fanferro.errors as their module (#165)
+- **typing:** Pyright and Pylance know fanferro.errors and the other public submodules after import fanferro (#166)
+- **routing:** A route without a type for a Message[Any] handler matches every message (#221)
+- **idempotency:** Messages claimed elsewhere wait without using up attempts; a failed complete() no longer fails the message (#223)
+- **matchers:** And, or and not on matchers raise TypeError instead of dropping a condition (#224)
+- **provisioning:** Subscriptions declared after entering the client are resolved before the topic's next publish (#229)
+- **outbox:** Failed or cancelled relay rounds mark what they published, several relays keep FIFO groups in order, prepared batches report events (#228)
+- **consumer:** A message whose task fails unexpectedly is retried with the backoff instead of staying leased (#230)
+- **payloads:** Consumers fetch payload URLs from S3 endpoints only, and only for pointers with a SHA-256 (#222)
+- **consumer:** A settlement called without await still settles the message (#231)
+- **events:** Hanging or piling async hooks no longer block client.close(), and logging errors never break an operation (#234)
+- Options in seconds take a timedelta everywhere, and handler_timeout=timedelta no longer dead-letters every message (#227)
+- **telemetry:** Record publish exceptions once on producer spans (#232)
+- **memory:** The in-memory broker forgets earlier receipt handles with their message (#238)
+- **telemetry:** Trace context never pushes a message over the attribute limit, and prepare() validates attributes (#236)
+- **consumer:** Stopping no longer waits without a bound for claim-check downloads (#242)
+- **provisioning:** Retry resources whose calls fail transiently or that are not visible yet right after creation (#246)
+- **provisioning:** Subscriptions of the same queue rewrite its policy one at a time however they are resolved (#247)
+
+### Performance
+
+- **consumer:** Receives in flight follow the backlog instead of one per poller (#225)
+- **provisioning:** Client.provision() resolves topics, queues and buckets concurrently, then subscriptions (#226)
+- **aws:** Requests with large bodies share a few connection pools instead of one per 64 KiB of size (#239)
+
+### Documentation
+
+- **parity:** Record the 2026-11-01 probe runs; the filter probe records why a subscription failed (#245)
+
+### Tests
+
+- Fix the flaky outbox relays FIFO-order test (#237)
+- Examples no longer leave a global tracer provider and logging config behind for later tests (#240)
+- Run the runtime and integration tests on uvloop (#241)
+
+### Build and CI
+
+- Building from source requires Rust 1.99 or newer, up from 1.94 (#163)
+- The packaging job keeps its cross-built crates cached and builds an optimized wheel (#243)
 
 ## [0.7.0] - 2026-10-31
 
