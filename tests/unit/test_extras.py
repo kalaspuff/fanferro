@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import re
+from collections import OrderedDict
 from collections.abc import Awaitable, Sequence
 from pathlib import Path
 
@@ -103,6 +104,68 @@ async def test_in_memory_idempotency_store_forgets_expired_keys() -> None:
     await store.claim("newer", lock_ttl=10)
     assert len(store) == 1
     assert await store.claim("done-1", lock_ttl=10) is Claim.ACQUIRED
+
+
+async def test_in_memory_idempotency_store_sweeps_only_expired_keys() -> None:
+    """A sweep stops at the first live key instead of scanning every key the store holds."""
+    now = [0.0]
+    store = InMemoryIdempotencyStore(clock=lambda: now[0], sweep_interval=0, max_entries=None)
+    for index in range(1000):
+        now[0] = float(index)
+        await store.claim(f"k{index}", lock_ttl=10)
+        await store.complete(f"k{index}", ttl=5000)
+    deadlines_read = 0
+
+    class CountingDict(OrderedDict[str, float]):
+        def items(self):  # the sweep reads the oldest entry through items()
+            nonlocal deadlines_read
+            deadlines_read += 1
+            return super().items()
+
+    store._completed = CountingDict(store._completed)
+    now[0] = 5600.0  # the first 601 keys (deadlines 5000-5600) have expired
+    await store.claim("new", lock_ttl=10)
+    assert len(store) == 1000 - 601 + 1
+    assert deadlines_read == 602, "each expired key and the first live one, not the 399 others"
+    assert await store.claim("k600", lock_ttl=10) is Claim.ACQUIRED
+    assert await store.claim("k601", lock_ttl=10) is Claim.COMPLETED
+
+
+async def test_in_memory_idempotency_store_completed_keys_deduplicate_within_their_ttl() -> None:
+    now = [0.0]
+    store = InMemoryIdempotencyStore(clock=lambda: now[0], sweep_interval=1)
+    await store.claim("done", lock_ttl=10)
+    await store.complete("done", ttl=100)
+    for step in range(1, 100):
+        now[0] = float(step)
+        await store.claim(f"other-{step}", lock_ttl=10)
+        assert await store.claim("done", lock_ttl=10) is Claim.COMPLETED, step
+    now[0] = 100.0
+    assert await store.claim("done", lock_ttl=10) is Claim.ACQUIRED
+    assert await store.claim("other-95", lock_ttl=10) is Claim.IN_PROGRESS, "claims stay live for their lock_ttl"
+
+
+async def test_in_memory_idempotency_store_evicts_the_oldest_keys_beyond_max_entries() -> None:
+    store = InMemoryIdempotencyStore(max_entries=3)
+    for key in ("a", "b", "c"):
+        await store.claim(key, lock_ttl=10)
+        await store.complete(key, ttl=100)
+    await store.claim("d", lock_ttl=10)
+    assert len(store) == 3
+    assert await store.claim("a", lock_ttl=10) is Claim.ACQUIRED, "the oldest completed key was forgotten"
+    assert await store.claim("d", lock_ttl=10) is Claim.IN_PROGRESS, "claims are evicted only after completed keys"
+    assert await store.claim("c", lock_ttl=10) is Claim.COMPLETED
+    await store.claim("e", lock_ttl=10)
+    await store.claim("f", lock_ttl=10)
+    assert len(store) == 3
+    assert await store.claim("d", lock_ttl=10) is Claim.ACQUIRED, "with only claims left, the oldest claim goes"
+    assert len(store) == 3
+
+
+@pytest.mark.parametrize(("value", "error"), [(0, ValueError), (-1, ValueError), (1.5, TypeError), (True, TypeError)])
+def test_in_memory_idempotency_store_validates_max_entries(value: object, error: type[Exception]) -> None:
+    with pytest.raises(error, match="max_entries"):
+        InMemoryIdempotencyStore(max_entries=value)  # type: ignore[arg-type]
 
 
 async def test_concurrent_claims_retry() -> None:

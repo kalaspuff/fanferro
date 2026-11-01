@@ -104,8 +104,14 @@ counts every receive toward `max_receive_count`. A handler that hands its messag
 `requeue()`, `release()` or `dead_letter()`) leaves the id unclaimed, so the next delivery runs it
 again. When the store fails to mark an id completed after the handler succeeded, the message is
 still acknowledged and the error reported (`consumer.error`): its claim then expires after
-`lock_ttl`. `InMemoryIdempotencyStore` forgets expired ids; it suits tests and single-process
-workers.
+`lock_ttl`. `InMemoryIdempotencyStore` suits tests and single-process workers. It forgets
+expired ids (a sweep at most once per `sweep_interval`, 60 s, touches only the expired ones) and
+keeps at most `max_entries` ids (100,000 by default; beyond it the oldest completed ids are
+forgotten first, which only weakens deduplication of old messages). Each id takes about 200 bytes,
+and the store holds every id of the last `ttl` seconds up to that bound: at 100 messages per
+second, the default `ttl` of 7 days would be 60 million ids (about 12 GB) with `max_entries=None`.
+Give the in-memory store a shorter `ttl`, such as `idempotent(ttl=timedelta(hours=1))`: duplicates
+from publishers and redeliveries after a lost delete usually arrive within minutes.
 
 ## Fan-out with filtering
 
