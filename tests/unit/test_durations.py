@@ -27,7 +27,8 @@ def test_consumer_options_take_timedelta(option: str, value: float | timedelta) 
     client = fanferro.testing.memory_client()
     scale = 0.1 if option == "settle_linger" else 1  # at most a second
     given = value * scale
-    consumer = client.consumer(client.queue("durations"), _noop, **{option: given})
+    options: dict[str, Any] = {option: given}
+    consumer = client.consumer(client.queue("durations"), _noop, **options)
     stored = getattr(consumer, option)
     assert type(stored) is float
     assert stored == pytest.approx(2.5 * scale)

@@ -26,13 +26,15 @@ import dataclasses
 import json
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Unpack
 
 from fanferro._utils import Duration, seconds
 from fanferro.errors import ConfigurationError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
+
+    from fanferro.options import ProvisioningOverrides
 
 __all__ = [
     "DeadLetterQueue",
@@ -241,22 +243,22 @@ class Provisioning:
     on_error: FailureMode = "raise"
 
     @classmethod
-    def existing(cls, **overrides: Any) -> Provisioning:
+    def existing(cls, **overrides: Unpack[ProvisioningOverrides]) -> Provisioning:
         """The resource must exist; drift is logged (the default)."""
         return cls(**overrides)
 
     @classmethod
-    def create_missing(cls, **overrides: Any) -> Provisioning:
+    def create_missing(cls, **overrides: Unpack[ProvisioningOverrides]) -> Provisioning:
         """Create the resource when missing; drift is logged."""
         return dataclasses.replace(cls(create=True), **overrides)
 
     @classmethod
-    def ensure(cls, **overrides: Any) -> Provisioning:
+    def ensure(cls, **overrides: Unpack[ProvisioningOverrides]) -> Provisioning:
         """Create when missing and update drifted attributes (infrastructure owned by the app)."""
         return dataclasses.replace(cls(create=True, update=True), **overrides)
 
     @classmethod
-    def assume(cls, **overrides: Any) -> Provisioning:
+    def assume(cls, **overrides: Unpack[ProvisioningOverrides]) -> Provisioning:
         """No API calls: derive the URL/ARN from the name (requires an explicit or STS account id)."""
         return dataclasses.replace(cls(lookup=False, verify=False), **overrides)
 

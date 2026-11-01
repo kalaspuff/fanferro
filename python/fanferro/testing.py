@@ -39,13 +39,14 @@ from __future__ import annotations
 
 import datetime
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Unpack, cast
 
 from fanferro._core import AttributeValue, Delivery, MemoryBroker, Payload, new_message_id
 from fanferro._utils import Duration, optional_seconds, seconds
 from fanferro.client import Client
 from fanferro.codecs import CodecRegistry
 from fanferro.consumer import Consumer
+from fanferro.errors import LeaseError
 from fanferro.message_types import MessageTypes
 from fanferro.messages import AttributeInput, HeaderValue, Message, Outcome, to_attribute_value
 from fanferro.provisioning import Provisioning
@@ -55,6 +56,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from fanferro.aws_lambda import LambdaContext, SqsEventHandler
+    from fanferro.options import ClientOptions, ConsumerOptions
     from fanferro.resources import Queue
     from fanferro.routing import Handler
 
@@ -71,17 +73,18 @@ __all__ = [
 ]
 
 
-def memory_client(*, broker: MemoryBroker | None = None, **options: Any) -> Client:
+def memory_client(**options: Unpack[ClientOptions]) -> Client:
     """A client backed by an in-memory broker; resources are created on demand by default.
 
     Args:
-        broker: Share a broker between clients (default: a new one).
-        **options: Any :class:`fanferro.Client` option (``provisioning`` defaults to
-            :meth:`Provisioning.ensure`).
+        **options: Any :class:`fanferro.Client` option (:class:`fanferro.ClientOptions`):
+            ``broker`` shares a broker between clients (default: a new one), ``provisioning``
+            defaults to :meth:`Provisioning.ensure` and ``region`` to ``"us-east-1"``.
     """
     options.setdefault("provisioning", Provisioning.ensure())
     options.setdefault("region", "us-east-1")
-    return Client(broker=broker or MemoryBroker(), **options)
+    broker = options.pop("broker", None)
+    return Client(broker=broker if broker is not None else MemoryBroker(), **options)
 
 
 @dataclass
@@ -349,7 +352,7 @@ async def dispatch(
     *,
     client: Client | None = None,
     dead_letter_queue: bool | None = None,
-    **options: Any,
+    **options: Unpack[ConsumerOptions],
 ) -> DispatchResult:
     """Runs a consumer's processing for one message, without a broker or a running consumer.
 
@@ -378,8 +381,9 @@ async def dispatch(
             dead-lettering forwards the message or applies ``DeadLetterPolicy.on_missing_queue``.
             Default: whether the queue or the dead-letter policy declares one (a started consumer
             keeps the one it found).
-        **options: :class:`~fanferro.Consumer` options of a consumer created for a router or
-            handler (``retry``, ``dead_letter``, ``middleware``, ``handler_timeout``...).
+        **options: :class:`~fanferro.Consumer` options (:class:`fanferro.ConsumerOptions`) of a
+            consumer created for a router or handler (``retry``, ``dead_letter``, ``middleware``,
+            ``handler_timeout``...).
 
     Returns:
         The outcome, the message and the delivery calls.
@@ -406,7 +410,7 @@ async def dispatch(
         elif not isinstance(built.delivery, FakeDelivery):
             raise TypeError("dispatch() takes a message from build_message(), not a received message")
         if built.settled:
-            raise RuntimeError(f"message {built.id} was already settled ({built.outcome})")
+            raise LeaseError(f"message {built.id} was already settled ({built.outcome})")
     else:
         codecs = consumer._client.codecs
         built = build_message(message, codecs=codecs, queue=consumer.queue.name)

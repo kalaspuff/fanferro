@@ -206,7 +206,8 @@ async def consume(
         count()
 
     handler = handle_order if typed else handle_message
-    consumer = client.consumer(queue, handler, **({"concurrency": 100, "wait_time": 1} | (options or {})))
+    consumer_options: dict[str, Any] = {"concurrency": 100, "wait_time": 1} | (options or {})
+    consumer = client.consumer(queue, handler, **consumer_options)
     scenario = "consume-typed" if typed else "consume-io" if io else "consume"
 
     async def work() -> None:

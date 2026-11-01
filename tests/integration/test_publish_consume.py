@@ -284,13 +284,14 @@ async def test_fifo_ids_are_validated_before_sending(client_factory: ClientFacto
     # digits and punctuation; the message id is the deduplication id unless one is given.
     client = client_factory()
     queue = client.queue(f"{name('fifo-ids')}.fifo")
+    invalid: list[tuple[fanferro.QueuePublishOptions, str]] = [
+        ({"group_id": "tenant a"}, "group_id"),
+        ({"group_id": "g" * 129}, "group_id"),
+        ({"group_id": "g", "deduplication_id": "order 1"}, "deduplication_id"),
+        ({"group_id": "g", "id": "order 1"}, "message id"),
+    ]
     async with client:
-        for options, field in [
-            ({"group_id": "tenant a"}, "group_id"),
-            ({"group_id": "g" * 129}, "group_id"),
-            ({"group_id": "g", "deduplication_id": "order 1"}, "deduplication_id"),
-            ({"group_id": "g", "id": "order 1"}, "message id"),
-        ]:
+        for options, field in invalid:
             with pytest.raises(fanferro.ValidationError, match=field):
                 await queue.send({"x": 1}, **options)
         await queue.send({"x": 1}, group_id="tenant-a/eu:1", id="order#1")

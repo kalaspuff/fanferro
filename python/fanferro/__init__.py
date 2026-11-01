@@ -40,6 +40,7 @@ from fanferro import events as events
 from fanferro import message_types as message_types
 from fanferro import messages as messages
 from fanferro import middleware as middleware
+from fanferro import options as options
 from fanferro import payloads as payloads
 from fanferro import policies as policies
 from fanferro import provisioning as provisioning
@@ -102,6 +103,15 @@ from fanferro.messages import (
     Settlement,
 )
 from fanferro.middleware import ConsumeMiddleware, HandlerNext, PrepareNext, PublishContext, PublishMiddleware
+from fanferro.options import (
+    ClientOptions,
+    ConsumerOptions,
+    ProvisioningOverrides,
+    PublishOptions,
+    QueuePublishOptions,
+    SubscriptionOptions,
+    TopicPublishOptions,
+)
 from fanferro.payloads import LargePayloads, PayloadFetch
 from fanferro.policies import Backoff, DeadLetterPolicy, Heartbeat, RateLimit, RetryPolicy, ShutdownPolicy
 from fanferro.provisioning import (
@@ -149,6 +159,7 @@ __all__ = [
     "ClientCounters",
     "ClientHealth",
     "ClientMetrics",
+    "ClientOptions",
     "Codec",
     "CodecError",
     "CodecRegistry",
@@ -156,6 +167,7 @@ __all__ = [
     "ConsumeMiddleware",
     "Consumer",
     "ConsumerHealth",
+    "ConsumerOptions",
     "ConsumerStateError",
     "ConsumerStats",
     "Credentials",
@@ -200,14 +212,17 @@ __all__ = [
     "Provisioning",
     "ProvisioningError",
     "ProvisioningFailure",
+    "ProvisioningOverrides",
     "ProvisioningReport",
     "PublishContext",
     "PublishMiddleware",
+    "PublishOptions",
     "PublishResult",
     "Queue",
     "QueueAttributes",
     "QueueCounts",
     "QueueInfo",
+    "QueuePublishOptions",
     "RateLimit",
     "ReceiveFailure",
     "RedriveFailure",
@@ -227,12 +242,14 @@ __all__ = [
     "SqsManagedEncryption",
     "Subscription",
     "SubscriptionInfo",
+    "SubscriptionOptions",
     "Telemetry",
     "ThrottledError",
     "Timeouts",
     "Topic",
     "TopicAttributes",
     "TopicInfo",
+    "TopicPublishOptions",
     "TransportError",
     "ValidationError",
     "WireMessage",

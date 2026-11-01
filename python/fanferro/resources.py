@@ -11,7 +11,7 @@ import asyncio
 import contextlib
 import time
 from collections.abc import Callable, Iterable, Mapping
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Unpack
 
 from fanferro._core import AttributeValue, Payload, Transport, is_sqs_safe_text, validate_wire
 from fanferro._utils import Duration, LoopLocal, optional_seconds, seconds
@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from fanferro.codecs import Codec
     from fanferro.consumer import Consumer
     from fanferro.envelopes import Envelope
+    from fanferro.options import ConsumerOptions, QueuePublishOptions, SubscriptionOptions, TopicPublishOptions
     from fanferro.payloads import LargePayloads
     from fanferro.routing import Handler, Router
 
@@ -242,6 +243,13 @@ class _Destination(_Resource):
         return self._transport
 
     def _message(self, body: Any, options: Mapping[str, Any]) -> OutgoingMessage:
+        if isinstance(body, OutgoingMessage):
+            if options:
+                raise TypeError(
+                    f"publish options ({', '.join(options)}) cannot be given with an OutgoingMessage: "
+                    "set them on the message instead"
+                )
+            return body
         try:
             return OutgoingMessage(body=body, **options)
         except TypeError as error:
@@ -354,17 +362,8 @@ class _Destination(_Resource):
 
         return await chain_publish(self._client.publish_middleware, final)(context)
 
-    async def prepare(self, body: Any, /, **options: Any) -> PreparedMessage:
-        """Encodes a message without sending it (e.g. to store it in a transactional outbox).
-
-        Accepts the same options as :meth:`publish`. Send it later with ``client.publish_prepared``.
-        Its attributes are checked as a publish checks them before sending (count, names, values),
-        so that a message that could never be sent fails here, before it is stored.
-
-        Raises:
-            ValidationError: The message could not be published as it is.
-        """
-        message = body if isinstance(body, OutgoingMessage) else self._message(body, options)
+    async def _prepare(self, body: Any, options: Mapping[str, Any]) -> PreparedMessage:
+        message = self._message(body, options)
         info = await self._resolve()
         if self._pending_subscriptions:
             await self._resolve_pending_subscriptions()
@@ -372,21 +371,8 @@ class _Destination(_Resource):
         validate_wire(prepared.wire)
         return prepared
 
-    async def publish(self, body: Any, /, **options: Any) -> PublishResult:
-        """Publishes one message.
-
-        Args:
-            body: The application object (pydantic model, dataclass, protobuf message, dict, str,
-                bytes...) or a fully specified :class:`fanferro.OutgoingMessage`.
-            **options: :class:`fanferro.OutgoingMessage` fields: ``type``, ``attributes``,
-                ``headers``, ``id``, ``time``, ``subject``, ``source``, ``data_schema``,
-                ``content_type``, ``group_id``, ``deduplication_id``, ``delay`` (queues),
-                ``sns_subject`` (topics), ``codec``, ``envelope``.
-
-        Returns:
-            The message ids and, for offloaded payloads, where the payload was stored.
-        """
-        message = body if isinstance(body, OutgoingMessage) else self._message(body, options)
+    async def _publish(self, body: Any, options: Mapping[str, Any]) -> PublishResult:
+        message = self._message(body, options)
         client = self._client
         info = self._info if self._info is not None else await self._resolve()
         if self._pending_subscriptions:
@@ -454,22 +440,9 @@ class _Destination(_Resource):
         client._drain_core_events()
         return result
 
-    async def publish_batch(
-        self,
-        messages: Iterable[Any],
-        /,
-        *,
-        raise_on_failure: bool = True,
-        **defaults: Any,
+    async def _publish_batch(
+        self, messages: Iterable[Any], raise_on_failure: bool, defaults: Mapping[str, Any]
     ) -> BatchPublishResult:
-        """Publishes many messages with batch API calls (10 per call), retrying failed entries.
-
-        Args:
-            messages: Bodies or :class:`fanferro.OutgoingMessage` objects.
-            raise_on_failure: Raise :class:`fanferro.errors.BatchPublishError` if any entry failed
-                (the others were still published). With ``False``, inspect ``result.failed``.
-            **defaults: Options applied to plain bodies (as for :meth:`publish`).
-        """
         outgoing = [m if isinstance(m, OutgoingMessage) else self._message(m, defaults) for m in messages]
         if not outgoing:
             return BatchPublishResult(())
@@ -621,7 +594,59 @@ class Topic(_Destination):
             "max_message_size": info.max_message_size,
         }
 
-    def subscribe(self, queue: Queue | str, **options: Any) -> Subscription:
+    async def publish(self, body: Any, /, **options: Unpack[TopicPublishOptions]) -> PublishResult:
+        """Publishes one message.
+
+        Args:
+            body: The application object (pydantic model, dataclass, protobuf message, dict, str,
+                bytes...) or a fully specified :class:`fanferro.OutgoingMessage`.
+            **options: :class:`fanferro.OutgoingMessage` fields (:class:`fanferro.TopicPublishOptions`):
+                ``type``, ``attributes``, ``headers``, ``id``, ``time``, ``subject``, ``source``,
+                ``data_schema``, ``content_type``, ``group_id``, ``deduplication_id``, ``codec``,
+                ``envelope``, ``trace_header``, ``sns_subject`` (shown in email notifications).
+                Not with an :class:`~fanferro.OutgoingMessage`, which holds them itself.
+
+        Returns:
+            The message ids and, for offloaded payloads, where the payload was stored.
+
+        Raises:
+            TypeError: An option is unknown, or options were given with an ``OutgoingMessage``.
+        """
+        return await self._publish(body, options)
+
+    async def prepare(self, body: Any, /, **options: Unpack[TopicPublishOptions]) -> PreparedMessage:
+        """Encodes a message without sending it (e.g. to store it in a transactional outbox).
+
+        Accepts the same options as :meth:`publish`. Send it later with ``client.publish_prepared``.
+        Its attributes are checked as a publish checks them before sending (count, names, values),
+        so that a message that could never be sent fails here, before it is stored.
+
+        Raises:
+            ValidationError: The message could not be published as it is.
+        """
+        return await self._prepare(body, options)
+
+    async def publish_batch(
+        self,
+        messages: Iterable[Any],
+        /,
+        *,
+        raise_on_failure: bool = True,
+        **defaults: Unpack[TopicPublishOptions],
+    ) -> BatchPublishResult:
+        """Publishes many messages with batch API calls (10 per call), retrying failed entries.
+
+        Args:
+            messages: Bodies or :class:`fanferro.OutgoingMessage` objects.
+            raise_on_failure: Raise :class:`fanferro.errors.BatchPublishError` if any entry failed
+                (the others were still published). With ``False``, inspect ``result.failed``.
+                (``client.publish_prepared_batch`` defaults to ``False``.)
+            **defaults: Options applied to the plain bodies (as for :meth:`publish`); an
+                ``OutgoingMessage`` keeps its own.
+        """
+        return await self._publish_batch(messages, raise_on_failure, defaults)
+
+    def subscribe(self, queue: Queue | str, **options: Unpack[SubscriptionOptions]) -> Subscription:
         """Declares a subscription of ``queue`` to this topic (see :meth:`fanferro.Client.subscription`)."""
         return self._client.subscription(self, queue, **options)
 
@@ -803,19 +828,73 @@ class Queue(_Destination):
             "max_message_size": info.max_message_size,
         }
 
-    async def send(self, body: Any, /, **options: Any) -> PublishResult:
+    async def publish(self, body: Any, /, **options: Unpack[QueuePublishOptions]) -> PublishResult:
+        """Publishes one message.
+
+        Args:
+            body: The application object (pydantic model, dataclass, protobuf message, dict, str,
+                bytes...) or a fully specified :class:`fanferro.OutgoingMessage`.
+            **options: :class:`fanferro.OutgoingMessage` fields (:class:`fanferro.QueuePublishOptions`):
+                ``type``, ``attributes``, ``headers``, ``id``, ``time``, ``subject``, ``source``,
+                ``data_schema``, ``content_type``, ``group_id``, ``deduplication_id``, ``codec``,
+                ``envelope``, ``trace_header``, ``delay`` (standard queues, at most 900 seconds).
+                Not with an :class:`~fanferro.OutgoingMessage`, which holds them itself.
+
+        Returns:
+            The message ids and, for offloaded payloads, where the payload was stored.
+
+        Raises:
+            TypeError: An option is unknown, or options were given with an ``OutgoingMessage``.
+        """
+        return await self._publish(body, options)
+
+    async def prepare(self, body: Any, /, **options: Unpack[QueuePublishOptions]) -> PreparedMessage:
+        """Encodes a message without sending it (e.g. to store it in a transactional outbox).
+
+        Accepts the same options as :meth:`publish`. Send it later with ``client.publish_prepared``.
+        Its attributes are checked as a publish checks them before sending (count, names, values),
+        so that a message that could never be sent fails here, before it is stored.
+
+        Raises:
+            ValidationError: The message could not be published as it is.
+        """
+        return await self._prepare(body, options)
+
+    async def publish_batch(
+        self,
+        messages: Iterable[Any],
+        /,
+        *,
+        raise_on_failure: bool = True,
+        **defaults: Unpack[QueuePublishOptions],
+    ) -> BatchPublishResult:
+        """Publishes many messages with batch API calls (10 per call), retrying failed entries.
+
+        Args:
+            messages: Bodies or :class:`fanferro.OutgoingMessage` objects.
+            raise_on_failure: Raise :class:`fanferro.errors.BatchPublishError` if any entry failed
+                (the others were still published). With ``False``, inspect ``result.failed``.
+                (``client.publish_prepared_batch`` defaults to ``False``.)
+            **defaults: Options applied to the plain bodies (as for :meth:`publish`); an
+                ``OutgoingMessage`` keeps its own.
+        """
+        return await self._publish_batch(messages, raise_on_failure, defaults)
+
+    async def send(self, body: Any, /, **options: Unpack[QueuePublishOptions]) -> PublishResult:
         """Sends one message (alias of :meth:`publish`, in SQS terminology)."""
-        return await self.publish(body, **options)
+        return await self._publish(body, options)
 
-    async def send_batch(self, messages: Iterable[Any], /, **options: Any) -> BatchPublishResult:
+    async def send_batch(
+        self, messages: Iterable[Any], /, *, raise_on_failure: bool = True, **options: Unpack[QueuePublishOptions]
+    ) -> BatchPublishResult:
         """Sends many messages (alias of :meth:`publish_batch`)."""
-        return await self.publish_batch(messages, **options)
+        return await self._publish_batch(messages, raise_on_failure, options)
 
-    def consumer(self, handler: Handler | Router | None = None, /, **options: Any) -> Consumer:
+    def consumer(self, handler: Handler | Router | None = None, /, **options: Unpack[ConsumerOptions]) -> Consumer:
         """Creates a consumer for this queue (see :meth:`fanferro.Client.consumer`)."""
         return self._client.consumer(self, handler, **options)
 
-    def subscribe_to(self, topic: Topic | str, **options: Any) -> Subscription:
+    def subscribe_to(self, topic: Topic | str, **options: Unpack[SubscriptionOptions]) -> Subscription:
         """Declares a subscription of this queue to ``topic``."""
         return self._client.subscription(topic, self, **options)
 

@@ -17,7 +17,11 @@ name; plain values (dict, str, bytes...) have no type unless you pass `type=`.
 
 ## Options
 
-Every option is a field of `fanferro.OutgoingMessage`; pass them as keywords or build the object:
+Every option is a field of `fanferro.OutgoingMessage`; pass them as keywords or build the object.
+The keywords are typed (`fanferro.TopicPublishOptions` for topics, `fanferro.QueuePublishOptions`
+for queues), so type checkers and editors complete them and report a misspelt option, `delay=` on
+a topic or `sns_subject=` on a queue. Options given together with an `OutgoingMessage` raise
+`TypeError`: set them on the message instead.
 
 | Option | Meaning |
 | --- | --- |
@@ -32,6 +36,7 @@ Every option is a field of `fanferro.OutgoingMessage`; pass them as keywords or 
 | `delay` | Delivery delay in seconds (standard queues, ≤ 900) |
 | `sns_subject` | SNS `Subject` (topics only) |
 | `codec`, `envelope` | Override codec or envelope for this message |
+| `trace_header` | AWS X-Ray trace header (set by telemetry; pass one to continue a trace) |
 
 ```python
 await topic.publish(
@@ -61,7 +66,8 @@ A call that fails as a whole (throttling, a timeout, a 5xx) has been retried by 
 (`aws_retry`) and is not retried again: its error becomes the result of each of its entries, as
 `publish()` raises it. If some entries still fail, `BatchPublishError` is raised after the others
 were sent (`error.result.failed` lists them).
-Pass `raise_on_failure=False` to inspect `result.failed`.
+Pass `raise_on_failure=False` to inspect `result.failed`. The options of a batch apply to the plain
+bodies; an `OutgoingMessage` in the batch keeps its own.
 
 ## FIFO
 
@@ -80,7 +86,10 @@ SQS accepts up to 1 MiB; SNS 256 KiB by default (topics can raise it with
 
 `await topic.prepare(obj, **options)` does everything except sending and returns a
 `PreparedMessage` that serializes to JSON (`to_json()` / `from_json()`). Send it later with
-`client.publish_prepared(...)`. This is the basis of the [transactional outbox](patterns.md#transactional-outbox).
+`client.publish_prepared(...)`, or many with `client.publish_prepared_batch(...)`, which returns
+failed entries in `result.failed` rather than raising (`raise_on_failure=False` by default, unlike
+`publish_batch`: a relay settles each record by its own outcome). This is the basis of the
+[transactional outbox](patterns.md#transactional-outbox).
 `prepare()` checks the attributes as a publish does (count, names, values) and raises
 `ValidationError` for a message that could not be sent, so it fails before it is stored; offloading
 a payload to S3 takes one more attribute, which only the publish can tell.

@@ -86,7 +86,7 @@ result = await events.publish(InvoicePaid(invoice_id="inv-1", amount_cents=1299)
 | Connect | `fanferro.Client(region=..., endpoint_url=..., credentials=fanferro.Credentials(...))` |
 | Declare | `client.topic(name, attributes=TopicAttributes(...))`, `client.queue(name, attributes=QueueAttributes(...), dead_letter=DeadLetterQueue(...))`, `client.subscription(topic, queue, filter_policy=...)` |
 | Provision now | `async with client:` or `await client.provision()` |
-| Publish | `await topic.publish(obj, **options)`, `await queue.send(obj, **options)` |
+| Publish | `await topic.publish(obj, **options)`, `await queue.send(obj, **options)` (typed: `TopicPublishOptions`/`QueuePublishOptions`; not with an `OutgoingMessage`) |
 | Batch | `await topic.publish_batch([...])`, `await queue.send_batch([...])` |
 | Prepare (outbox) | `prepared = await topic.prepare(obj)`, `prepared.to_json()`, `await client.publish_prepared(prepared)` |
 | Consume | `consumer = client.consumer(queue, ...)`, `@consumer.route(Type)`, `await consumer.run()` |
@@ -100,7 +100,12 @@ result = await events.publish(InvoicePaid(invoice_id="inv-1", amount_cents=1299)
 
 Publish options (keywords or `fanferro.OutgoingMessage`): `type`, `attributes`, `headers`, `id`,
 `time`, `subject`, `source`, `data_schema`, `content_type`, `group_id` (FIFO), `deduplication_id`,
-`delay` (queues), `sns_subject` (topics), `codec`, `envelope`.
+`delay` (queues), `sns_subject` (topics), `codec`, `envelope`, `trace_header`. Pass them either as
+keywords or on an `OutgoingMessage`, never both (`TypeError`). Every set of keyword options is a
+TypedDict in `fanferro.options` (`TopicPublishOptions`, `QueuePublishOptions`, `ConsumerOptions`,
+`SubscriptionOptions`, `ProvisioningOverrides`, `ClientOptions`): type checkers report misspelt
+options, and options shared by several calls can be typed with them
+(`worker: fanferro.ConsumerOptions = {"concurrency": 20}`, then `client.consumer(q, h, **worker)`).
 
 Consumer options: `concurrency`, `prefetch`, `batch_size`, `min_receive_batch`,
 `receive_batch_wait`, `wait_time`, `pollers`, `max_pollers`, `rate_limit`, `visibility_timeout`,

@@ -7,7 +7,7 @@ import contextlib
 import os
 import re
 import signal
-from typing import TYPE_CHECKING, Any, Literal, Self, overload
+from typing import TYPE_CHECKING, Any, Literal, Self, Unpack, overload
 
 from fanferro import _core
 from fanferro._core import CoreClient, MemoryBroker
@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 
     from fanferro.consumer import Consumer
     from fanferro.middleware import ConsumeMiddleware, PublishMiddleware
+    from fanferro.options import ConsumerOptions
     from fanferro.routing import Handler
 
 __all__ = ["Client"]
@@ -850,20 +851,18 @@ class Client:
 
     # -- consumers -------------------------------------------------------------------------
 
-    def consumer(self, queue: Queue | str, handler: Handler | Router | None = None, /, **options: Any) -> Consumer:
+    def consumer(
+        self, queue: Queue | str, handler: Handler | Router | None = None, /, **options: Unpack[ConsumerOptions]
+    ) -> Consumer:
         """Creates a consumer for ``queue``.
 
         Args:
             queue: Queue handle, or a queue name (the client's ``queue_prefix`` is prepended).
             handler: A handler (receives every message), a :class:`~fanferro.Router`, or ``None``
                 to add routes later with ``@consumer.route(...)``.
-            **options: :class:`~fanferro.Consumer` options: ``concurrency``, ``prefetch``,
-                ``batch_size``, ``min_receive_batch``, ``receive_batch_wait``, ``wait_time``,
-                ``pollers``, ``max_pollers``, ``rate_limit``, ``visibility_timeout``, ``heartbeat``,
-                ``retry``, ``dead_letter``, ``shutdown``, ``handler_timeout``, ``ordering``,
-                ``strict_ordering``, ``envelopes``, ``middleware``, ``auto_ack``, ``settle_linger``,
-                ``sns_unwrap``, ``auto_confirm_subscriptions``, ``delete_offloaded_payloads``,
-                ``max_receive_failures``, ``name``.
+            **options: :class:`~fanferro.Consumer` options, listed by :class:`fanferro.ConsumerOptions`
+                (``concurrency``, ``retry``, ``handler_timeout``...) and described in the
+                configuration reference.
         """
         from fanferro.consumer import Consumer
 

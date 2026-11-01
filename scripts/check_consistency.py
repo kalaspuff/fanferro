@@ -19,7 +19,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import fanferro
-from fanferro import _core, errors, stats
+from fanferro import _core, errors, options, stats
 from fanferro.client import Client
 from fanferro.consumer import Consumer
 from fanferro.events import EventKind
@@ -186,6 +186,58 @@ def configuration_reference() -> Iterator[str]:
         for field in dataclasses.fields(cls):
             if f"`{field.name}`" not in paragraph.group(1):
                 yield f"docs/reference/configuration.md (Policies): `{cls.__name__}.{field.name}` is not documented"
+
+
+def _annotations(owner: Callable[..., object] | type, skip: set[str]) -> dict[str, str]:
+    """Parameter (or dataclass field) names and their annotations, as written in the source."""
+    if dataclasses.is_dataclass(owner):
+        fields = {field.name: field.type for field in dataclasses.fields(owner)}
+    else:
+        fields = {name: p.annotation for name, p in inspect.signature(owner).parameters.items()}
+    return {name: str(kind) for name, kind in fields.items() if name not in skip | {"self"}}
+
+
+def _typed_dict(cls: type) -> dict[str, str]:
+    """A TypedDict's keys and their annotations (strings, or forward references to them)."""
+    return {name: str(getattr(kind, "__forward_arg__", kind)) for name, kind in cls.__annotations__.items()}
+
+
+@check
+def option_typed_dicts() -> Iterator[str]:
+    # `**options: Unpack[...]` must offer exactly what the constructor the options go to takes.
+    message = _annotations(fanferro.OutgoingMessage, {"body"})
+    # The message copies attributes and headers into dicts of its own: the options take any mapping.
+    message = {name: re.sub(r"^dict\[", "Mapping[", kind) for name, kind in message.items()}
+    common = {name: kind for name, kind in message.items() if name not in {"delay", "sns_subject"}}
+    expectations: dict[type, tuple[str, dict[str, str]]] = {
+        options.ClientOptions: ("Client.__init__", _annotations(Client.__init__, set())),
+        options.ConsumerOptions: ("Consumer.__init__", _annotations(Consumer.__init__, {"client", "queue", "router"})),
+        options.SubscriptionOptions: (
+            "Client.subscription",
+            _annotations(Client.subscription, {"topic", "queue"}),
+        ),
+        options.ProvisioningOverrides: ("Provisioning", _annotations(fanferro.Provisioning, set())),
+        options.PublishOptions: ("OutgoingMessage (without delay and sns_subject)", common),
+        options.TopicPublishOptions: (
+            "OutgoingMessage (without delay)",
+            {name: kind for name, kind in message.items() if name != "delay"},
+        ),
+        options.QueuePublishOptions: (
+            "OutgoingMessage (without sns_subject)",
+            {name: kind for name, kind in message.items() if name != "sns_subject"},
+        ),
+    }
+    for cls, (source, expected) in expectations.items():
+        actual = _typed_dict(cls)
+        for name in sorted(expected.keys() - actual.keys()):
+            yield f"fanferro.options.{cls.__name__} lacks `{name}: {expected[name]}` of {source}"
+        for name in sorted(actual.keys() - expected.keys()):
+            yield f"fanferro.options.{cls.__name__} has `{name}`, which {source} does not take"
+        for name in sorted(actual.keys() & expected.keys()):
+            if actual[name] != expected[name]:
+                yield (
+                    f"fanferro.options.{cls.__name__}.{name} is `{actual[name]}`, but {source} takes `{expected[name]}`"
+                )
 
 
 @check
