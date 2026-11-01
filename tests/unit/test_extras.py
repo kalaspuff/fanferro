@@ -425,11 +425,13 @@ async def test_several_outbox_relays_keep_each_fifo_group_in_order(memory_client
         relays = [OutboxRelay(memory_client, outbox, batch_size=3) for _ in range(3)]
 
         async def drive(relay: OutboxRelay) -> None:
-            for _ in range(50):
-                if not outbox.pending:
-                    return
-                await relay.run_once()
-                await asyncio.sleep(0)
+            # Until the outbox is empty, not a number of rounds: while one relay holds the claims
+            # of every group and awaits its publish, the others find nothing to claim, and a
+            # budget of rounds ran out before the publish came back (#235).
+            deadline = asyncio.get_running_loop().time() + 10
+            while outbox.pending and asyncio.get_running_loop().time() < deadline:
+                if not await relay.run_once():
+                    await asyncio.sleep(0.001)
 
         await asyncio.gather(*(drive(relay) for relay in relays))
         assert outbox.pending == []
