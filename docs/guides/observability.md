@@ -116,6 +116,19 @@ buffered, settling) plus `fanferro.client.*` counters.
 The same numbers are available on demand without OpenTelemetry:
 
 ```python
-client.metrics()        # {"client": {...}, "consumers": {name: stats}}
-consumer.stats()        # processed, failed, duplicates, unroutable, decode_failures, handler_seconds, engine: {...}
+metrics = client.metrics()          # fanferro.ClientMetrics
+metrics.client.messages_published   # ClientCounters: publishing and payload counters
+metrics.consumers["orders"]         # ConsumerStats of each consumer, by name
+
+stats = consumer.stats()            # fanferro.ConsumerStats
+stats.processed, stats.failed       # also duplicates, unroutable, decode_failures, handler_seconds
+stats.engine.messages_acked         # EngineStats: the receive engine's counters and gauges
+stats.engine.in_flight
+
+counts = await queue.approximate_count()  # fanferro.QueueCounts
+counts.visible, counts.in_flight, counts.delayed, counts.total
 ```
+
+They are frozen dataclasses (`fanferro.stats`), so type checkers catch a misspelt name and editors
+complete them; `as_dict()` gives the plain dictionary, e.g. to log it as JSON
+(`json.dumps(client.metrics().as_dict())`). Their docstrings describe every counter.

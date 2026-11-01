@@ -47,8 +47,8 @@ async def test_full_flow_in_memory() -> None:
         await invoices.send(InvoiceDue("inv-2", 0))
         await consumer.run_until_idle()
         assert invoices.dead_letter_queue is not None
-        assert (await invoices.dead_letter_queue.approximate_count())["visible"] == 1
-        assert consumer.stats()["processed"] == 1
+        assert (await invoices.dead_letter_queue.approximate_count()).visible == 1
+        assert consumer.stats().processed == 1
 
 
 async def main() -> None:

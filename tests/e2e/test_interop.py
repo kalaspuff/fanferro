@@ -205,4 +205,4 @@ async def test_presigned_url_pointers_are_allow_listed(ministack_endpoint: str, 
     assert sum("not an S3 endpoint" in message for message in messages) == 2, messages
     assert sum("over http:// from" in message for message in messages) == 2, messages
     assert sum("without a sha256" in message for message in messages) == 1, messages
-    assert dead_counts["visible"] == len(refused)
+    assert dead_counts.visible == len(refused)
