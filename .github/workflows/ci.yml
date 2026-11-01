@@ -90,6 +90,23 @@ jobs:
           name: coverage
           path: coverage.xml
 
+  uvloop:
+    name: Python 3.12 on uvloop
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync
+      - name: Runtime tests and integration on memory + MiniStack, on uvloop's event loop
+        run: uv run pytest tests/unit/test_awaitables.py tests/unit/test_uvloop.py tests/integration
+        env:
+          FANFERRO_TEST_EVENT_LOOP: uvloop
+
   other-platforms:
     name: Python ${{ matrix.python }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}

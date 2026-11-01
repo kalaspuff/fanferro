@@ -41,6 +41,7 @@ Requirements: Rust (stable, see `rust-toolchain.toml`), [uv](https://docs.astral
 | All checks (what CI runs) | `make check` |
 | Python tests (unit + integration on memory and MiniStack + e2e) | `uv run pytest` |
 | Only fast tests (no emulator) | `uv run pytest -m "not e2e"` |
+| Async tests on uvloop instead of asyncio | `FANFERRO_TEST_EVENT_LOOP=uvloop uv run pytest tests/integration` |
 | Rust tests | `cargo test --workspace` |
 | Rust e2e against an emulator | `FANFERRO_TEST_ENDPOINT_URL=http://localhost:4566 cargo test -p fanferro-core --test aws_emulator` |
 | Lint/format Python | `uv run ruff check --fix python tests examples scripts && uv run ruff format python tests examples scripts` |

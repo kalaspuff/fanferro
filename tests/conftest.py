@@ -5,10 +5,14 @@
   when set; otherwise starts a MiniStack process for the session (installed with the test group).
 * ``backend_client``: parametrized over ``memory`` and ``ministack`` so integration scenarios run
   against both the in-memory broker and a real AWS protocol implementation.
+
+``FANFERRO_TEST_EVENT_LOOP=uvloop`` runs every async test on uvloop's event loop instead of
+asyncio's (tests that create loops themselves, with ``asyncio.run``, keep asyncio's).
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import socket
@@ -39,6 +43,28 @@ def _leaves_global_state_alone() -> Iterator[None]:
     if changes := before.changes(after):
         before.restore()
         pytest.fail("the test changed process-wide state: " + "; ".join(changes), pytrace=False)
+
+
+_EVENT_LOOP = os.environ.get("FANFERRO_TEST_EVENT_LOOP", "asyncio")
+
+if _EVENT_LOOP == "uvloop":
+    try:
+        import uvloop
+    except ImportError as error:
+        raise pytest.UsageError("FANFERRO_TEST_EVENT_LOOP=uvloop needs uvloop (in the test group)") from error
+
+    def pytest_asyncio_loop_factories(
+        config: pytest.Config, item: pytest.Item
+    ) -> dict[str, Callable[[], asyncio.AbstractEventLoop]]:
+        """Runs every async test on uvloop's event loop."""
+        return {"uvloop": uvloop.new_event_loop}
+
+elif _EVENT_LOOP != "asyncio":
+    raise pytest.UsageError(f"FANFERRO_TEST_EVENT_LOOP must be 'asyncio' or 'uvloop', not {_EVENT_LOOP!r}")
+
+
+def pytest_report_header(config: pytest.Config) -> str:
+    return f"event loop of async tests: {_EVENT_LOOP} (FANFERRO_TEST_EVENT_LOOP)"
 
 
 def unique_name(prefix: str = "t") -> str:
