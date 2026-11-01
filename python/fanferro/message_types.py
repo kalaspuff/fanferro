@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from fanferro.errors import ConfigurationError
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -33,7 +35,7 @@ _ALIASES = "__fanferro_type_aliases__"
 def message_type[C: type](name: str, *aliases: str) -> Callable[[C], C]:
     """Class decorator assigning a message type name (and optional accepted aliases)."""
     if not name:
-        raise ValueError("message type names must not be empty")
+        raise ConfigurationError("message type names must not be empty")
 
     def decorate(cls: C) -> C:
         setattr(cls, _ATTRIBUTE, name)

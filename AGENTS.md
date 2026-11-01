@@ -21,6 +21,7 @@ python/fanferro/               Python API (client, resources, consumer, routing,
 python/fanferro/_core.pyi      Type stubs of the native module - keep in sync with crates/fanferro-py
 python/fanferro/AGENT_GUIDE.md Usage guide shipped in the wheel (`fanferro guide`)
 tests/unit|integration|e2e     pytest suites (integration runs on the memory broker AND MiniStack)
+tests/typing/                  typing tests: assert_type checks of the public API (pyrefly checks them)
 examples/                      Runnable examples (executed by tests/unit/test_examples.py)
 docs/                          Guides, reference (events/attributes generated), ADRs
 skills/fanferro/SKILL.md       Skill for agents of applications using fanferro (copy into a project)

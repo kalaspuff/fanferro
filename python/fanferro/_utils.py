@@ -8,6 +8,8 @@ import weakref
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, overload
 
+from fanferro.errors import ConfigurationError
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
@@ -30,7 +32,7 @@ def seconds(value: Duration | None, name: str) -> float | None:
         raise TypeError(f"{name} must be a number of seconds or a timedelta, got {type(value).__name__}")
     result = float(value)
     if result < 0 or result != result:  # negative or NaN
-        raise ValueError(f"{name} must be a non-negative number of seconds, got {value!r}")
+        raise ConfigurationError(f"{name} must be a non-negative number of seconds, got {value!r}")
     return result
 
 

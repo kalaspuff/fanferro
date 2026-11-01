@@ -354,7 +354,7 @@ class Client:
     @overload
     def on(self, selector: KindSelector, hook: EventHook) -> Callable[[], None]: ...
     @overload
-    def on(self, selector: KindSelector) -> Callable[[EventHook], EventHook]: ...
+    def on[H: EventHook](self, selector: KindSelector) -> Callable[[H], H]: ...
     def on(self, selector: KindSelector, hook: EventHook | None = None) -> Any:
         """Registers an event hook (sync or async) for kinds or glob patterns like ``"message.*"``.
 
@@ -364,7 +364,7 @@ class Client:
         if hook is not None:
             return self.events.subscribe(selector, hook)
 
-        def decorate(function: EventHook) -> EventHook:
+        def decorate[H: EventHook](function: H) -> H:
             self.events.subscribe(selector, function)
             return function
 

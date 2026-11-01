@@ -81,11 +81,11 @@ class LargePayloads:
 
     def __post_init__(self) -> None:
         if not self.bucket:
-            raise ValueError("bucket must not be empty")
+            raise ConfigurationError("bucket must not be empty")
         if self.threshold <= 0:
-            raise ValueError("threshold must be positive")
+            raise ConfigurationError("threshold must be positive")
         if self.format == "aws_extended" and self.reference != "s3":
-            raise ValueError("the aws_extended pointer format only supports reference='s3'")
+            raise ConfigurationError("the aws_extended pointer format only supports reference='s3'")
 
     def bucket_name(self, bucket_prefix: str = "") -> str:
         """The AWS name of the bucket: ``bucket_prefix + bucket``, unless ``prefixed`` is ``False``.

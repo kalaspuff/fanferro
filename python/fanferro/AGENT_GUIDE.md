@@ -268,13 +268,20 @@ envelope, AWS X-Ray trace header (`fanferro.Propagation(inject=..., extract=...)
 ## Testing
 
 ```python
-from fanferro.testing import build_message, memory_client
+from fanferro.testing import build_message, dispatch, memory_client
 
 async def test_handler() -> None:
     await record_payment(InvoicePaid(invoice_id="i", amount_cents=1))      # plain function call
     message = build_message(InvoicePaid(invoice_id="i", amount_cents=0))
     with pytest.raises(fanferro.Reject):
         await validating_handler(message)
+    # transport metadata: attempt=, receive_count=, group_id=, topic= (name or ARN), sent_at=...
+    late = build_message(InvoicePaid(invoice_id="i", amount_cents=1), attempt=4, topic="billing")
+
+async def test_router() -> None:
+    # the consumer's routing, decoding, middleware and failure handling for one message, no broker
+    result = await dispatch(router, InvoicePaid(invoice_id="i", amount_cents=0), dead_letter_queue=True)
+    assert result.outcome == "dead_lettered"             # result.calls: the settlement calls
 
 async def test_flow() -> None:
     client = memory_client()            # in-memory SQS/SNS/S3; creates resources on demand

@@ -24,7 +24,7 @@ from datetime import timedelta
 from typing import assert_type
 
 import fanferro
-from fanferro.testing import memory_client
+from fanferro.testing import dispatch, memory_client
 
 
 async def handler(message: fanferro.Message) -> None: ...
@@ -48,6 +48,7 @@ async def calls() -> None:
     assert_type(fanferro.Provisioning.ensure(on_drift="raise"), fanferro.Provisioning)
     shared: fanferro.ConsumerOptions = {"concurrency": 5, "handler_timeout": 30}
     client.consumer(queue, handler, **shared)
+    await dispatch(handler, {}, retry=fanferro.RetryPolicy(max_attempts=3))
 
     memory_client(regoin="eu-north-1")  # error: unexpected-keyword
     await topic.publish({}, group_idd="g")  # error: unexpected-keyword
@@ -62,6 +63,7 @@ async def calls() -> None:
     topic.subscribe(queue, raw_message_delivery="yes")  # error: bad-argument-type
     fanferro.Provisioning.ensure(on_drit="raise")  # error: unexpected-keyword
     fanferro.Provisioning.assume(on_error="explode")  # error: bad-argument-type
+    await dispatch(handler, {}, retyr=None)  # error: unexpected-keyword
 """
 
 

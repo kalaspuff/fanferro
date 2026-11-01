@@ -93,7 +93,7 @@ options shared by several calls: `options: fanferro.ConsumerOptions = {"concurre
 ## `client.consumer(queue, handler_or_router, ...)`
 
 Every option in seconds (`receive_batch_wait`, `wait_time`, `visibility_timeout`, `handler_timeout`,
-`settle_linger`) also takes a `timedelta`; out-of-range values raise `ValueError` when the consumer is
+`settle_linger`) also takes a `timedelta`; out-of-range values raise `ConfigurationError` (also a `ValueError`) when the consumer is
 created.
 
 | Parameter | Default | Description |

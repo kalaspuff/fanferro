@@ -29,6 +29,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Literal, Unpack
 
 from fanferro._utils import Duration, seconds
+from fanferro.errors import ConfigurationError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -449,7 +450,7 @@ class DeadLetterQueue:
 
     def __post_init__(self) -> None:
         if not 1 <= self.max_receive_count <= 1000:
-            raise ValueError("max_receive_count must be between 1 and 1000")
+            raise ConfigurationError("max_receive_count must be between 1 and 1000")
 
 
 def attributes_to_aws(attributes: QueueAttributes | TopicAttributes | Mapping[str, str] | None) -> dict[str, str]:

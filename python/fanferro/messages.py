@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, overload
 from fanferro._core import AttributeValue, Delivery, Payload, WireMessage, is_sqs_safe_text, new_message_id
 from fanferro._utils import Duration, optional_seconds, seconds
 from fanferro.codecs._base import loads_json
-from fanferro.errors import DecodeError
+from fanferro.errors import DecodeError, LeaseError
 
 if TYPE_CHECKING:
     from fanferro.codecs import Codec
@@ -562,7 +562,7 @@ class Message[T]:
 
     def _begin(self, outcome: Outcome) -> Settler | None:
         if self._settled:
-            raise RuntimeError(f"message {self.id} was already settled ({self.outcome})")
+            raise LeaseError(f"message {self.id} was already settled ({self.outcome})")
         self._settled = True
         self.outcome = outcome
         return self._settler
@@ -589,7 +589,8 @@ class Message[T]:
         """Retries later (after ``delay`` seconds or ``timedelta``, or the retry policy's backoff).
 
         Raises:
-            ValueError: If ``delay`` is negative or NaN (the message stays unsettled).
+            ConfigurationError: If ``delay`` is negative or NaN (the message stays unsettled).
+            LeaseError: If the message was already settled.
         """
         delay = optional_seconds(delay, "delay")  # before _begin: an invalid delay settles nothing
         settler = self._begin("retried")
@@ -599,7 +600,8 @@ class Message[T]:
         """Re-enqueues a copy (attempt counter + 1) and deletes this one.
 
         Raises:
-            ValueError: If ``delay`` is negative or NaN (the message stays unsettled).
+            ConfigurationError: If ``delay`` is negative or NaN (the message stays unsettled).
+            LeaseError: If the message was already settled.
         """
         delay = optional_seconds(delay, "delay")  # before _begin: an invalid delay settles nothing
         settler = self._begin("requeued")
@@ -626,11 +628,12 @@ class Message[T]:
         """Keeps the message invisible for ``timeout`` more seconds (heartbeats do this automatically).
 
         Raises:
-            ValueError: If ``timeout`` is negative or NaN.
+            ConfigurationError: If ``timeout`` is negative or NaN.
+            LeaseError: If the message was already settled.
         """
         timeout = seconds(timeout, "timeout")
         if self._settled:
-            raise RuntimeError(f"message {self.id} was already settled ({self.outcome})")
+            raise LeaseError(f"message {self.id} was already settled ({self.outcome})")
         settler = self._settler
         return self._start("extend", settler.extend(self, timeout) if settler is not None else None)
 

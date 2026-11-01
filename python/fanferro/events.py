@@ -34,6 +34,7 @@ from enum import StrEnum
 from typing import Any
 
 from fanferro._utils import is_async_callable
+from fanferro.errors import ConfigurationError
 
 __all__ = [
     "ErrorInfo",
@@ -323,7 +324,7 @@ def _normalize(selector: KindSelector) -> list[str]:
     patterns = [str(selector)] if isinstance(selector, str) else [str(item) for item in selector]
     for pattern in patterns:
         if not any(fnmatch.fnmatchcase(kind.value, pattern) for kind in EventKind):
-            raise ValueError(f"{pattern!r} does not match any event kind")
+            raise ConfigurationError(f"{pattern!r} does not match any event kind")
     return patterns
 
 

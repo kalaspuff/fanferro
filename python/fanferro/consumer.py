@@ -26,14 +26,20 @@ import functools
 import signal
 import time
 from collections import deque
-from typing import TYPE_CHECKING, Any, Literal, Self
+from typing import TYPE_CHECKING, Any, Literal, Self, overload
 
 from fanferro._core import Delivery, FanferroError, LeaseError, ShutdownError
 from fanferro._utils import Duration, optional_seconds, seconds
 from fanferro.actions import Discard, HandlerAction, Reject, Requeue, Retry
 from fanferro.codecs import is_json_content_type, media_type
 from fanferro.envelopes import CloudEvents, CloudEventsProtobuf, Envelope, Raw, default_envelopes, unwrap_first
-from fanferro.errors import ConsumerStateError, HandlerTimeoutError, ResourceNotFoundError, error_details
+from fanferro.errors import (
+    ConfigurationError,
+    ConsumerStateError,
+    HandlerTimeoutError,
+    ResourceNotFoundError,
+    error_details,
+)
 from fanferro.events import EventKind
 from fanferro.messages import Message, Outcome
 from fanferro.middleware import ConsumeMiddleware, chain_consume
@@ -45,6 +51,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from fanferro.client import Client
+    from fanferro.matchers import Matcher, MessagePredicate
     from fanferro.resources import Queue
     from fanferro.routing import Handler, Route, Router
 
@@ -149,8 +156,18 @@ class _Slot:
 class _Settler:
     """Settles messages for the consumer (used by :class:`Message` methods)."""
 
-    def __init__(self, consumer: Consumer) -> None:
+    __slots__ = ("_consumer", "_dead_letter")
+
+    def __init__(self, consumer: Consumer, *, dead_letter: bool | None = None) -> None:
         self._consumer = consumer
+        # Whether a dead-letter queue is known: the consumer's resolved one (None), or what a
+        # settler of fanferro.testing.dispatch() was told.
+        self._dead_letter = dead_letter
+
+    def _has_dead_letter_queue(self) -> bool:
+        if self._dead_letter is not None:
+            return self._dead_letter
+        return bool(self._consumer._dead_letter_url)
 
     def _delivery(self, message: Message[Any]) -> Delivery:
         if message.delivery is None:
@@ -248,7 +265,7 @@ class _Settler:
 
     async def dead_letter(self, message: Message[Any], reason: str, error: BaseException | None) -> None:
         consumer = self._consumer
-        if not consumer._dead_letter_url:
+        if not self._has_dead_letter_queue():
             fallback = consumer.dead_letter_policy.on_missing_queue
             consumer._emit(
                 EventKind.CONFIG_WARNING,
@@ -383,34 +400,36 @@ class Consumer:
         max_receive_failures: int | None = None,
     ) -> None:
         if concurrency < 1:
-            raise ValueError("concurrency must be at least 1")
+            raise ConfigurationError("concurrency must be at least 1")
         if prefetch is not None and prefetch < 0:
-            raise ValueError("prefetch must be non-negative")
+            raise ConfigurationError("prefetch must be non-negative")
         if not 1 <= batch_size <= 10:
-            raise ValueError("batch_size must be between 1 and 10")
+            raise ConfigurationError("batch_size must be between 1 and 10")
         if min_receive_batch is not None and not 1 <= min_receive_batch <= batch_size:
-            raise ValueError(f"min_receive_batch must be between 1 and batch_size ({batch_size})")
+            raise ConfigurationError(f"min_receive_batch must be between 1 and batch_size ({batch_size})")
         receive_batch_wait = seconds(receive_batch_wait, "receive_batch_wait")
         if receive_batch_wait > 20:
-            raise ValueError(f"receive_batch_wait must be between 0 and 20 seconds, got {receive_batch_wait}")
+            raise ConfigurationError(f"receive_batch_wait must be between 0 and 20 seconds, got {receive_batch_wait}")
         wait_time = seconds(wait_time, "wait_time")
         if wait_time > 20:
-            raise ValueError(f"wait_time must be between 0 and 20 seconds, got {wait_time}")
+            raise ConfigurationError(f"wait_time must be between 0 and 20 seconds, got {wait_time}")
         visibility_timeout = optional_seconds(visibility_timeout, "visibility_timeout")
         if visibility_timeout is not None and visibility_timeout > 43200:
-            raise ValueError(f"visibility_timeout must be between 0 and 43200 seconds, got {visibility_timeout}")
+            raise ConfigurationError(
+                f"visibility_timeout must be between 0 and 43200 seconds, got {visibility_timeout}"
+            )
         handler_timeout = optional_seconds(handler_timeout, "handler_timeout")
         if handler_timeout is not None and handler_timeout <= 0:
-            raise ValueError(f"handler_timeout must be positive (or None), got {handler_timeout}")
+            raise ConfigurationError(f"handler_timeout must be positive (or None), got {handler_timeout}")
         if not 1 <= pollers <= 64:
-            raise ValueError("pollers must be between 1 and 64")
+            raise ConfigurationError("pollers must be between 1 and 64")
         if max_pollers is not None and not pollers <= max_pollers <= 64:
-            raise ValueError(f"max_pollers must be between pollers ({pollers}) and 64")
+            raise ConfigurationError(f"max_pollers must be between pollers ({pollers}) and 64")
         settle_linger = seconds(settle_linger, "settle_linger")
         if settle_linger > 1:
-            raise ValueError(f"settle_linger must be between 0 and 1 second, got {settle_linger}")
+            raise ConfigurationError(f"settle_linger must be between 0 and 1 second, got {settle_linger}")
         if max_receive_failures is not None and max_receive_failures < 1:
-            raise ValueError(f"max_receive_failures must be at least 1 (or None), got {max_receive_failures}")
+            raise ConfigurationError(f"max_receive_failures must be at least 1 (or None), got {max_receive_failures}")
         self._client = client
         self.queue = queue
         self.router = router
@@ -480,11 +499,31 @@ class Consumer:
 
     # -- routing shortcuts -----------------------------------------------------------------
 
-    def route(self, *args: Any, **kwargs: Any) -> Any:
+    @overload
+    def route[H: Handler](self, handler: H, /) -> H: ...
+    @overload
+    def route[H: Handler](
+        self,
+        message_type: type | str | None = None,
+        /,
+        *,
+        when: Matcher | MessagePredicate | None = None,
+        priority: int = 0,
+        name: str | None = None,
+    ) -> Callable[[H], H]: ...
+    def route(
+        self,
+        message_type: Any = None,
+        /,
+        *,
+        when: Matcher | MessagePredicate | None = None,
+        priority: int = 0,
+        name: str | None = None,
+    ) -> Any:
         """Registers a route on this consumer's router (see :meth:`fanferro.Router.route`)."""
-        return self.router.route(*args, **kwargs)
+        return self.router.route(message_type, when=when, priority=priority, name=name)
 
-    def default(self, handler: Handler) -> Handler:
+    def default[H: Handler](self, handler: H) -> H:
         """Registers the fallback route (see :meth:`fanferro.Router.default`)."""
         return self.router.default(handler)
 
@@ -1284,6 +1323,12 @@ class Consumer:
                 return await self._payload_gone(delivery)
             self._stats.decode_failures += 1
             return await self._undecodable(delivery, error)
+        return await self._process_message(message, slot, started)
+
+    async def _process_message(self, message: Message[Any], slot: _Slot, started: float) -> Outcome | None:
+        """Handles a message built from a delivery (or by :func:`fanferro.testing.dispatch`)."""
+        delivery = message.delivery
+        assert delivery is not None
         message._slot = slot
         telemetry = self._client._telemetry
         with telemetry.process_span(message, self.queue.name) as span:
@@ -1311,6 +1356,26 @@ class Consumer:
                 await self._confirm_settlements(message)
         # None when a settlement failed: the message comes back, so a FIFO group must wait for it.
         return None if message._settlement_failed else message.outcome
+
+    def _settler_of(self, message: Message[Any]) -> _Settler:
+        """The settler of ``message``: the consumer's, or the one :func:`fanferro.testing.dispatch` gave it."""
+        settler = message._settler
+        return settler if isinstance(settler, _Settler) else self._settler
+
+    async def _dispatch(self, message: Message[Any], *, dead_letter_queue: bool | None) -> Outcome | None:
+        """Processes one message outside the receive loop (:func:`fanferro.testing.dispatch`).
+
+        ``dead_letter_queue``: whether a dead-letter queue is known (``None``: the consumer's).
+        """
+        message._settler = _Settler(self, dead_letter=dead_letter_queue)
+        semaphore = asyncio.Semaphore(1)
+        await semaphore.acquire()
+        self._active += 1
+        slot = _Slot(self, semaphore)
+        try:
+            return await self._process_message(message, slot, monotonic())
+        finally:
+            slot.release()
 
     async def _handle(self, message: Message[Any], slot: _Slot) -> None:
         """Routes, decodes and runs the handler while holding ``slot``, then settles without it."""
@@ -1374,7 +1439,7 @@ class Consumer:
                 ):
                     # Awaited: a sequenced group's next message starts once the delete is confirmed.
                     message._begin("acked")
-                    await self._settler.ack(message)
+                    await self._settler_of(message).ack(message)
                 else:
                     # The engine deletes the message in the background (batched, tracked until the
                     # consumer closes, failures reported as `message.ack_failed` events): no
@@ -1539,12 +1604,14 @@ class Consumer:
             if copy:
                 # The copy's receive is attempt (attempt - 1) + 1: the same attempt as this one.
                 attempt = message.attempt - 1
-                await self._settler._call(
+                await self._settler_of(message)._call(
                     message, lambda delivery: delivery.requeue(attempt, min(delay, _MAX_REQUEUE_DELAY))
                 )
             else:
                 self._note_handed_back(delivery)  # its next receive here is not an attempt
-                await self._settler._call(message, lambda delivery: delivery.nack(min(delay, _MAX_VISIBILITY_DELAY)))
+                await self._settler_of(message)._call(
+                    message, lambda delivery: delivery.nack(min(delay, _MAX_VISIBILITY_DELAY))
+                )
         except (LeaseError, ShutdownError) as settle_error:
             self._emit(
                 EventKind.MESSAGE_ACK_FAILED,
@@ -1567,7 +1634,7 @@ class Consumer:
             return
         message._begin("retried")
         try:
-            await self._settler.perform(message, action, reason, error)
+            await self._settler_of(message).perform(message, action, reason, error)
         except (LeaseError, ShutdownError) as settle_error:
             self._emit(
                 EventKind.MESSAGE_ACK_FAILED,

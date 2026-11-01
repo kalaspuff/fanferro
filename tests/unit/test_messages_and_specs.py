@@ -36,12 +36,12 @@ async def test_message_api_and_settlement() -> None:
     assert message.headers == {"x": 1}
     assert message.receive_count == 1
     assert message.attempt == 1
-    assert message.sqs_message_id is None
+    assert message.sqs_message_id  # a built message looks received (fanferro.testing.FakeDelivery)
     assert not message.settled
     await message.retry(delay=5)
     assert message.outcome == "retried"
     assert settler.calls == [("retry", {"delay": 5, "error": None})]
-    with pytest.raises(RuntimeError, match="already settled"):
+    with pytest.raises(fanferro.LeaseError, match="already settled"):
         await message.ack()
     with pytest.raises(RuntimeError):
         await message.extend(10)

@@ -10,7 +10,7 @@ pickle (``None``), and copy with all of them.
 Hierarchy::
 
     FanferroError
-    ├── ConfigurationError
+    ├── ConfigurationError (also a ValueError)
     ├── ValidationError
     │   └── MessageTooLargeError
     ├── AwsError
@@ -21,7 +21,7 @@ Hierarchy::
     ├── PayloadError
     │   └── PayloadIntegrityError
     ├── EnvelopeError
-    ├── LeaseError
+    ├── LeaseError (also a RuntimeError)
     ├── ShutdownError
     ├── ProvisioningError
     ├── ResourceUnavailableError
