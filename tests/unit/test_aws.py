@@ -84,6 +84,9 @@ class TestS3:
             aws.S3Event.from_json({"Records": [{**json.loads(S3_PUT)["Records"][0], "eventTime": "yesterday"}]})
         with pytest.raises(fanferro.DecodeError, match="expected a list"):
             aws.S3Event.from_json({"Records": {}})
+        for time in (1e30, -1e20, float("inf"), float("nan")):  # numbers out of datetime's range
+            with pytest.raises(fanferro.DecodeError, match="expected a time"):
+                aws.S3Event.from_json({"Records": [{**json.loads(S3_PUT)["Records"][0], "eventTime": time}]})
         record = json.loads(S3_PUT)["Records"][0]
         for size in ("²", "1.5", "", "--1"):
             record["s3"]["object"]["size"] = size
