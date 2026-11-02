@@ -895,12 +895,25 @@ class Consumer:
         if self._failure is not None:
             raise self._failure
 
-    async def run_until_idle(self, *, idle_for: Duration = 0.3, timeout: Duration = 30.0) -> None:
+    async def run_until_idle(
+        self, *, idle_for: Duration = 0.3, timeout: Duration = 30.0, pending: bool = False
+    ) -> None:
         """Processes messages until nothing has happened for ``idle_for`` seconds, then stops.
 
-        Intended for tests and batch jobs. Raises :class:`TimeoutError` if the queue does not go
-        idle within ``timeout`` seconds (the consumer is stopped either way). Both take seconds or
-        a ``timedelta``.
+        Intended for tests and batch jobs. The queue is idle when it has no visible messages left;
+        with ``pending=True`` it must also have none in flight or delayed, so that messages waiting
+        for a retry (their visibility timeout) or sent with a delay are processed before this
+        returns. Messages another consumer holds count as in flight too.
+
+        Args:
+            idle_for: How long nothing must have happened (seconds or a ``timedelta``).
+            timeout: How long to wait at most (seconds or a ``timedelta``).
+            pending: Also wait for in-flight and delayed messages (SQS's approximate counts, which
+                real SQS updates with a delay; exact on the in-memory broker).
+
+        Raises:
+            TimeoutError: If the queue does not go idle within ``timeout`` (the consumer is stopped
+                either way).
         """
         idle_for = seconds(idle_for, "idle_for")
         timeout = seconds(timeout, "timeout")
@@ -916,9 +929,9 @@ class Consumer:
                     engine_in_flight = int(self._engine.stats().get("metrics", {}).get("in_flight", 0))
                 idle = not self._tasks and engine_in_flight == 0
                 if idle and now - self._last_activity >= idle_for:
-                    # Locally idle: make sure the queue has nothing visible left either.
+                    # Locally idle: make sure the queue has nothing visible (or pending) left either.
                     counts = await self.queue.approximate_count()
-                    if counts.visible == 0:
+                    if (counts.total if pending else counts.visible) == 0:
                         return
                     self._last_activity = time.monotonic()
                 if now >= deadline:

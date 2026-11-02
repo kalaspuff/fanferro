@@ -335,6 +335,8 @@ pub struct MessageSnapshot {
     pub receive_count: u32,
     /// Whether the message is currently in flight (invisible after a receive).
     pub in_flight: bool,
+    /// Whether the message was sent with a delay that has not run out yet (it was never received).
+    pub delayed: bool,
     /// FIFO group id.
     pub group_id: Option<String>,
 }
@@ -399,6 +401,7 @@ impl MemoryBroker {
                 attributes: m.attributes.clone(),
                 receive_count: m.receive_count,
                 in_flight: m.in_flight && m.available_at > now,
+                delayed: !m.in_flight && m.available_at > now,
                 group_id: m.group_id.clone(),
             })
             .collect())

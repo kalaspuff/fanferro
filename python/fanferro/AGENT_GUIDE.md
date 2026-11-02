@@ -112,7 +112,7 @@ result = await events.publish(InvoicePaid(invoice_id="inv-1", amount_cents=1299)
 | Dead-letter queue | `await queue.dead_letter_queue.peek(limit=20)` (`message.dead_letter_info`, `message.source`), `await dlq.redrive(max_per_second=50)` back to each message's source with a fresh retry budget (`to=`, `limit=`, `reset_attempts=False`); shell: `fanferro dlq stats\|peek\|redrive --queue-url URL` |
 | Observe | `client.on("message.*", hook)`, `LoggingConfig(...)`, `Telemetry(...)`, `client.metrics().consumers[name].engine.messages_acked`, `consumer.stats().processed`, `(await queue.approximate_count()).visible` (typed objects; `.as_dict()` for a dict) |
 | Health checks | `client.health().healthy()` (liveness), `.ready()` (readiness), `.problems()` (why not); `consumer.health().last_error`, `.receive_gap`; `max_receive_failures=N` makes `run()` raise a receive error that is not retryable instead of retrying forever |
-| Test | `fanferro.testing.memory_client()`, `fanferro.testing.build_message(obj)`, `consumer.run_until_idle()` |
+| Test | `fanferro.testing.memory_client()`, `fanferro.testing.build_message(obj)`, `consumer.run_until_idle(pending=True)` (also waits for retries and delays), `testing.drain(queue)`, `testing.consume_until(consumer, cond)`, `testing.wait_for(cond)`, `testing.record_published(client)`, `testing.peek(queue)` |
 | Consume in AWS Lambda | `handler = fanferro.aws_lambda.sqs_handler(client, router, queue=queue)` (SQS event source mapping with `ReportBatchItemFailures`); test with `fanferro.testing.invoke_sqs_handler(handler, queue)` |
 
 Publish options (keywords or `fanferro.OutgoingMessage`): `type`, `attributes`, `headers`, `id`,
@@ -285,7 +285,7 @@ envelope, AWS X-Ray trace header (`fanferro.Propagation(inject=..., extract=...)
 ## Testing
 
 ```python
-from fanferro.testing import build_message, dispatch, memory_client
+from fanferro.testing import build_message, dispatch, drain, memory_client, record_published
 
 async def test_handler() -> None:
     await record_payment(InvoicePaid(invoice_id="i", amount_cents=1))      # plain function call
@@ -304,8 +304,12 @@ async def test_flow() -> None:
     client = memory_client()            # in-memory SQS/SNS/S3; creates resources on demand
     ...declare resources and consumers like production code...
     async with client:
-        await topic.publish(event)
-        await consumer.run_until_idle()
+        with record_published(client) as published:     # what the flow publishes
+            await topic.publish(event)
+            await consumer.run_until_idle(pending=True)  # retries and delays included
+        assert published.bodies(receipts) == [ReceiptSent(invoice_id="i")]
+        assert await drain(queue.dead_letter_queue) == []  # receives and acks; message.json()
+        # consume_until(consumer, lambda: len(seen) == 2), wait_for(cond), peek(queue): no receive
 ```
 
 ## AWS Lambda

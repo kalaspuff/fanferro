@@ -14,6 +14,13 @@
   source mapping would invoke a function with; :func:`invoke_sqs_handler` also invokes a
   :func:`fanferro.aws_lambda.sqs_handler` function with it and deletes the records it did not
   report as failed, as the event source mapping does.
+* Flows: :func:`wait_for` waits for a condition, :func:`consume_until` runs a consumer until one
+  holds, :func:`drain` receives (and acks) everything a queue holds,
+  :meth:`Consumer.run_until_idle(pending=True) <fanferro.Consumer.run_until_idle>` also waits for
+  retried and delayed messages.
+* :func:`record_published` - records every message a client publishes (destination, body, type,
+  attributes, group id) for assertions.
+* :func:`peek` - what a queue of the in-memory broker holds, without receiving it.
 
 Example::
 
@@ -37,9 +44,12 @@ Example::
 
 from __future__ import annotations
 
+import asyncio
 import datetime
+import inspect
+import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Unpack, cast
+from typing import TYPE_CHECKING, Any, Literal, Self, Unpack, cast
 
 from fanferro._core import AttributeValue, Delivery, MemoryBroker, Payload, new_message_id
 from fanferro._utils import Duration, optional_seconds, seconds
@@ -48,28 +58,47 @@ from fanferro.codecs import CodecRegistry
 from fanferro.consumer import Consumer
 from fanferro.errors import LeaseError
 from fanferro.message_types import MessageTypes
-from fanferro.messages import AttributeInput, HeaderValue, Message, Outcome, to_attribute_value
+from fanferro.messages import (
+    _HIDDEN_ATTRIBUTES,
+    _INTERNAL_PREFIX,
+    AttributeInput,
+    DeadLetterInfo,
+    HeaderValue,
+    Message,
+    Outcome,
+    PreparedMessage,
+    to_attribute_value,
+)
 from fanferro.provisioning import Provisioning
 from fanferro.routing import Router
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Awaitable, Callable, Iterator, Mapping
 
     from fanferro.aws_lambda import LambdaContext, SqsEventHandler
+    from fanferro.middleware import PrepareNext, PublishContext
     from fanferro.options import ClientOptions, ConsumerOptions
-    from fanferro.resources import Queue
+    from fanferro.resources import Queue, Topic
     from fanferro.routing import Handler
 
 __all__ = [
     "DispatchResult",
     "FakeDelivery",
     "MemoryBroker",
+    "PublishRecorder",
+    "PublishedMessage",
+    "QueuedMessage",
     "RecordingSettler",
     "build_message",
+    "consume_until",
     "dispatch",
+    "drain",
     "invoke_sqs_handler",
     "memory_client",
+    "peek",
     "receive_sqs_event",
+    "record_published",
+    "wait_for",
 ]
 
 
@@ -485,3 +514,341 @@ async def invoke_sqs_handler(
         core = await queue._client._core()
         await core.delete_records(queue.url, processed)
     return response
+
+
+# -- flows ------------------------------------------------------------------------------------
+
+
+async def wait_for(
+    condition: Callable[[], bool | Awaitable[bool]],
+    *,
+    timeout: Duration = 15.0,
+    interval: Duration = 0.05,
+) -> None:
+    """Waits until ``condition()`` is true, checking it every ``interval`` seconds.
+
+    Example::
+
+        await wait_for(lambda: len(seen) == 3)
+        await wait_for(lambda: consumer.stats().engine.receive_requests >= 1, timeout=5)
+
+    Args:
+        condition: Returns whether the wait is over (or an awaitable of it, e.g. an ``async def``
+            that reads a queue's counts).
+        timeout: How long to wait at most (seconds or a ``timedelta``).
+        interval: How long to sleep between checks (seconds or a ``timedelta``).
+
+    Raises:
+        TimeoutError: If the condition is still false after ``timeout``.
+    """
+    limit = seconds(timeout, "timeout")
+    pause = seconds(interval, "interval")
+    deadline = time.monotonic() + limit
+    while True:
+        result = condition()
+        if inspect.isawaitable(result):
+            result = await result
+        if result:
+            return
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"condition not met within {limit} seconds")
+        await asyncio.sleep(pause)
+
+
+async def consume_until(
+    consumer: Consumer,
+    condition: Callable[[], bool | Awaitable[bool]],
+    *,
+    timeout: Duration = 20.0,
+) -> None:
+    """Runs ``consumer`` until ``condition()`` is true, then stops it (also when the wait fails).
+
+    The consumer is started unless it is running. Unlike :meth:`Consumer.run_until_idle
+    <fanferro.Consumer.run_until_idle>`, this waits for something to happen (a handler saw three
+    messages, a hook got an event), not for the queue to be empty.
+
+    Example::
+
+        await consume_until(consumer, lambda: len(seen) == 3)
+
+    Raises:
+        TimeoutError: If the condition is still false after ``timeout`` (seconds or a ``timedelta``).
+    """
+    if consumer.state != "running":
+        await consumer.start()
+    try:
+        await wait_for(condition, timeout=timeout)
+    finally:
+        await consumer.stop()
+
+
+async def drain(
+    queue: Queue,
+    *,
+    timeout: Duration = 15.0,
+    idle_for: Duration | None = None,
+    pending: bool = False,
+) -> list[Message[bytes]]:
+    """Receives everything ``queue`` holds, acks it and returns the messages in the order received.
+
+    Runs a consumer of the queue's client with a handler that keeps every message, until the queue
+    is idle (:meth:`Consumer.run_until_idle <fanferro.Consumer.run_until_idle>`). The bodies are not
+    decoded into classes: read them with ``message.json()`` or ``message.data`` (the encoded bytes),
+    ``message.type`` and ``message.attributes``. Useful to assert on what reached a queue, a
+    dead-letter queue included::
+
+        dead = await drain(orders.dead_letter_queue)
+        assert [m.json() for m in dead] == [{"id": 1}]
+        assert dead[0].dead_letter_info.reason == "handler_error"
+
+    Args:
+        queue: The queue (it is resolved if needed).
+        timeout: How long to wait at most (seconds or a ``timedelta``).
+        idle_for: How long the queue must be quiet (default: 0.3 seconds on the in-memory broker,
+            1 second elsewhere, where a receive can come back empty while messages are on their
+            way).
+        pending: Also wait for messages in flight (held by another consumer, or waiting for a
+            retry) and delayed ones, and receive them too.
+
+    Raises:
+        TimeoutError: If the queue does not go idle within ``timeout``.
+    """
+    client = queue._client
+    received: list[Message[bytes]] = []
+
+    async def collect(message: Message[bytes]) -> None:
+        received.append(message)
+
+    consumer = client.consumer(queue, collect, wait_time=1, name=f"drain-{queue.name}")
+    quiet = idle_for if idle_for is not None else (0.3 if client.broker is not None else 1.0)
+    await consumer.run_until_idle(idle_for=quiet, timeout=timeout, pending=pending)
+    return received
+
+
+# -- published messages -----------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class PublishedMessage:
+    """A message :func:`record_published` saw being prepared for sending, as it goes out."""
+
+    destination: str
+    """The queue or topic name (with the client's ``queue_prefix``/``topic_prefix``)."""
+    kind: Literal["queue", "topic"]
+    """Whether it went to a queue or a topic."""
+    body: Any
+    """The body as passed to ``publish`` (not encoded)."""
+    type: str | None
+    """The message type name (the registered name of the body's class unless given)."""
+    id: str
+    """The fanferro message id."""
+    attributes: dict[str, AttributeInput]
+    """The application's message attributes (publish middleware's included, fanferro's own not)."""
+    headers: dict[str, HeaderValue]
+    """The envelope headers."""
+    group_id: str | None
+    """The FIFO message group id."""
+    deduplication_id: str | None
+    """The FIFO deduplication id, if one was given."""
+    delay: float | None
+    """The delivery delay in seconds."""
+    prepared: PreparedMessage
+    """The encoded message (``prepared.wire`` holds the body and attributes as sent)."""
+
+
+class PublishRecorder:
+    """Records the messages a client publishes; made by :func:`record_published`.
+
+    It is a publish middleware of the client while it records, the last (innermost) one when it
+    started: it sees each message after the other middleware changed it. A message is recorded
+    once it was encoded for sending, by ``publish``, ``send``, ``publish_batch`` and ``prepare``
+    (a prepared message is recorded when it is prepared, not when ``publish_prepared`` sends it);
+    one whose send then fails stays recorded.
+
+    The recorder is a sequence of :class:`PublishedMessage`, in the order they were prepared.
+    """
+
+    def __init__(self, client: Client) -> None:
+        self._client = client
+        self.messages: list[PublishedMessage] = []
+        """The recorded messages, in order."""
+
+    @property
+    def recording(self) -> bool:
+        """Whether the recorder is installed as a publish middleware of its client."""
+        return any(item == self._record for item in self._client.publish_middleware)
+
+    def start(self) -> None:
+        """Starts recording (again); :func:`record_published` already did."""
+        if not self.recording:
+            self._client.publish_middleware.append(self._record)
+
+    def stop(self) -> None:
+        """Stops recording (the recorded messages stay)."""
+        middleware = self._client.publish_middleware
+        middleware[:] = [item for item in middleware if item != self._record]
+
+    def clear(self) -> None:
+        """Forgets the recorded messages."""
+        self.messages.clear()
+
+    def __enter__(self) -> Self:
+        self.start()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.stop()
+
+    async def _record(self, context: PublishContext, call_next: PrepareNext) -> PreparedMessage:
+        prepared = await call_next(context)
+        message = context.message
+        self.messages.append(
+            PublishedMessage(
+                destination=context.destination,
+                kind=context.kind,
+                body=message.body,
+                type=prepared.message_type,
+                id=prepared.message_id,
+                attributes=dict(message.attributes),
+                headers=dict(message.headers),
+                group_id=prepared.group_id,
+                deduplication_id=message.deduplication_id,
+                delay=prepared.delay,
+                prepared=prepared,
+            )
+        )
+        return prepared
+
+    def to(self, destination: Topic | Queue | str) -> list[PublishedMessage]:
+        """The messages sent to ``destination``: a topic or queue, or its name.
+
+        A name matches with or without the client's ``topic_prefix``/``queue_prefix``.
+        """
+        if isinstance(destination, str):
+            client = self._client
+            names = {destination, client.topic_prefix + destination, client.queue_prefix + destination}
+            return [message for message in self.messages if message.destination in names]
+        return [
+            message
+            for message in self.messages
+            if message.destination == destination.name and message.kind == destination.kind
+        ]
+
+    def bodies(self, destination: Topic | Queue | str | None = None) -> list[Any]:
+        """The bodies of the recorded messages, of those sent to ``destination`` if it is given."""
+        messages = self.messages if destination is None else self.to(destination)
+        return [message.body for message in messages]
+
+    def __len__(self) -> int:
+        return len(self.messages)
+
+    def __iter__(self) -> Iterator[PublishedMessage]:
+        return iter(self.messages)
+
+    def __getitem__(self, index: int) -> PublishedMessage:
+        return self.messages[index]
+
+    def __repr__(self) -> str:
+        return f"PublishRecorder(messages={len(self.messages)}, recording={self.recording})"
+
+
+def record_published(client: Client) -> PublishRecorder:
+    """Records every message ``client`` publishes from now on, for assertions.
+
+    Use it as a context manager to stop recording at its end, or keep the recorder for the rest
+    of the test (:meth:`PublishRecorder.stop` stops it)::
+
+        with record_published(client) as published:
+            await place_order(client, order_id=1)
+        assert published.bodies(orders) == [OrderPlaced(order_id=1)]
+        assert published[0].attributes == {"tenant": "acme"}
+
+    Works on any backend; nothing is published differently. See :class:`PublishRecorder` for what
+    is recorded.
+    """
+    recorder = PublishRecorder(client)
+    recorder.start()
+    return recorder
+
+
+# -- queue contents ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class QueuedMessage:
+    """A message in a queue of the in-memory broker, as :func:`peek` shows it."""
+
+    sqs_message_id: str
+    """The SQS message id."""
+    body: str
+    """The SQS body: the encoded message in its envelope (an SNS notification when the queue is
+    subscribed without raw delivery, a claim-check pointer when the payload was offloaded)."""
+    raw_attributes: dict[str, AttributeValue]
+    """All message attributes, fanferro's own included (``fanferro.type``, ``fanferro.attempt``...)."""
+    receive_count: int
+    """How many times the message was received."""
+    in_flight: bool
+    """Whether it was received and is invisible until its visibility timeout runs out (a retry)."""
+    delayed: bool
+    """Whether it was sent with a delay that has not run out yet."""
+    group_id: str | None
+    """The FIFO message group id."""
+
+    @property
+    def visible(self) -> bool:
+        """Whether a receive could return the message now (FIFO group order aside)."""
+        return not self.in_flight and not self.delayed
+
+    @property
+    def attributes(self) -> dict[str, AttributeValue]:
+        """Message attributes without fanferro's internal ones."""
+        return {
+            name: value
+            for name, value in self.raw_attributes.items()
+            if not name.startswith(_INTERNAL_PREFIX) and name not in _HIDDEN_ATTRIBUTES
+        }
+
+    @property
+    def type(self) -> str | None:
+        """The message type fanferro sent in the ``fanferro.type`` attribute (``None`` without one)."""
+        value = self.raw_attributes.get("fanferro.type")
+        return None if value is None else str(value.value)
+
+    @property
+    def dead_letter_info(self) -> DeadLetterInfo | None:
+        """Why fanferro dead-lettered the message (``None`` unless it is a dead-lettered copy)."""
+        value = self.raw_attributes.get("fanferro.dead-letter")
+        return None if value is None else DeadLetterInfo.from_json(str(value.value))
+
+
+async def peek(queue: Queue) -> list[QueuedMessage]:
+    """Every message a queue of the in-memory broker holds, in send order, without receiving it.
+
+    Unlike :meth:`Queue.peek <fanferro.Queue.peek>` (any backend), nothing is received: receive
+    counts and visibility stay as they are, and in-flight and delayed messages are listed too.
+    Messages that were deleted (acked, dead-lettered) are gone::
+
+        await consumer.run_until_idle()
+        [retried] = await peek(orders)
+        assert retried.in_flight and retried.receive_count == 1
+
+    Raises:
+        TypeError: If the queue's client is not backed by a :class:`MemoryBroker` (see
+            :func:`memory_client`).
+    """
+    broker = queue._client.broker
+    if broker is None:
+        raise TypeError("peek() reads the in-memory broker; use a client from memory_client(), or Queue.peek() on SQS")
+    info = await queue.resolve()
+    return [
+        QueuedMessage(
+            sqs_message_id=message["message_id"],
+            body=message["body"],
+            raw_attributes=message["attributes"],
+            receive_count=message["receive_count"],
+            in_flight=message["in_flight"],
+            delayed=message["delayed"],
+            group_id=message["group_id"],
+        )
+        for message in broker.queue_messages(info.url)
+    ]

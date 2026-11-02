@@ -475,6 +475,22 @@ async fn long_poll_wakes_on_send_and_delays_apply() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn snapshots_tell_delayed_from_in_flight_messages() {
+    let (broker, backend) = broker();
+    let url = backend.sqs.create_queue("q", &StringMap::new(), &StringMap::new()).await.unwrap();
+    backend.sqs.send_message(&url, SendRequest { delay: Some(Duration::from_secs(3)), ..send("late") }).await.unwrap();
+    backend.sqs.send_message(&url, send("now")).await.unwrap();
+    let states = |broker: &MemoryBroker| {
+        broker.queue_messages(&url).unwrap().into_iter().map(|m| (m.body, m.delayed, m.in_flight)).collect::<Vec<_>>()
+    };
+    assert_eq!(states(&broker), [("late".into(), true, false), ("now".into(), false, false)]);
+    backend.sqs.receive_messages(receive(&url, 10, Some(5))).await.unwrap();
+    assert_eq!(states(&broker), [("late".into(), true, false), ("now".into(), false, true)]);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(states(&broker), [("late".into(), false, false), ("now".into(), false, true)]);
+}
+
+#[tokio::test(start_paused = true)]
 async fn long_poll_wakes_when_a_visibility_change_makes_a_message_visible_sooner() {
     // Only a timeout of zero woke waiting long polls: a retry after 2 s reached a 20 s long poll
     // when the poll ended, about 18 s late, while SQS returns the message once it is visible.

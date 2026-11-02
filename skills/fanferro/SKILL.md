@@ -38,7 +38,10 @@ in code: `await dlq.peek()`, `await dlq.redrive()`).
    EC2 Spot/state events, `AutoScalingLifecycleAction`, `HealthEvent`, `CloudWatchAlarm`,
    `CloudWatchAlarmStateChange`, `LambdaInvocationRecord`; Lambda dead letters are
    `aws.lambda.dead_letter`.
-9. Tests: `fanferro.testing.memory_client()` + `consumer.run_until_idle()`; handler unit tests with
+9. Tests: `fanferro.testing.memory_client()` + `consumer.run_until_idle(pending=True)` (waits for
+   retries and delays too), `testing.drain(queue)`, `testing.consume_until(consumer, condition)`,
+   `testing.wait_for(condition)`, `testing.record_published(client)` (what was published) and
+   `testing.peek(queue)` (in-memory queue contents, nothing received); handler unit tests with
    `fanferro.testing.build_message(obj, attempt=..., topic=...)`, routers and outcomes with
    `await fanferro.testing.dispatch(router, obj)`; end-to-end against MiniStack (`endpoint_url=http://localhost:4566`).
    Lambda functions: `fanferro.testing.invoke_sqs_handler(handler, queue)`.
