@@ -8,6 +8,10 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-02
+
+No user-facing changes.
+
 ## [0.10.0] - 2026-11-01
 
 ### Features
