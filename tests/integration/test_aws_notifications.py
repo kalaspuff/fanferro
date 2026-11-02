@@ -15,6 +15,7 @@ from typing import Any
 import fanferro
 from fanferro import aws
 from fanferro.envelopes import AwsNotifications
+from fanferro.testing import consume_until
 from tests.aws_samples import (
     BOUNCE,
     CLOUDWATCH_ALARM,
@@ -28,7 +29,6 @@ from tests.aws_samples import (
     ses,
 )
 from tests.conftest import ClientFactory
-from tests.helpers import consume_until
 
 
 @fanferro.message_type("InvoicePaid")

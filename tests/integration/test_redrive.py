@@ -10,9 +10,9 @@ import pytest
 
 import fanferro
 from fanferro import __main__ as cli
-from fanferro.testing import memory_client
+from fanferro.testing import consume_until, memory_client
 from tests.conftest import ClientFactory
-from tests.helpers import OrderCreated, consume_until
+from tests.helpers import OrderCreated
 
 FAST_RETRY = fanferro.Backoff.constant(0)
 # A stopped consumer's aborted long poll would take the redriven messages on MiniStack (SQS keeps

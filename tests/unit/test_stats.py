@@ -13,7 +13,7 @@ import pytest
 import fanferro
 from fanferro import testing
 from fanferro.stats import EngineState
-from tests.helpers import consume_until
+from fanferro.testing import consume_until
 
 
 async def test_queue_counts() -> None:

@@ -21,8 +21,8 @@ from pydantic import BaseModel
 import fanferro
 from fanferro.envelopes import Raw, default_envelopes
 from fanferro.envelopes.compat import TomodachiJSON, TomodachiProtobuf, tomodachi_topic
+from fanferro.testing import consume_until, drain
 from tests.conftest import ClientFactory
-from tests.helpers import consume_until, drain_queue
 
 # Built by tomodachi 0.29: JsonBase/ProtobufBase.build_message(service, "order.created", data).
 TOMODACHI_JSON = (
@@ -267,7 +267,7 @@ async def test_round_trips_between_fanferro_services(client_factory: ClientFacto
     queue = client.queue(name("tomodachi-roundtrip"), envelope=TomodachiJSON())
     async with client:
         sent = await queue.send(Order(order_id=3, total=1.0), type="orders.v1")
-        [message] = await drain_queue(client, queue)
+        [message] = await drain(queue)
     assert message.id == sent.message_id
     assert message.type == "orders.v1"
     assert message.json() == {"order_id": 3, "total": 1.0}

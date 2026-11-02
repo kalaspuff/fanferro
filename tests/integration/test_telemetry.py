@@ -16,8 +16,9 @@ from opentelemetry.trace import SpanKind, StatusCode
 import fanferro
 from fanferro import testing
 from fanferro.telemetry import Carrier, Propagation
+from fanferro.testing import consume_until, drain
 from tests.global_state import restored_global_state
-from tests.helpers import OrderCreated, consume_until, drain_queue
+from tests.helpers import OrderCreated
 
 
 @pytest.fixture
@@ -106,7 +107,7 @@ async def test_each_publish_carries_its_own_trace_context(otel: Any, name: Any) 
         for request in ("first", "second"):
             with tracer.start_as_current_span(request):
                 await queue.send(OrderCreated(order_id=1), attributes=common)
-        received = await drain_queue(client, queue)
+        received = await drain(queue)
     assert common == {"tenant": "acme"}
     requests = {span.name: span for span in exporter.get_finished_spans() if span.name in ("first", "second")}
     trace_ids = {str(message.attribute("traceparent")).split("-")[1] for message in received}
@@ -158,7 +159,7 @@ async def test_trace_context_never_pushes_a_message_over_the_attribute_limit(ote
         finally:
             otel_context.detach(token)
         await consume_until(consumer, lambda: len(handled) == 5)
-        assert len(await drain_queue(client, other)) == 1
+        assert len(await drain(other)) == 1
     by_body = {repr(message.body): message for message in handled}
     keys = {
         body: [key for key in ("traceparent", "tracestate") if key in message.raw_attributes]
@@ -233,8 +234,8 @@ async def test_propagation_without_tracing(name: Any) -> None:
             await queue.send({"x": 1})
         prepared = await queue.prepare({"x": 1})
         assert "traceparent" not in prepared.wire.attributes, "no active span: nothing to propagate"
-    messages = client.broker.queue_messages((await queue.resolve()).url)  # type: ignore[union-attr]
-    traceparent = messages[0]["attributes"]["traceparent"].value
+    messages = await testing.peek(queue)
+    traceparent = str(messages[0].raw_attributes["traceparent"].value)
     assert traceparent.split("-")[1] == format(span.get_span_context().trace_id, "032x")
     provider.shutdown()
 
@@ -271,7 +272,7 @@ async def test_trace_context_passes_through_without_an_sdk(name: Any) -> None:
     async with client:
         await queue.send(OrderCreated(order_id=1), attributes={"traceparent": traceparent})
         await consume_until(consumer, lambda: len(contexts) == 1)
-        forwarded = await drain_queue(client, forward)
+        forwarded = await drain(forward)
     assert trace.format_trace_id(contexts[0].trace_id) == "5759e988bd862e3fe1be46a994272793"
     assert trace.format_span_id(contexts[0].span_id) == "53995c3f42cd8ad8"
     assert [message.raw_attributes["traceparent"].value for message in forwarded] == [traceparent]
@@ -292,7 +293,7 @@ async def test_a_global_sdk_configured_after_the_client_traces_its_messages(name
             trace.set_tracer_provider(provider)
             await queue.send({"x": 2})
         await queue.send({"x": 3})
-        messages = await drain_queue(client, queue)
+        messages = await drain(queue)
     provider.shutdown()
     assert [span.name for span in exporter.get_finished_spans()] == [f"send {queue.name}"]
     assert ["traceparent" in message.raw_attributes for message in messages] == [False, True, False]

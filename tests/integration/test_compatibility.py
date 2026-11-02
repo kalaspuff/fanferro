@@ -12,8 +12,9 @@ from typing import Any
 
 import fanferro
 from fanferro.envelopes import CloudEvents, CloudEventsProtobuf, Raw
+from fanferro.testing import consume_until, wait_for
 from tests.conftest import ClientFactory
-from tests.helpers import OrderCancelled, OrderCreated, consume_until, wait_for
+from tests.helpers import OrderCancelled, OrderCreated
 
 # How fanferro 0.1 published and read messages by default.
 LEGACY_PRODUCER: dict[str, Any] = {"envelope": CloudEvents(), "verify_md5": True}

@@ -8,8 +8,9 @@ import pytest
 
 import fanferro
 from fanferro.outbox import InMemoryOutbox, OutboxRelay
+from fanferro.testing import consume_until, drain
 from tests.conftest import ClientFactory
-from tests.helpers import OrderCreated, consume_until, drain_queue
+from tests.helpers import OrderCreated
 
 STAGING = {"queue_prefix": "staging-", "topic_prefix": "staging-"}
 
@@ -69,7 +70,7 @@ async def test_failures_dead_letter_into_the_prefixed_queue(client_factory: Clie
     assert redrive["deadLetterTargetArn"].endswith(f":staging-{base}-dlq")
     plain = client_factory()  # no prefix: finds the dead-letter queue by its AWS name
     async with plain:
-        messages = await drain_queue(plain, plain.queue(f"staging-{base}-dlq"))
+        messages = await drain(plain.queue(f"staging-{base}-dlq"))
     assert [message.json()["order_id"] for message in messages] == [9]
     info = messages[0].dead_letter_info
     assert info is not None
@@ -90,7 +91,7 @@ async def test_outbox_relay_publishes_to_the_prefixed_destination(client_factory
         assert relay_client.topic(base).name == prepared.destination_name
         async with relay_client:
             assert await OutboxRelay(relay_client, outbox).run_once() == 1
-        messages = await drain_queue(publisher, queue)
+        messages = await drain(queue)
     assert prepared.destination_name == f"staging-{base}"
     assert prepared.destination["arn"].endswith(f":staging-{base}")
     assert [message.json()["order_id"] for message in messages] == [3]
@@ -106,8 +107,8 @@ async def test_environments_with_different_prefixes_are_isolated(client_factory:
         await dev.topic(base).publish(OrderCreated(order_id=1))
         await staging.topic(base).publish(OrderCreated(order_id=2))
         await staging.queue(f"{base}-worker").send(OrderCreated(order_id=3))
-        dev_messages = await drain_queue(dev, dev.queue(f"{base}-worker"))
-        staging_messages = await drain_queue(staging, staging.queue(f"{base}-worker"))
+        dev_messages = await drain(dev.queue(f"{base}-worker"))
+        staging_messages = await drain(staging.queue(f"{base}-worker"))
     assert [message.json()["order_id"] for message in dev_messages] == [1]
     assert sorted(message.json()["order_id"] for message in staging_messages) == [2, 3]
     assert dev.queue(f"{base}-worker").name == f"dev-{base}-worker"
@@ -131,7 +132,7 @@ async def test_large_payloads_use_the_prefixed_bucket(client_factory: ClientFact
         core = await client._core()
         await core.ensure_bucket(f"staging-{bucket}-jobs", True)
         sent = [await destination.send({"n": n}) for n, destination in enumerate((queue, jobs, audit))]
-        bodies = [[message.json() for message in await drain_queue(client, q)] for q in (queue, jobs, audit)]
+        bodies = [[message.json() for message in await drain(q)] for q in (queue, jobs, audit)]
     assert [result.offloaded.bucket if result.offloaded else None for result in sent] == [
         f"staging-{bucket}",
         f"staging-{bucket}-jobs",
@@ -145,5 +146,5 @@ async def test_large_payloads_use_the_prefixed_bucket(client_factory: ClientFact
     plain = client_factory()
     async with publisher, plain:
         await publisher.queue(base).send({"n": 3})
-        messages = await drain_queue(plain, plain.queue(f"staging-{base}"))
+        messages = await drain(plain.queue(f"staging-{base}"))
     assert [message.json() for message in messages] == [{"n": 3}]

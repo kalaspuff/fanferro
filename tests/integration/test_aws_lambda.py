@@ -10,9 +10,9 @@ import pytest
 
 import fanferro
 from fanferro.envelopes import CloudEvents
-from fanferro.testing import invoke_sqs_handler, receive_sqs_event
+from fanferro.testing import drain, invoke_sqs_handler, receive_sqs_event
 from tests.conftest import ClientFactory
-from tests.helpers import OrderCreated, drain_queue
+from tests.helpers import OrderCreated
 
 FAST_RETRY = fanferro.RetryPolicy(max_attempts=5, backoff=fanferro.Backoff.constant(0))
 
@@ -96,7 +96,7 @@ async def test_dead_lettered_records_are_forwarded_and_not_reported(client_facto
         assert all(response == {"batchItemFailures": []} for response in responses)
         assert await queue.approximate_count() == fanferro.QueueCounts(visible=0, in_flight=0, delayed=0)
         assert queue.dead_letter_queue is not None
-        dead = await drain_queue(client, queue.dead_letter_queue)
+        dead = await drain(queue.dead_letter_queue)
     assert [message.json() for message in dead] == [{"order_id": 1, "total": 0.0}]
     info = json.loads(str(dead[0].raw_attributes["fanferro.dead-letter"].value))
     assert info["reason"] == "invalid order"

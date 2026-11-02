@@ -15,8 +15,9 @@ import fanferro
 from fanferro import matchers as m
 from fanferro.envelopes import CloudEvents
 from fanferro.outbox import InMemoryOutbox, OutboxRelay
+from fanferro.testing import consume_until, drain, wait_for
 from tests.conftest import ClientFactory
-from tests.helpers import OrderCancelled, OrderCreated, consume_until, drain_queue, wait_for
+from tests.helpers import OrderCancelled, OrderCreated
 
 
 async def test_queue_roundtrip_with_metadata(client_factory: ClientFactory, name: Any) -> None:
@@ -151,7 +152,7 @@ async def test_topic_fanout_raw_and_wrapped(client_factory: ClientFactory, name:
             OrderCancelled(order_id=7, reason="customer"), attributes={"region": "eu"}, sns_subject="hi"
         )
         for queue in (raw_queue, wrapped_queue):
-            messages = await drain_queue(client, queue)
+            messages = await drain(queue)
             assert len(messages) == 1
             message = messages[0]
             assert message.json() == {"order_id": 7, "reason": "customer"}
@@ -172,7 +173,7 @@ async def test_filter_policies(client_factory: ClientFactory, name: Any) -> None
     async with client:
         await topic.publish(OrderCreated(order_id=1))
         await topic.publish(OrderCancelled(order_id=2))
-        messages = await drain_queue(client, created_only)
+        messages = await drain(created_only)
     assert [message.type for message in messages] == ["test.order_created.v1"]
 
 
@@ -207,8 +208,8 @@ async def test_filter_policy_operators(client_factory: ClientFactory, name: Any)
                 {"order": {"total": total, "status": status}},
                 attributes={"region": region, "client_ip": client_ip, "tier": tier},
             )
-        by_attributes_messages = await drain_queue(client, by_attributes)
-        by_body_messages = await drain_queue(client, by_body)
+        by_attributes_messages = await drain(by_attributes)
+        by_body_messages = await drain(by_body)
     assert [message.json()["order"]["total"] for message in by_attributes_messages] == [150]
     assert sorted(message.json()["order"]["total"] for message in by_body_messages) == [100, 150]
 
@@ -230,7 +231,7 @@ async def test_batches(client_factory: ClientFactory, name: Any) -> None:
         result = await queue.send_batch([OrderCreated(order_id=i) for i in range(25)], attributes={"batch": "yes"})
         assert result.ok
         assert len(result.successful) == 25
-        messages = await drain_queue(client, queue)
+        messages = await drain(queue)
     assert sorted(message.json()["order_id"] for message in messages) == list(range(25))
     assert all(message.attribute("batch") == "yes" for message in messages)
 
@@ -295,7 +296,7 @@ async def test_fifo_ids_are_validated_before_sending(client_factory: ClientFacto
             with pytest.raises(fanferro.ValidationError, match=field):
                 await queue.send({"x": 1}, **options)
         await queue.send({"x": 1}, group_id="tenant-a/eu:1", id="order#1")
-        assert [m.group_id for m in await drain_queue(client, queue)] == ["tenant-a/eu:1"]
+        assert [m.group_id for m in await drain(queue)] == ["tenant-a/eu:1"]
 
 
 @pytest.mark.parametrize(("scope", "delivered"), [("messageGroup", ["a", "b"]), ("queue", ["a"])])
@@ -311,7 +312,7 @@ async def test_fifo_deduplication_scope(
     async with client:
         for group in ("a", "a", "b"):
             await queue.send({"group": group}, group_id=group, deduplication_id="same")
-        messages = await drain_queue(client, queue)
+        messages = await drain(queue)
     assert sorted(message.json()["group"] for message in messages) == delivered
 
 
@@ -431,7 +432,7 @@ async def test_large_payloads(client_factory: ClientFactory, name: Any) -> None:
         assert result.offloaded.url is not None
         small = await topic.publish({"blob": "tiny"})
         assert small.offloaded is None
-        messages = await drain_queue(client, queue)
+        messages = await drain(queue)
     bodies = sorted((message.json() for message in messages), key=lambda body: len(body["blob"]))
     assert bodies == [{"blob": "tiny"}, big]
     offloaded = [message for message in messages if message.pointer is not None]
@@ -453,7 +454,7 @@ async def test_published_bodies_are_released_once_sent(client_factory: ClientFac
         del results
         gc.collect()
         await wait_for(lambda: (sys.getrefcount(large), sys.getrefcount(small)) == before)
-        received = await drain_queue(client, queue)
+        received = await drain(queue)
     assert sorted(message.body for message in received) == sorted([large, small, large, small])
 
 
@@ -471,7 +472,7 @@ async def test_a_message_published_again_keeps_its_offloaded_payload(client_fact
         assert first.offloaded is not None
         assert second.offloaded is not None
         assert first.offloaded.key != second.offloaded.key
-        received = await drain_queue(client, queue)
+        received = await drain(queue)
     assert [(m.id, m.json()) for m in received] == [("order-1", {"blob": "x" * 5000})]
 
 
@@ -548,7 +549,7 @@ async def test_payloads_outside_the_allowed_buckets_are_not_deleted(client_facto
         assert result.offloaded is not None
         await consume_until(consumer, lambda: len(errors) + len(deleted) == 1)
         # The other subscriber still finds the payload both queues point to.
-        received = await drain_queue(publisher, other_queue)
+        received = await drain(other_queue)
     assert processed == [big], "read through the URL"
     assert deleted == []
     assert "refusing to delete a payload from bucket" in str(errors[0].error.message)  # type: ignore[union-attr]
@@ -567,7 +568,7 @@ async def test_messages_over_the_queue_limit_are_offloaded_below_the_threshold(
     async with client:
         result = await queue.send(body)
         assert result.offloaded is not None
-        messages = await drain_queue(client, queue)
+        messages = await drain(queue)
     assert [message.json() for message in messages] == [body]
 
 
@@ -588,8 +589,8 @@ async def test_outbox_prepare_and_relay(client_factory: ClientFactory, name: Any
         assert await relay.run_once() == 5
         assert await relay.run_once() == 0
         assert outbox.pending == []
-        messages = await drain_queue(client, queue)
-        fifo_messages = await drain_queue(client, fifo_queue)
+        messages = await drain(queue)
+        fifo_messages = await drain(fifo_queue)
     assert sorted(message.json()["order_id"] for message in messages) == [0, 1, 2]
     assert [message.json()["order_id"] for message in fifo_messages] == [0, 1]
 
@@ -633,7 +634,7 @@ async def test_prepared_messages_use_the_large_payload_settings_of_their_destina
         assert batch.successful[0].offloaded is not None
         with pytest.raises(fanferro.MessageTooLargeError):
             await client.publish_prepared(await topic.prepare(big))
-        assert [message.json() for message in await drain_queue(client, queue)] == [big, big]
+        assert [message.json() for message in await drain(queue)] == [big, big]
 
 
 async def test_the_outbox_relay_gives_up_on_records_it_cannot_publish(client_factory: ClientFactory, name: Any) -> None:
@@ -654,7 +655,7 @@ async def test_the_outbox_relay_gives_up_on_records_it_cannot_publish(client_fac
                 break
         assert outbox.published == [kept]
         assert [(record.id, record.attempts) for record in outbox.abandoned] == [(i, 3) for i in lost]
-        assert [message.json() for message in await drain_queue(client, worker)] == [{"n": 3}]
+        assert [message.json() for message in await drain(worker)] == [{"n": 3}]
 
 
 async def test_the_outbox_relay_keeps_held_back_fifo_records(client_factory: ClientFactory, name: Any) -> None:
@@ -670,7 +671,7 @@ async def test_the_outbox_relay_keeps_held_back_fifo_records(client_factory: Cli
             await relay.run_once()
         assert outbox.published == [later]
         assert [record.id for record in outbox.abandoned] == [too_large]
-        assert [message.json() for message in await drain_queue(client, queue)] == [{"n": 1}]
+        assert [message.json() for message in await drain(queue)] == [{"n": 1}]
 
 
 async def test_publish_middleware(client_factory: ClientFactory, name: Any) -> None:
@@ -684,7 +685,7 @@ async def test_publish_middleware(client_factory: ClientFactory, name: Any) -> N
     queue = client.queue(name("middleware"))
     async with client:
         await queue.send({"x": 1})
-        messages = await drain_queue(client, queue)
+        messages = await drain(queue)
     assert messages[0].attribute("tenant") == "acme"
 
 
@@ -706,7 +707,7 @@ async def test_publish_options_are_not_mutated(client_factory: ClientFactory, na
         await queue.send({"n": 2}, attributes=common_attributes, headers=common_headers)
         tenant["current"] = "initech"
         await queue.send_batch([{"n": 3}, {"n": 4}], attributes=common_attributes)
-        messages = await drain_queue(client, queue)
+        messages = await drain(queue)
     assert common_attributes == {"source": "importer"}
     assert common_headers == {}
     tenants = {message.json()["n"]: message.attribute("tenant") for message in messages}
@@ -749,7 +750,7 @@ async def test_numbers_of_more_than_38_digits_are_refused_before_sending(
         with pytest.raises(fanferro.ValidationError, match="39 significant digits"):
             await queue.send({"x": 1}, attributes={"n": int("1" * 39)})
         await queue.send({"x": 1}, attributes={"n": int("1" * 38)})
-        messages = await drain_queue(client, queue)
+        messages = await drain(queue)
     assert [message.attribute("n") for message in messages] == [int("1" * 38)]
 
 
@@ -821,6 +822,6 @@ async def test_batch_publishes_to_topics_split_by_trace_header(split: bool, name
         await topic.publish_batch(
             [fanferro.OutgoingMessage({"n": i}, trace_header=header) for i, header in enumerate(headers)]
         )
-        messages = await drain_queue(client, queue)
+        messages = await drain(queue)
     received = {message.json()["n"]: message.trace_header for message in messages}
     assert received == ({0: headers[0], 1: headers[1]} if split else {0: None, 1: None})
