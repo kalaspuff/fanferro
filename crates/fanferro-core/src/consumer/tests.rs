@@ -6,7 +6,9 @@ use bytes::Bytes;
 
 use super::*;
 use crate::backend::memory::MemoryBroker;
-use crate::backend::testing::{FailingVisibility, SlowBatches, SlowDownloads, SlowReceives, StuckVisibility};
+use crate::backend::testing::{
+    FailingVisibility, SlowBatches, SlowDownloads, SlowReceives, SlowSettlements, StuckVisibility,
+};
 use crate::backend::{SendRequest, StringMap};
 use crate::client::ClientConfig;
 use crate::error::{AwsError, AwsErrorKind};
@@ -766,6 +768,150 @@ async fn releases_are_not_overridden_by_a_heartbeat_in_flight() {
         if !close {
             engine.close(true).await;
         }
+    }
+}
+
+/// A fixture whose deletes and `SendMessage` calls take 20 s (see [`SlowSettlements`]; applied at
+/// once and answered late if `answer_late`), on a FIFO queue if `fifo`, with a dead-letter queue.
+async fn slow_settlement_fixture(fifo: bool, answer_late: bool) -> (Fixture, Arc<SlowSettlements>, String) {
+    let broker = MemoryBroker::new("us-east-1", "000000000000");
+    let mut backend = broker.backend();
+    let mut slow = SlowSettlements::new(backend.sqs.clone(), Duration::from_secs(20));
+    if answer_late {
+        slow = slow.answering_late();
+    }
+    let slow = Arc::new(slow);
+    backend.sqs = slow.clone();
+    let client = Client::with_backend(backend, ClientConfig::default()).unwrap();
+    let mut attributes = StringMap::new();
+    if fifo {
+        attributes.insert("FifoQueue".to_string(), "true".to_string());
+    }
+    let suffix = if fifo { ".fifo" } else { "" };
+    let sqs = &client.backend().sqs;
+    let url = sqs.create_queue(&format!("work{suffix}"), &attributes, &StringMap::new()).await.unwrap();
+    let dlq = sqs.create_queue(&format!("work-dlq{suffix}"), &attributes, &StringMap::new()).await.unwrap();
+    (Fixture { broker, client, url }, slow, dlq)
+}
+
+/// A settlement that deletes the message.
+#[derive(Clone, Copy, Debug)]
+enum Deleting {
+    Ack,
+    DeadLetter,
+    Requeue,
+}
+
+/// Starts settling `delivery` in a task, and returns the delivery with the outcome.
+fn settle_in_background(
+    delivery: Delivery,
+    settlement: Deleting,
+) -> tokio::task::JoinHandle<(Delivery, crate::error::Result<()>)> {
+    delivery.lease.mark_active();
+    tokio::spawn(async move {
+        let lease = &delivery.lease;
+        let result = match settlement {
+            Deleting::Ack => lease.ack().await,
+            Deleting::DeadLetter => lease.dead_letter("handler failed", &BTreeMap::new()).await,
+            Deleting::Requeue => lease.requeue(None, 1).await,
+        };
+        (delivery, result)
+    })
+}
+
+#[tokio::test(start_paused = true)]
+async fn heartbeats_protect_a_message_while_its_delete_is_slow() {
+    // A delete that outlasts the visibility left (retries, a slow link) must not let the message be
+    // received again meanwhile; on a FIFO queue its receipt handle would expire (docs/parity M6).
+    for fifo in [false, true] {
+        let (fx, slow, _) = slow_settlement_fixture(fifo, false).await;
+        fx.send("acked").await;
+        let engine = fx.engine(|c| {
+            c.visibility_timeout = 3.0;
+            c.heartbeat.interval = Some(1.0);
+        });
+        let delivery = collect(&engine, 1).await.remove(0);
+        let ack = settle_in_background(delivery, Deleting::Ack);
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let stored = fx.stored();
+        assert_eq!(stored.len(), 1);
+        assert!(stored[0].in_flight, "the message became visible during its delete (fifo: {fifo})");
+        assert_eq!(stored[0].receive_count, 1);
+        assert_eq!(slow.deletes.load(Ordering::SeqCst), 1);
+        let (delivery, result) = ack.await.unwrap();
+        result.unwrap();
+        assert_eq!(delivery.lease.status(), LeaseStatus::Settled);
+        assert!(fx.stored().is_empty());
+        let metrics = engine.stats().metrics;
+        assert_eq!(metrics["messages_received"], 1);
+        assert_eq!(metrics["messages_acked"], 1);
+        assert!(metrics["lease_extensions"] >= 10, "{metrics:?}");
+        engine.close(true).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn heartbeats_protect_a_message_while_it_is_forwarded_or_requeued() {
+    // Both send a copy, then delete the original: the message must stay hidden throughout, or it
+    // is processed again and a requeue leaves two copies.
+    for settlement in [Deleting::DeadLetter, Deleting::Requeue] {
+        let requeue = matches!(settlement, Deleting::Requeue);
+        let (fx, slow, dlq) = slow_settlement_fixture(false, false).await;
+        fx.send("forwarded").await;
+        slow.sends.store(0, Ordering::SeqCst); // the fixture's own send
+        let engine = fx.engine(|c| {
+            c.visibility_timeout = 3.0;
+            c.heartbeat.interval = Some(1.0);
+            c.dead_letter_queue_url = Some(dlq.clone());
+        });
+        let delivery = collect(&engine, 1).await.remove(0);
+        let settle = settle_in_background(delivery, settlement);
+        // During the send (20 s), then during the delete (20 s).
+        for _ in 0..2 {
+            tokio::time::sleep(Duration::from_secs(15)).await;
+            let original = fx.stored().into_iter().find(|message| message.receive_count > 0).unwrap();
+            assert!(original.in_flight, "the message became visible while it was settled (requeue: {requeue})");
+            assert_eq!(original.receive_count, 1);
+        }
+        let (delivery, result) = settle.await.unwrap();
+        result.unwrap();
+        assert_eq!(delivery.lease.status(), LeaseStatus::Settled);
+        assert_eq!(slow.sends.load(Ordering::SeqCst), 1);
+        assert_eq!(slow.deletes.load(Ordering::SeqCst), 1);
+        // The original is gone (the engine may have received the requeued copy by now).
+        let copies = if requeue { fx.stored() } else { fx.broker.queue_messages(&dlq).unwrap() };
+        assert_eq!(copies.len(), 1, "exactly one copy (requeue: {requeue})");
+        assert!(copies[0].attributes.contains_key(if requeue { "fanferro.attempt" } else { "fanferro.dead-letter" }));
+        if !requeue {
+            assert!(fx.stored().is_empty());
+            assert_eq!(engine.stats().metrics["messages_received"], 1);
+        }
+        engine.close(true).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn extensions_after_the_delete_landed_are_not_reported_as_lost() {
+    // The delete applies at once but its answer takes 20 s: the extensions meanwhile fail with an
+    // invalid receipt handle, which is no lost lease and no failure to report.
+    for fifo in [false, true] {
+        let (fx, _slow, _) = slow_settlement_fixture(fifo, true).await;
+        fx.send("deleted").await;
+        let engine = fx.engine(|c| {
+            c.visibility_timeout = 3.0;
+            c.heartbeat.interval = Some(1.0);
+        });
+        let delivery = collect(&engine, 1).await.remove(0);
+        let ack = settle_in_background(delivery, Deleting::Ack);
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        assert!(fx.stored().is_empty());
+        let (_, result) = ack.await.unwrap();
+        result.unwrap();
+        let metrics = engine.stats().metrics;
+        assert_eq!(metrics["leases_lost"], 0, "fifo: {fifo}");
+        assert_eq!(metrics["lease_extension_failures"], 0, "fifo: {fifo}");
+        assert_eq!(metrics["messages_acked"], 1);
+        engine.close(true).await;
     }
 }
 

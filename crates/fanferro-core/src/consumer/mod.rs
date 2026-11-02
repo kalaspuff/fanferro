@@ -154,7 +154,7 @@ impl Delivery {
             let inner = &self.lease.inner;
             inner.settlements.spawn_on(
                 async move {
-                    delivery.lease.start_settling().await;
+                    delivery.lease.start_settling(true).await;
                     delivery.lease.queue(SettleKind::Delete, finish);
                 },
                 &inner.runtime,
@@ -544,6 +544,7 @@ impl EngineInner {
             next_heartbeat: now + self.settings.heartbeat_interval,
             max_until: now + self.settings.max_lease,
             status: LeaseStatus::Buffered,
+            deleting: false,
             extending: None,
             extension_failures: 0,
         }

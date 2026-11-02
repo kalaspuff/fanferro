@@ -302,3 +302,6 @@ async fn flush(context: &SettleContext, mut pending: Vec<SettleCommand>) {
         attempt += 1;
     }
 }
+
+#[cfg(test)]
+mod tests;

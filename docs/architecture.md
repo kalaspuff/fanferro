@@ -98,9 +98,14 @@ These are relied upon across layers; tests cover each of them.
    receiving continues during the settlement's round trip and the settlement backlog is bounded
    too.
 3. **Leases are protected until settled.** Heartbeats extend visibility (batched by ten) while a
-   message is buffered, processing or waiting for a settling permit, capped at 12 hours after
-   receipt and `max_duration`. An extension call that gets no answer within half the heartbeat
-   interval (0.5-10 s) is retried at the next tick; the heartbeat loop keeps its calls in flight
+   message is buffered, processing or waiting for a settling permit, and while a settlement that
+   deletes it is in flight (an ack, a dead-letter forward or a requeue, through the send of the
+   copy and the delete with its retries), capped at 12 hours after receipt and `max_duration`. An
+   extension of such a lease that fails because its receipt handle is no longer valid only stops
+   its heartbeats (the delete reached SQS first, or fails too and reports it): it is no
+   `lease.lost`. Retries and releases set the visibility themselves and are not extended. An
+   extension call that gets no answer within half the heartbeat interval (0.5-10 s) is retried at
+   the next tick; the heartbeat loop keeps its calls in flight
    next to its tick, so a slow or stuck call does not delay the extension of other leases. Failed
    extensions that retrying soon cannot fix (throttling, access denied, a deleted queue) back off
    per lease from 1 s up to the heartbeat interval, reported in one `lease.extension_failed` event

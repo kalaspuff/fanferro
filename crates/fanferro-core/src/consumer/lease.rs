@@ -1,8 +1,10 @@
 //! Leases: exclusive, heartbeat-protected ownership of a received message.
 //!
 //! A lease exists from the moment a message is received until it is settled (acked,
-//! retried, released, requeued or dead-lettered). Until its settlement starts, the heartbeat
-//! keeps the message invisible to other consumers and the lease holds one in-flight permit,
+//! retried, released, requeued or dead-lettered). The heartbeat keeps the message invisible to
+//! other consumers until its settlement starts, or, when the settlement deletes the message (an
+//! ack, and the send-then-delete of a dead-letter forward or a requeue), until the settlement
+//! completed. Until its settlement starts, the lease holds one in-flight permit,
 //! which is what bounds how many unsettled messages a consumer holds at once. A settlement
 //! exchanges that permit for a settling permit (bounding the settlement backlog), so the
 //! poller can refill the slot during the settlement's round trip. Dropping an unsettled lease
@@ -38,7 +40,8 @@ pub enum LeaseStatus {
     Buffered,
     /// Being processed.
     Active,
-    /// A settlement is in progress.
+    /// A settlement is in progress (heartbeats continue while it deletes the message, see
+    /// `LeaseEntry::deleting`).
     Settling,
     /// The receipt handle is no longer valid (the message may be redelivered).
     Lost,
@@ -72,6 +75,11 @@ pub(crate) struct LeaseEntry {
     pub next_heartbeat: Instant,
     pub max_until: Instant,
     pub status: LeaseStatus,
+    /// The settlement in progress deletes the message (an ack, a dead-letter forward or a
+    /// requeue): heartbeats keep extending the lease while it is [`LeaseStatus::Settling`], so
+    /// the message cannot become visible again while its delete (or the send before it) is slow
+    /// or retried. Retries and releases change the visibility themselves and are not extended.
+    pub deleting: bool,
     /// Set while a heartbeat extension of the lease is in flight; cancelled when its call ended.
     pub extending: Option<CancellationToken>,
     /// Heartbeat extensions that failed in a row (their retries back off, see
@@ -193,10 +201,11 @@ impl Lease {
 
     /// Starts a settlement: waits for a settling slot (heartbeats keep protecting the message
     /// meanwhile), then hands the in-flight slot back so that receiving continues while the
-    /// settlement completes. The lease stays tracked until [`Lease::finish`].
-    async fn begin(&self) -> Result<()> {
+    /// settlement completes. The lease stays tracked until [`Lease::finish`]; heartbeats keep
+    /// extending it meanwhile if the settlement `deletes` the message.
+    async fn begin(&self, deletes: bool) -> Result<()> {
         self.claim()?;
-        self.start_settling().await;
+        self.start_settling(deletes).await;
         Ok(())
     }
 
@@ -208,20 +217,22 @@ impl Lease {
         Ok(())
     }
 
-    pub(crate) async fn start_settling(&self) {
+    /// Waits for a settling slot and enters it (see [`Lease::begin`]).
+    pub(crate) async fn start_settling(&self, deletes: bool) {
         // The semaphore is never closed, so this only fails if the engine is gone.
         let permit = self.inner.settling.clone().acquire_owned().await.ok();
-        self.enter_settling(permit);
+        self.enter_settling(permit, deletes);
     }
 
     /// Takes the settling slot, then hands the in-flight slot back.
-    fn enter_settling(&self, permit: Option<OwnedSemaphorePermit>) {
+    fn enter_settling(&self, permit: Option<OwnedSemaphorePermit>, deletes: bool) {
         if let Some(permit) = permit {
             *self.settling.lock() = Some(permit);
             self.inner.metrics.settling.add(1);
         }
         if let Some(entry) = self.inner.leases.lock().get_mut(&self.id) {
             entry.status = LeaseStatus::Settling;
+            entry.deleting = deletes;
         }
         self.permit.lock().take();
     }
@@ -325,7 +336,7 @@ impl Lease {
 
     /// [`Lease::ack`] after [`Lease::claim`] succeeded.
     pub(crate) async fn ack_claimed(&self) -> Result<()> {
-        self.start_settling().await;
+        self.start_settling(true).await;
         let result = self.settle(SettleKind::Delete).await;
         self.finish(Outcome::Acked, &result);
         result
@@ -338,7 +349,7 @@ impl Lease {
         let Ok(permit) = self.inner.settling.clone().try_acquire_owned() else {
             return Err(reply);
         };
-        self.enter_settling(Some(permit));
+        self.enter_settling(Some(permit), true);
         self.queue(SettleKind::Delete, reply);
         Ok(())
     }
@@ -350,7 +361,7 @@ impl Lease {
 
     /// Makes the message visible again after `delay` (retry with backoff).
     pub async fn nack(&self, delay: Duration) -> Result<()> {
-        self.begin().await?;
+        self.begin(false).await?;
         self.inner.after_extension(self.id).await;
         let delay = self.cap_visibility(self.inner.visibility_floor(delay));
         let result = self.settle(SettleKind::Visibility(delay)).await;
@@ -372,7 +383,7 @@ impl Lease {
 
     /// Makes the message visible again immediately (no processing happened).
     pub async fn release(&self) -> Result<()> {
-        self.begin().await?;
+        self.begin(false).await?;
         self.inner.after_extension(self.id).await;
         let result = self.settle(SettleKind::Visibility(self.inner.visibility_floor(Duration::ZERO))).await;
         self.finish(Outcome::Released, &result);
@@ -420,7 +431,7 @@ impl Lease {
                 self.message.message_id, self.inner.settings.queue_url
             )));
         };
-        self.begin().await?;
+        self.begin(true).await?;
         let result = self.forward_to_dead_letter_queue(&dlq_url, reason, details).await;
         let result = match result {
             Ok(()) => self.settle(SettleKind::Delete).await,
@@ -494,7 +505,7 @@ impl Lease {
     /// Sends a copy of the message back to the queue with an incremented attempt counter
     /// (and optional delay on standard queues), then deletes the original.
     pub async fn requeue(&self, delay: Option<Duration>, attempt: u32) -> Result<()> {
-        self.begin().await?;
+        self.begin(true).await?;
         let message = &self.message;
         let mut attributes = message.attributes.clone();
         let result = if attributes.len() >= MAX_ATTRIBUTES && !attributes.contains_key(reserved::ATTEMPT) {

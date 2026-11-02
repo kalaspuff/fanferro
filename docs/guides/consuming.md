@@ -164,7 +164,9 @@ in-flight messages (back-pressure, circuit breaking).
 The visibility timeout defaults to the queue's attribute (override with `visibility_timeout=`).
 While a message is buffered or processed, the engine extends its visibility before it expires
 (`Heartbeat(interval=..., extend_by=..., max_duration=...)`; default interval: a third of the
-timeout), batching ten messages per call. Heartbeats run on Rust threads, so a handler blocking the
+timeout), batching ten messages per call. It keeps doing so while the message is acked,
+dead-lettered or requeued, until its delete completed, so a slow or retried delete cannot let the
+message be received again (retries and releases set the visibility themselves). Heartbeats run on Rust threads, so a handler blocking the
 event loop does not lose its lease. If a receipt handle becomes invalid, a `lease.lost` event is
 emitted (the message may be processed twice; make handlers idempotent). An extension that fails
 otherwise is retried: after a second for a transient error, and backing off from a second up to the
