@@ -168,6 +168,7 @@ Flows run on an in-memory broker (`fanferro.testing.memory_client()`) or an emul
 * **Handlers are plain typed functions.** Return to ack, raise to retry. No receipt handles.
 * **Your own types.** Pydantic, dataclasses, msgspec, protobuf, JSON or raw bytes.
 * **Routing on anything.** Message type, attribute, body field or topic.
+* **Batch handlers for bulk work.** Many messages per call, each settled on its own.
 * **Safe by default.** Heartbeats, retries with backoff, dead-letter queues, graceful
   shutdown.
 * **Infrastructure in code.** Declared queues, topics and subscriptions are checked or

@@ -67,6 +67,21 @@ async def test_router() -> None:
   backoff's maximum), as on a broker. `dispatch` assumes a dead-letter queue when the queue or the
   dead-letter policy declares one; `dead_letter_queue=True` or `False` says so explicitly.
 
+`dispatch_batch(target, messages)` does the same for several messages at once, and a
+[batch route](consuming.md#batch-handlers) hands those it matches to its handler in one batch (at
+most `max_size` per batch, without waiting for `max_wait`). It returns a result per message, in
+order:
+
+```python
+from fanferro.testing import build_message, dispatch_batch
+
+async def test_batch_route() -> None:
+    results = await dispatch_batch(router, [OrderCreated(id=1), OrderCreated(id=-1)], dead_letter_queue=True)
+    assert [result.outcome for result in results] == ["acked", "dead_lettered"]
+```
+
+`dispatch` with a batch route hands the message over at once, in a batch of one.
+
 ## Flows with the in-memory broker
 
 ```python

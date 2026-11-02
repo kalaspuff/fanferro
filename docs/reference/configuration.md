@@ -100,7 +100,7 @@ created.
 | --- | --- | --- |
 | `name` | queue name | Name used in events and metrics |
 | `concurrency` | `10` | Handlers running at the same time |
-| `prefetch` | `min(batch_size, concurrency) × pollers` | Extra messages leased ahead (a receive batch per poller; by default each extra receive loop adds one batch while it runs) |
+| `prefetch` | `min(batch_size, concurrency) × pollers` | Extra messages leased ahead (a receive batch per poller; by default each extra receive loop adds one batch while it runs); at least the largest `Batch.max_size` of the batch routes when not set |
 | `batch_size` | `10` | Messages per receive call (1-10) |
 | `min_receive_batch` | `batch_size` (FIFO: 1) | Free slots a poller waits for before receiving (1 to `batch_size`) |
 | `receive_batch_wait` | `0.1` | Seconds a poller waits for `min_receive_batch` free slots before receiving fewer |
@@ -164,10 +164,14 @@ at most 12 hours).
 
 `RateLimit`: `per_second`, `burst`.
 
+`Batch` (`route(..., batch=...)`, see [batch handlers](../guides/consuming.md#batch-handlers)):
+`max_size` (10; 1-10,000), `max_wait` (1.0; 0-900 seconds).
+
 `InMemoryIdempotencyStore`: `clock` (`time.monotonic`), `sweep_interval` (60 s), `max_entries`
 (100,000; `None` for no bound; beyond it the oldest completed keys are forgotten first).
 
-Durations in the policies (`Backoff`'s delays, `ShutdownPolicy`'s timeouts, `Heartbeat`), in
+Durations in the policies (`Backoff`'s delays, `ShutdownPolicy`'s timeouts, `Heartbeat`,
+`Batch.max_wait`), in
 `Retry(delay=...)`, `Requeue(delay=...)`, `message.retry()`, `message.requeue()`,
 `message.extend()`, `consumer.stop()` and `run_until_idle()`, `IdempotencyMiddleware`,
 `InMemoryIdempotencyStore(sweep_interval=)`, `OutboxRelay(poll_interval=)` and a publish's `delay` are seconds or a `timedelta`;

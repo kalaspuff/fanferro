@@ -108,6 +108,7 @@ result = await events.publish(InvoicePaid(invoice_id="inv-1", amount_cents=1299)
 | Prepare (outbox) | `prepared = await topic.prepare(obj)`, `prepared.to_json()`, `await client.publish_prepared(prepared)` |
 | Consume | `consumer = client.consumer(queue, ...)`, `@consumer.route(Type)`, `await consumer.run()` |
 | Route | `fanferro.Router()`, `router.route(Type, when=matchers..., priority=...)`, `router.default` |
+| Batch handler | `@consumer.route(Type, batch=fanferro.Batch(max_size=100, max_wait=0.5))` on `async def h(messages: list[fanferro.Message[Type]]) -> fanferro.BatchResult \| None` (return `None` = ack all, raise = retry all, `BatchResult(failed=...)` = fail some) |
 | Settle manually | `await message.ack() / retry(delay=) / requeue() / dead_letter(reason) / release() / discard(reason)` (settles when called; await the returned `Settlement` for SQS's confirmation) |
 | Dead-letter queue | `await queue.dead_letter_queue.peek(limit=20)` (`message.dead_letter_info`, `message.source`), `await dlq.redrive(max_per_second=50)` back to each message's source with a fresh retry budget (`to=`, `limit=`, `reset_attempts=False`); shell: `fanferro dlq stats\|peek\|redrive --queue-url URL` |
 | Observe | `client.on("message.*", hook)`, `LoggingConfig(...)`, `Telemetry(...)`, `client.metrics().consumers[name].engine.messages_acked`, `consumer.stats().processed`, `(await queue.approximate_count()).visible` (typed objects; `.as_dict()` for a dict) |
@@ -191,6 +192,21 @@ async def c(message: fanferro.Message[bytes]) -> None: ...  # anything; never fa
 Supported body types: pydantic models (and `list[Model]`, discriminated unions), dataclasses,
 `msgspec.Struct`, protobuf messages, `dict`/`list` (JSON), `str`, `bytes`; anything else via a
 custom `Codec`.
+
+Bulk work (database inserts, bulk indexing, batch APIs) gets several messages per call with a
+batch route; each message still goes through decoding and middleware on its own:
+
+```python
+@consumer.route(OrderPlaced, batch=fanferro.Batch(max_size=100, max_wait=0.5))
+async def store(messages: list[fanferro.Message[OrderPlaced]]) -> fanferro.BatchResult | None:
+    failed = await db.insert_orders([message.body for message in messages])  # positions that failed
+    return fanferro.BatchResult(failed)  # None acks all; raising retries all
+```
+
+`BatchResult({message_or_position: error})` gives each failed message its error (`Reject` →
+dead-letter, `Retry(delay=...)`, any exception → retry policy). `concurrency` counts batch calls;
+`prefetch` grows to fit `max_size` unless set explicitly. On FIFO queues a batch holds at most one
+message per group. Test with `await fanferro.testing.dispatch_batch(router, [msg1, msg2])`.
 
 ## Routing recipes
 
@@ -299,6 +315,7 @@ async def test_router() -> None:
     # the consumer's routing, decoding, middleware and failure handling for one message, no broker
     result = await dispatch(router, InvoicePaid(invoice_id="i", amount_cents=0), dead_letter_queue=True)
     assert result.outcome == "dead_lettered"             # result.calls: the settlement calls
+    # batch routes: dispatch_batch(router, [m1, m2]) hands them over in one batch, one result each
 
 async def test_flow() -> None:
     client = memory_client()            # in-memory SQS/SNS/S3; creates resources on demand

@@ -56,12 +56,13 @@ from fanferro.routing import Router
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
+    from fanferro.batching import Batch
     from fanferro.client import Client
     from fanferro.envelopes import Envelope
     from fanferro.matchers import Matcher, MessagePredicate
     from fanferro.middleware import ConsumeMiddleware
     from fanferro.policies import DeadLetterPolicy, RetryPolicy
-    from fanferro.routing import Handler
+    from fanferro.routing import BatchHandler, Handler
 
 __all__ = ["LambdaContext", "SqsEventHandler", "sqs_handler"]
 
@@ -111,11 +112,23 @@ class SqsEventHandler:
     @overload
     def route[H: Handler](self, handler: H, /) -> H: ...
     @overload
+    def route[H: BatchHandler](
+        self,
+        message_type: type | str | None = None,
+        /,
+        *,
+        batch: Batch,
+        when: Matcher | MessagePredicate | None = None,
+        priority: int = 0,
+        name: str | None = None,
+    ) -> Callable[[H], H]: ...
+    @overload
     def route[H: Handler](
         self,
         message_type: type | str | None = None,
         /,
         *,
+        batch: None = None,
         when: Matcher | MessagePredicate | None = None,
         priority: int = 0,
         name: str | None = None,
@@ -125,12 +138,17 @@ class SqsEventHandler:
         message_type: Any = None,
         /,
         *,
+        batch: Batch | None = None,
         when: Matcher | MessagePredicate | None = None,
         priority: int = 0,
         name: str | None = None,
     ) -> Any:
-        """Registers a route on this handler's router (see :meth:`fanferro.Router.route`)."""
-        return self.router.route(message_type, when=when, priority=priority, name=name)
+        """Registers a route on this handler's router (see :meth:`fanferro.Router.route`).
+
+        A batch route (``batch=Batch(...)``) gets the records of an event it matches in one batch,
+        as soon as all of them joined it (``max_wait`` is not waited for).
+        """
+        return self.router.route(message_type, batch=batch, when=when, priority=priority, name=name)
 
     def default[H: Handler](self, handler: H) -> H:
         """Registers the fallback route (see :meth:`fanferro.Router.default`)."""

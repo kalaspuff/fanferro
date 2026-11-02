@@ -9,7 +9,9 @@ handlers on the asyncio event loop:
 3. messages past ``RetryPolicy.max_attempts`` get ``DeadLetterPolicy.on_exhausted`` without running
    a handler (dead-lettered by default), except with ``"retry"``, which keeps processing them;
 4. the router picks a route; the body is decoded into the route's type;
-5. middleware and the handler run (with an optional timeout) inside an OpenTelemetry span;
+5. middleware and the handler run (with an optional timeout) inside an OpenTelemetry span; a
+   batch route's messages join a batch at the end of their middleware, and its handler runs once
+   per batch (see :mod:`fanferro.batching`);
 6. success acks the message; failures follow the :class:`~fanferro.RetryPolicy` and
    :class:`~fanferro.DeadLetterPolicy`; handlers may also settle explicitly.
 
@@ -20,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import dataclasses
 import datetime
 import functools
@@ -39,6 +42,7 @@ from fanferro._core import (
 )
 from fanferro._utils import Duration, optional_seconds, seconds
 from fanferro.actions import Discard, HandlerAction, Reject, Requeue, Retry
+from fanferro.batching import BatchResult
 from fanferro.codecs import is_json_content_type, media_type
 from fanferro.envelopes import (
     AwsNotifications,
@@ -50,6 +54,7 @@ from fanferro.envelopes import (
     unwrap_first,
 )
 from fanferro.errors import (
+    BatchItemFailedError,
     ConfigurationError,
     ConsumerStateError,
     HandlerTimeoutError,
@@ -65,11 +70,16 @@ from fanferro.telemetry import monotonic
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
+    from types import TracebackType
 
+    from fanferro.batching import Batch
     from fanferro.client import Client
     from fanferro.matchers import Matcher, MessagePredicate
     from fanferro.resources import Queue
-    from fanferro.routing import Handler, Route, Router
+    from fanferro.routing import BatchHandler, Handler, Route, Router
+
+    type _Failure = tuple[Exception, TracebackType | None]
+    """A batch message's error, with the traceback it had in the batch handler."""
 
 __all__ = ["Consumer", "Duplicate"]
 
@@ -116,6 +126,10 @@ class _Postpone(HandlerAction):
         self.delay = delay
 
 
+class _Release(HandlerAction):
+    """Hands a message of a batch that was never handed to its handler back (the consumer stops)."""
+
+
 def _report_error(message: Message[Any], text: str, error: BaseException) -> None:
     """Reports an error of middleware that does not fail the message (``consumer.error``)."""
     settler = message._settler
@@ -154,8 +168,11 @@ class _Slot:
         """Frees the slot (idempotent)."""
         if self.held:
             self.held = False
-            self._consumer._active -= 1
+            consumer = self._consumer
+            consumer._active -= 1
             self._semaphore.release()
+            if consumer._batchers:
+                consumer._flush_if_idle()
 
     def block(self) -> bool:
         """Notes that the handler waits for a settlement it requested (an explicit ``ack()``...).
@@ -382,6 +399,71 @@ class _GroupSequencer:
             self._consumer._task_ended()
 
 
+class _Batcher:
+    """Collects the messages of one batch route into batches (see :mod:`fanferro.batching`).
+
+    A batch is handed to a task of its own (:meth:`Consumer._run_batch`) once it is full, or
+    ``max_wait`` seconds after its first message joined it. Each message's task waits for the
+    future it got from :meth:`add`: ``None`` once its batch succeeded, or its error.
+    """
+
+    __slots__ = ("_consumer", "_entries", "_route", "_timer", "batch")
+
+    def __init__(self, consumer: Consumer, route: Route, batch: Batch) -> None:
+        self._consumer = consumer
+        self._route = route
+        self.batch = batch
+        self._entries: list[tuple[Message[Any], asyncio.Future[_Failure | None]]] = []
+        self._timer: asyncio.TimerHandle | None = None
+
+    def add(self, message: Message[Any]) -> asyncio.Future[_Failure | None]:
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[_Failure | None] = loop.create_future()
+        self._entries.append((message, future))
+        if len(self._entries) >= self.batch.max_size:
+            self.flush()
+        elif self._timer is None:
+            self._timer = loop.call_later(self.batch.max_wait, self.flush)
+        return future
+
+    def discard(self, future: asyncio.Future[_Failure | None]) -> None:
+        """Takes the message of ``future`` out of the batch being collected (its task was cancelled)."""
+        for index, (_message, entry) in enumerate(self._entries):
+            if entry is future:
+                del self._entries[index]
+                break
+        if not self._entries:
+            self._cancel_timer()
+
+    def flush(self) -> None:
+        """Hands the batch being collected to its handler (no-op when it is empty)."""
+        self._cancel_timer()
+        entries, self._entries = self._entries, []
+        if entries:
+            self._consumer._spawn_batch(self._route, entries)
+
+    def release_all(self) -> None:
+        """Hands the messages being collected back unprocessed (the consumer stops)."""
+        self._cancel_timer()
+        entries, self._entries = self._entries, []
+        for _message, future in entries:
+            if not future.done():
+                future.set_result((_Release("the consumer stopped before the batch was handled"), None))
+
+    def close(self) -> None:
+        """Forgets the batch being collected (its messages' tasks were cancelled)."""
+        self._cancel_timer()
+        self._entries = []
+
+    def _cancel_timer(self) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+
 class Consumer:
     """Consumes one queue. Create it with ``client.consumer(queue, handler_or_router, ...)``.
 
@@ -462,6 +544,8 @@ class Consumer:
         # One receive batch per poller ahead of the handlers (the next receive overlaps with them),
         # but not more than the handlers can take at once; extra receive loops bring one each too.
         self.prefetch = min(batch_size, concurrency) * pollers if prefetch is None else prefetch
+        # Without an explicit prefetch, a start raises it to the largest batch of the batch routes.
+        self._default_prefetch = self.prefetch if prefetch is None else None
         self._extra_poller_slots = min(batch_size, concurrency) if prefetch is None else 0
         self.batch_size = batch_size
         self.min_receive_batch = min_receive_batch
@@ -520,17 +604,33 @@ class Consumer:
         self._abort_receiving: asyncio.Future[None] | None = None
         self._slot_waiters: set[asyncio.Task[Any]] = set()  # tasks of messages waiting for a slot
         self._releasing: set[asyncio.Task[Any]] = set()  # waiters cancelled to release their message
+        self._batchers: dict[int, _Batcher] = {}  # of the batch routes, by Route.order (created on use)
+        self._batch_context: contextvars.Context | None = None  # batch handlers run in a copy (from start)
+        self._external = False  # processing records someone else received (no receives)
+        self._dispatches = 0  # messages being processed by fanferro.testing.dispatch()
 
     # -- routing shortcuts -----------------------------------------------------------------
 
     @overload
     def route[H: Handler](self, handler: H, /) -> H: ...
     @overload
+    def route[H: BatchHandler](
+        self,
+        message_type: type | str | None = None,
+        /,
+        *,
+        batch: Batch,
+        when: Matcher | MessagePredicate | None = None,
+        priority: int = 0,
+        name: str | None = None,
+    ) -> Callable[[H], H]: ...
+    @overload
     def route[H: Handler](
         self,
         message_type: type | str | None = None,
         /,
         *,
+        batch: None = None,
         when: Matcher | MessagePredicate | None = None,
         priority: int = 0,
         name: str | None = None,
@@ -540,12 +640,13 @@ class Consumer:
         message_type: Any = None,
         /,
         *,
+        batch: Batch | None = None,
         when: Matcher | MessagePredicate | None = None,
         priority: int = 0,
         name: str | None = None,
     ) -> Any:
         """Registers a route on this consumer's router (see :meth:`fanferro.Router.route`)."""
-        return self.router.route(message_type, when=when, priority=priority, name=name)
+        return self.router.route(message_type, batch=batch, when=when, priority=priority, name=name)
 
     def default[H: Handler](self, handler: H) -> H:
         """Registers the fallback route (see :meth:`fanferro.Router.default`)."""
@@ -718,6 +819,7 @@ class Consumer:
                 self._active = self._waiting = self._blocked = self._group_waits = 0
                 self._sequencer = _GroupSequencer(self)
                 self._semaphore = asyncio.Semaphore(self.concurrency)
+                self._close_batchers()
         await engine.wait_settlements()
         return set(engine.take_deleted())
 
@@ -727,6 +829,7 @@ class Consumer:
         await client._provision_subscriptions_for(self.queue)
         self._dead_letter_url = await self._resolve_dead_letter_url(info)
         visibility = self.visibility_timeout or info.visibility_timeout or 30
+        self._fit_batches()
         heartbeat: dict[str, Any]
         if self.heartbeat is False or external:
             heartbeat = {"enabled": False}
@@ -776,6 +879,9 @@ class Consumer:
         self._active = self._waiting = self._blocked = self._group_waits = 0
         # A group task cancelled before it ran (stopping) left its group behind in the last one.
         self._sequencer = _GroupSequencer(self)
+        self._close_batchers()
+        self._external = external
+        self._batch_context = contextvars.copy_context()
         if external:
             self._engine.start()
             self._last_activity = time.monotonic()
@@ -790,6 +896,23 @@ class Consumer:
         self._last_activity = time.monotonic()
         self._dispatcher = asyncio.get_running_loop().create_task(self._dispatch_loop(), name=f"fanferro-{self.name}")
         self._state = "running"
+
+    def _fit_batches(self) -> None:
+        """Makes room in flight (``concurrency + prefetch``) for the largest batch of the batch routes.
+
+        Raises:
+            ConfigurationError: If an explicit ``prefetch`` leaves no room for it.
+        """
+        largest = max((route.batch.max_size for route in self.router.routes if route.batch is not None), default=0)
+        if self._default_prefetch is not None:
+            # At least one full batch ahead of the handlers, like a receive batch otherwise.
+            self.prefetch = max(self._default_prefetch, largest)
+        elif largest > self.concurrency + self.prefetch:
+            raise ConfigurationError(
+                f"a batch route of consumer {self.name!r} collects up to {largest} messages, but at most "
+                f"concurrency + prefetch = {self.concurrency + self.prefetch} are in flight: raise prefetch to at "
+                f"least {largest - self.concurrency}, or leave it unset, or lower Batch.max_size"
+            )
 
     def _check_configuration(self, info: Any) -> None:
         redrive = info.redrive_policy
@@ -990,6 +1113,12 @@ class Consumer:
         if not policy.release_unfinished:
             # Also the messages of cancelled tasks and of FIFO groups that never reached a handler.
             engine.leave_unsettled()
+        # The batches being collected never reached a handler: like prefetched messages.
+        for batcher in self._batchers.values():
+            if policy.release_prefetched:
+                batcher.release_all()
+            else:
+                batcher.flush()
         stop_receiving = asyncio.ensure_future(engine.stop_receiving(self._aborting))
         try:
             # The dispatcher exits on its own: `next_batch` returns as soon as receiving stops.
@@ -1027,6 +1156,7 @@ class Consumer:
             if self._abort_receiving is not None:
                 with contextlib.suppress(Exception):
                     await self._abort_receiving
+            self._close_batchers()
             await engine.close(policy.release_unfinished)
             self._client._unregister_consumer(self)
             self._client._release_pump()
@@ -1394,12 +1524,17 @@ class Consumer:
         message._settler = _Settler(self, dead_letter=dead_letter_queue)
         semaphore = asyncio.Semaphore(1)
         await semaphore.acquire()
+        # A batch is handed over once every dispatched message joined it (none is waiting any more).
+        self._dispatches += 1
+        if self._batch_context is None:
+            self._batch_context = contextvars.copy_context()  # of the consumer's first dispatch
         self._active += 1
         slot = _Slot(self, semaphore)
         try:
             return await self._process_message(message, slot, monotonic())
         finally:
             slot.release()
+            self._dispatches -= 1
 
     async def _handle(self, message: Message[Any], slot: _Slot) -> None:
         """Routes, decodes and runs the handler while holding ``slot``, then settles without it."""
@@ -1435,12 +1570,16 @@ class Consumer:
             await self._apply_action(message, self.dead_letter_policy.on_decode_error, "decode failed", error)
             return
         handler_started = monotonic()
+        batch = route.batch is not None
+        # A batch route's messages end their middleware by joining a batch (the batch's task runs
+        # the handler, with the handler timeout).
+        final = functools.partial(self._join_batch, route) if batch else route.invoke
         if self._client.consume_middleware or self._middleware:
-            call = chain_consume((*self._client.consume_middleware, *self._middleware), route.invoke)
+            call = chain_consume((*self._client.consume_middleware, *self._middleware), final)
         else:
-            call = route.invoke
+            call = final
         try:
-            if self.handler_timeout is not None:
+            if self.handler_timeout is not None and not batch:
                 try:
                     async with asyncio.timeout(self.handler_timeout):
                         await call(message)
@@ -1451,7 +1590,8 @@ class Consumer:
             else:
                 await call(message)
         finally:
-            self._stats.handler_seconds += monotonic() - handler_started
+            if not batch:
+                self._stats.handler_seconds += monotonic() - handler_started
             # Settling (auto-ack below, or the failure handling in `_process`) needs no slot.
             slot.release()
         if not message.settled and self.auto_ack:
@@ -1487,6 +1627,116 @@ class Consumer:
                 duration=round(monotonic() - handler_started, 6),
                 outcome=message.outcome,
             )
+
+    # -- batch routes ----------------------------------------------------------------------
+
+    async def _join_batch(self, route: Route, message: Message[Any]) -> None:
+        """Adds ``message`` to its batch route's batch and waits until the batch was handled.
+
+        The end of a batch route's middleware chain. Raises the error the message failed with:
+        the batch handler's, or the one its :class:`~fanferro.BatchResult` gave it.
+        """
+        slot = message._slot
+        if self._stopping and self.shutdown_policy.release_prefetched:
+            raise _Release("the consumer stopped before the message joined a batch")
+        assert route.batch is not None
+        batcher = self._batchers.get(route.order)
+        if batcher is None:
+            batcher = self._batchers[route.order] = _Batcher(self, route, route.batch)
+        future = batcher.add(message)
+        if isinstance(slot, _Slot) and slot.held:
+            slot.release()  # the batch's call takes a slot of its own (and this may complete the batch)
+        else:
+            self._flush_if_idle()
+        try:
+            failure = await future
+        except asyncio.CancelledError:
+            batcher.discard(future)
+            raise
+        if failure is not None:
+            error, traceback = failure
+            # The batch's messages share the error: each raises it with the handler's traceback.
+            raise error.with_traceback(traceback)
+
+    def _flush_if_idle(self) -> None:
+        """Hands the batches being collected over when no more messages can join them soon.
+
+        That is when the consumer receives no messages (it processes records it was given, it is
+        stopping, or :func:`fanferro.testing.dispatch` runs) and none is on its way to a batch.
+        """
+        if self._active or self._waiting or not (self._external or self._stopping or self._dispatches):
+            return
+        for batcher in self._batchers.values():
+            batcher.flush()
+
+    def _close_batchers(self) -> None:
+        for batcher in self._batchers.values():
+            batcher.close()
+        self._batchers = {}
+
+    def _spawn_batch(self, route: Route, entries: list[tuple[Message[Any], asyncio.Future[_Failure | None]]]) -> None:
+        """Runs a batch's handler as a task of the consumer's (stopping waits for it)."""
+        # In the context the consumer started in, not in that of the message that filled the batch
+        # (its span, its context variables).
+        assert self._batch_context is not None
+        context = self._batch_context.copy()
+        loop = asyncio.get_running_loop()
+        self._tasks.add(loop.create_task(self._run_batch(route, entries), context=context))
+
+    async def _run_batch(
+        self, route: Route, entries: list[tuple[Message[Any], asyncio.Future[_Failure | None]]]
+    ) -> None:
+        """Calls a batch route's handler in a handler slot and hands each message its outcome."""
+        futures = [future for _message, future in entries]
+        try:
+            # Messages of fanferro.testing.dispatch() have no consumer slots (it need not be started).
+            semaphore = self._semaphore if self._semaphore is not None else asyncio.Semaphore(1)
+            if not semaphore.locked():
+                await semaphore.acquire()
+            elif not await self._acquire_slot(semaphore):
+                _resolve(futures, (_Release("the consumer stopped before the batch was handled"), None))
+                return
+            if self._stopping and self.shutdown_policy.release_prefetched and self._semaphore is semaphore:
+                semaphore.release()  # the slot came free while the consumer began to stop
+                _resolve(futures, (_Release("the consumer stopped before the batch was handled"), None))
+                return
+            self._active += 1
+            slot = _Slot(self, semaphore)
+            messages = [message for message, _future in entries]
+            for message in messages:
+                # Settlements the handler awaits count as waits of the batch's handler call.
+                message._slot = slot
+            started = monotonic()
+            outcomes: list[_Failure | None]
+            try:
+                try:
+                    if self.handler_timeout is not None:
+                        try:
+                            async with asyncio.timeout(self.handler_timeout):
+                                result = await route.invoke_batch(messages)
+                        except TimeoutError as error:
+                            raise HandlerTimeoutError(
+                                f"handler {route.name} exceeded {self.handler_timeout} seconds"
+                            ) from error
+                    else:
+                        result = await route.invoke_batch(messages)
+                    outcomes = _batch_outcomes(route, messages, result)
+                except Exception as error:  # noqa: BLE001 - every message of the batch fails with it
+                    outcomes = [(error, error.__traceback__)] * len(messages)
+                    error = None  # no cycle through this frame
+            finally:
+                self._stats.handler_seconds += monotonic() - started
+                slot.release()
+            for future, outcome in zip(futures, outcomes, strict=True):
+                if not future.done():
+                    future.set_result(outcome)
+        except BaseException:
+            # Cancelled (stopping) or interrupted: the messages are unfinished, like a cancelled handler's.
+            for future in futures:
+                future.cancel()
+            raise
+        finally:
+            self._task_ended()
 
     async def _confirm_settlements(self, message: Message[Any]) -> None:
         """Completes the settlements the handler started (``message.ack()``...) but did not await.
@@ -1551,6 +1801,10 @@ class Consumer:
             return
         if isinstance(error, _Postpone):
             await self._postpone(message, error.delay)
+            return
+        if isinstance(error, _Release):
+            if not message.settled:
+                await self._settle_safely(message, "release", None)
             return
         if isinstance(error, Duplicate):
             self._stats.duplicates += 1
@@ -1677,7 +1931,7 @@ class Consumer:
     async def _settle_safely(
         self,
         message: Message[Any],
-        operation: Literal["ack", "retry", "requeue", "dead_letter", "discard"],
+        operation: Literal["ack", "retry", "requeue", "dead_letter", "discard", "release"],
         error: BaseException | None,
         *,
         reason: str = "",
@@ -1694,6 +1948,8 @@ class Consumer:
                 await message.requeue(delay=delay, error=error)
             elif operation == "dead_letter":
                 await message.dead_letter(reason, error=error)
+            elif operation == "release":
+                await message.release()
             else:
                 await message.discard(reason)
         except (LeaseError, ShutdownError) as settle_error:
@@ -1777,6 +2033,37 @@ class Consumer:
 
     def __repr__(self) -> str:
         return f"Consumer({self.name!r}, queue={self.queue.name!r}, state={self._state!r})"
+
+
+def _resolve(futures: list[asyncio.Future[_Failure | None]], outcome: _Failure | None) -> None:
+    for future in futures:
+        if not future.done():
+            future.set_result(outcome)
+
+
+def _batch_outcomes(route: Route, messages: list[Message[Any]], result: object) -> list[_Failure | None]:
+    """Each message's outcome from what a batch handler returned (``None``: it succeeded).
+
+    Raises:
+        TypeError: If the handler returned something other than ``None`` or a :class:`BatchResult`.
+        ValueError: If the result names a message that is not in the batch.
+    """
+    if result is None:
+        return [None] * len(messages)
+    if not isinstance(result, BatchResult):
+        raise TypeError(
+            f"the handler of batch route {route.name} returned {type(result).__name__}: "
+            "return None (every message succeeded) or a fanferro.BatchResult"
+        )
+    outcomes: list[_Failure | None] = []
+    for failed, error in result._errors_for(messages):
+        if not failed:
+            outcomes.append(None)
+        elif error is None:
+            outcomes.append((BatchItemFailedError(f"handler {route.name} reported the message as failed"), None))
+        else:
+            outcomes.append((error, error.__traceback__))
+    return outcomes
 
 
 def _retrieve_error(task: asyncio.Task[None]) -> None:
