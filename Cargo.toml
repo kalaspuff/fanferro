@@ -31,7 +31,7 @@ hex = "0.4"
 md-5 = "0.11"
 memchr = "2.7"
 miniz_oxide = "0.9"
-parking_lot = "0.12"
+parking_lot = "0.13"
 prost = "0.14"
 prost-types = "0.14"
 pyo3 = { version = "0.29", features = ["abi3-py312"] }
