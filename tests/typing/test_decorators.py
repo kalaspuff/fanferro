@@ -103,6 +103,42 @@ async def test_lambda_handler_decorators_keep_handler_types() -> None:
         await client.close()
 
 
+async def test_batch_route_decorators_keep_handler_types() -> None:
+    client = memory_client()
+    try:
+        message = build_message({"n": 1})
+        router = fanferro.Router()
+        consumer = client.consumer(client.queue("typed-batches"))
+        handler = fanferro.aws_lambda.sqs_handler(client, queue="typed-batch-lambda")
+        batch = fanferro.Batch(max_size=5)
+
+        @router.route(OrderPlaced, batch=batch)
+        async def store(orders: list[OrderPlaced]) -> None: ...
+
+        @consumer.route(OrderPlaced, batch=batch, name="orders")
+        async def partial(messages: list[fanferro.Message[OrderPlaced]]) -> fanferro.BatchResult | None:
+            return fanferro.BatchResult([0])
+
+        @handler.route(batch=batch)
+        async def results(messages: list[fanferro.Message[Any]]) -> fanferro.BatchResult:
+            return fanferro.BatchResult()
+
+        call = store([OrderPlaced("1")])
+        assert_type(call, Coroutine[Any, Any, None])
+        await call
+        returned = partial([])
+        assert_type(returned, Coroutine[Any, Any, fanferro.BatchResult | None])
+        assert len(await returned or fanferro.BatchResult()) == 1
+        result = results([message])
+        assert_type(result, Coroutine[Any, Any, fanferro.BatchResult])
+        await result
+        assert [route.batch for route in router.routes] == [batch]
+        assert consumer.router.routes[0].handler == partial
+        assert handler.router.routes[0].handler == results
+    finally:
+        await client.close()
+
+
 async def test_client_on_keeps_hook_types() -> None:
     client = memory_client()
     try:

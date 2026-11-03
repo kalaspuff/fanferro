@@ -24,6 +24,12 @@ Example::
 
     @router.default
     async def unknown(message: fanferro.Message) -> None: ...
+
+A route with ``batch=Batch(...)`` calls its handler with a list of messages (``list[Message[T]]``)
+or bodies (``list[T]``) instead (see :mod:`fanferro.batching`)::
+
+    @router.route(OrderCreated, batch=fanferro.Batch(max_size=100, max_wait=0.5))
+    async def store(orders: list[fanferro.Message[OrderCreated]]) -> fanferro.BatchResult | None: ...
 """
 
 from __future__ import annotations
@@ -32,22 +38,27 @@ import functools
 import inspect
 import itertools
 import typing
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, overload
 
 from fanferro._utils import is_async_callable
+from fanferro.batching import Batch
 from fanferro.errors import RoutingError
 from fanferro.matchers import Matcher, MessagePredicate, as_matcher
 from fanferro.messages import Message
 
 if TYPE_CHECKING:
+    from fanferro.batching import BatchResult
     from fanferro.message_types import MessageTypes
 
-__all__ = ["Handler", "Route", "Router"]
+__all__ = ["BatchHandler", "Handler", "Route", "Router"]
 
 type Handler = Callable[..., Awaitable[None]]
 """An async callable taking a :class:`Message` or a decoded body."""
+
+type BatchHandler = Callable[..., Awaitable[BatchResult | None]]
+"""An async callable taking a list of :class:`Message` objects or decoded bodies (a batch route)."""
 
 _counter = itertools.count()
 
@@ -56,17 +67,19 @@ _counter = itertools.count()
 class Route:
     """A handler and the conditions under which it receives messages."""
 
-    handler: Handler
+    handler: Handler | BatchHandler
     body_type: Any
     """Type the body is decoded into (``Any`` = decide by content type)."""
     pass_message: bool
-    """Call the handler with the :class:`Message` (``True``) or only the body."""
+    """Call the handler with the :class:`Message` (``True``) or only the body (a list of them for a batch route)."""
     name: str
     message_type: type | str | None = None
     """Message type condition (a class resolves to its registered type names)."""
     matcher: Matcher | None = None
     priority: int = 0
     fallback: bool = False
+    batch: Batch | None = None
+    """How the route collects messages into batches (``None``: one message per handler call)."""
     order: int = field(default_factory=lambda: next(_counter))
 
     def type_names(self, types: MessageTypes) -> tuple[str, ...] | None:
@@ -94,14 +107,22 @@ class Route:
             parts.append(f"priority={self.priority!r}")
         if self.fallback:
             parts.append("fallback=True")
+        if self.batch is not None:
+            parts.append(f"batch={self.batch!r}")
         return f"Route({', '.join(parts)})"
 
     async def invoke(self, message: Message[Any]) -> None:
-        """Calls the handler."""
+        """Calls the handler (of a route without ``batch``)."""
         if self.pass_message:
             await self.handler(message)
         else:
             await self.handler(message.body)
+
+    async def invoke_batch(self, messages: list[Message[Any]]) -> BatchResult | None:
+        """Calls the handler of a batch route with ``messages`` (or their bodies)."""
+        if self.pass_message:
+            return await self.handler(messages)
+        return await self.handler([message.body for message in messages])
 
 
 def _type_repr(value: type | str) -> str:
@@ -133,8 +154,8 @@ def _handler_name(handler: Callable[..., Any]) -> str:
     return getattr(_unwrap_partial(handler), "__qualname__", None) or repr(handler)
 
 
-def inspect_handler(handler: Handler, message_type: type | str | None = None) -> tuple[Any, bool]:
-    """Determines ``(body_type, pass_message)`` from the handler signature.
+def _first_annotation(handler: Handler | BatchHandler) -> Any:
+    """The annotation of the handler's first positional parameter (``Parameter.empty`` if none).
 
     Raises:
         RoutingError: If the handler takes no parameters, is not async, or has unresolvable hints.
@@ -156,7 +177,19 @@ def inspect_handler(handler: Handler, message_type: type | str | None = None) ->
             f"cannot resolve the type hints of {_handler_name(handler)}: {error}. "
             "Define the annotated types at module level or pass the type to route(...) explicitly."
         ) from error
-    annotation = hints.get(first.name, inspect.Parameter.empty)
+    return hints.get(first.name, inspect.Parameter.empty)
+
+
+def inspect_handler(handler: Handler | BatchHandler, message_type: type | str | None = None) -> tuple[Any, bool]:
+    """Determines ``(body_type, pass_message)`` from the handler signature.
+
+    Raises:
+        RoutingError: If the handler takes no parameters, is not async, or has unresolvable hints.
+    """
+    return _from_annotation(_first_annotation(handler), message_type)
+
+
+def _from_annotation(annotation: Any, message_type: type | str | None) -> tuple[Any, bool]:
     explicit_class = message_type if isinstance(message_type, type) else None
     if annotation is inspect.Parameter.empty:
         return (explicit_class or Any), True
@@ -166,6 +199,30 @@ def inspect_handler(handler: Handler, message_type: type | str | None = None) ->
         args = typing.get_args(annotation)
         return (args[0] if args else (explicit_class or Any)), True
     return annotation, False
+
+
+_SEQUENCES = (list, Sequence)
+
+
+def inspect_batch_handler(handler: BatchHandler, message_type: type | str | None = None) -> tuple[Any, bool]:
+    """Determines ``(body_type, pass_message)`` from the signature of a batch route's handler.
+
+    Its first parameter is a list of what a handler of a single message takes: ``list[Message[T]]``
+    (or ``Sequence[...]``), ``list[T]``, or a bare ``list`` / no annotation (messages).
+
+    Raises:
+        RoutingError: If the handler cannot be inspected or does not take a list.
+    """
+    annotation = _first_annotation(handler)
+    if annotation is inspect.Parameter.empty or annotation in _SEQUENCES:
+        return _from_annotation(inspect.Parameter.empty, message_type)
+    if typing.get_origin(annotation) in _SEQUENCES:
+        args = typing.get_args(annotation)
+        return _from_annotation(args[0] if args else inspect.Parameter.empty, message_type)
+    raise RoutingError(
+        f"the handler of a batch route takes a list: annotate the first parameter of {_handler_name(handler)} "
+        f"as list[Message[T]] or list[T], not {annotation!r}"
+    )
 
 
 class Router:
@@ -188,16 +245,27 @@ class Router:
 
     def add(
         self,
-        handler: Handler,
+        handler: Handler | BatchHandler,
         message_type: type | str | None = None,
         *,
         when: Matcher | MessagePredicate | None = None,
         priority: int = 0,
         name: str | None = None,
         fallback: bool = False,
+        batch: Batch | None = None,
     ) -> Route:
-        """Adds a route (the non-decorator form of :meth:`route`)."""
-        body_type, pass_message = inspect_handler(handler, message_type)
+        """Adds a route (the non-decorator form of :meth:`route`).
+
+        Raises:
+            RoutingError: If the handler's signature does not fit (see :meth:`route`).
+            TypeError: If ``batch`` is not a :class:`~fanferro.Batch`.
+        """
+        if batch is not None and not isinstance(batch, Batch):
+            raise TypeError(f"batch must be a fanferro.Batch, got {type(batch).__name__}")
+        if batch is not None:
+            body_type, pass_message = inspect_batch_handler(handler, message_type)
+        else:
+            body_type, pass_message = inspect_handler(handler, message_type)
         typed = isinstance(body_type, type) and not _is_generic_type(body_type)
         if message_type is None and not fallback and when is None and typed:
             # A typed handler without conditions routes by the body type's message type name.
@@ -211,6 +279,7 @@ class Router:
             matcher=as_matcher(when) if when is not None else None,
             priority=priority,
             fallback=fallback,
+            batch=batch,
         )
         self._routes.append(route)
         self._sorted = None
@@ -219,11 +288,23 @@ class Router:
     @overload
     def route[H: Handler](self, handler: H, /) -> H: ...
     @overload
+    def route[H: BatchHandler](
+        self,
+        message_type: type | str | None = None,
+        /,
+        *,
+        batch: Batch,
+        when: Matcher | MessagePredicate | None = None,
+        priority: int = 0,
+        name: str | None = None,
+    ) -> Callable[[H], H]: ...
+    @overload
     def route[H: Handler](
         self,
         message_type: type | str | None = None,
         /,
         *,
+        batch: None = None,
         when: Matcher | MessagePredicate | None = None,
         priority: int = 0,
         name: str | None = None,
@@ -233,6 +314,7 @@ class Router:
         message_type: Any = None,
         /,
         *,
+        batch: Batch | None = None,
         when: Matcher | MessagePredicate | None = None,
         priority: int = 0,
         name: str | None = None,
@@ -246,13 +328,17 @@ class Router:
             when: Additional matcher (attributes, headers, body fields, topic...).
             priority: Higher priorities are evaluated first.
             name: Route name used in events (defaults to the handler's qualified name).
+            batch: Collect the route's messages into batches and call the handler once per batch
+                with a list of them (``list[Message[T]]``) or of their bodies (``list[T]``); it may
+                return a :class:`~fanferro.BatchResult` to fail some of them (see
+                :mod:`fanferro.batching`).
         """
         if callable(message_type) and not isinstance(message_type, type):
             self.add(message_type)
             return message_type
 
-        def decorate[H: Handler](handler: H) -> H:
-            self.add(handler, message_type, when=when, priority=priority, name=name)
+        def decorate(handler: Any) -> Any:
+            self.add(handler, message_type, when=when, priority=priority, name=name, batch=batch)
             return handler
 
         return decorate

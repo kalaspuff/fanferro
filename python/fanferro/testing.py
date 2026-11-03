@@ -9,7 +9,8 @@
   (``message.outcome``, ``settler.calls``).
 * :func:`dispatch` - runs a consumer's processing (routing, decoding into the route's type,
   middleware, the handler, failure handling and settlement) for one message, without a broker,
-  and returns its outcome and the settlement calls.
+  and returns its outcome and the settlement calls; :func:`dispatch_batch` does it for several
+  messages at once, which a batch route hands to its handler in one batch.
 * :func:`receive_sqs_event` - receives messages of a queue as the SQS event an AWS Lambda event
   source mapping would invoke a function with; :func:`invoke_sqs_handler` also invokes a
   :func:`fanferro.aws_lambda.sqs_handler` function with it and deletes the records it did not
@@ -37,6 +38,7 @@ Example::
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Unpack, cast
@@ -53,7 +55,7 @@ from fanferro.provisioning import Provisioning
 from fanferro.routing import Router
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
     from fanferro.aws_lambda import LambdaContext, SqsEventHandler
     from fanferro.options import ClientOptions, ConsumerOptions
@@ -67,6 +69,7 @@ __all__ = [
     "RecordingSettler",
     "build_message",
     "dispatch",
+    "dispatch_batch",
     "invoke_sqs_handler",
     "memory_client",
     "receive_sqs_event",
@@ -362,7 +365,9 @@ async def dispatch(
     retry and dead-letter policies say (handler actions such as :class:`~fanferro.Retry`,
     :class:`~fanferro.Reject`, :class:`~fanferro.Requeue` and :class:`~fanferro.Discard`, errors,
     unroutable messages and decode errors included). The settlement is not sent anywhere: the
-    delivery calls are returned. Events are emitted on the consumer's client.
+    delivery calls are returned. Events are emitted on the consumer's client. A batch route hands
+    the message to its handler at once, in a batch of one (:func:`dispatch_batch` dispatches
+    several).
 
     Example::
 
@@ -392,17 +397,94 @@ async def dispatch(
         TypeError: If ``message`` is a received message (it has a real delivery), or ``options``
             are given with a consumer.
     """
+    consumer = _consumer_for(target, message, client, options)
+    built = _built(consumer, message)
+    delivery = cast("FakeDelivery", built.delivery)
+    # The message gets a settler of its own that knows about the dead-letter queue: the consumer
+    # is left as it is, also when dispatches on it overlap.
+    outcome = await consumer._dispatch(built, dead_letter_queue=_dead_letter_queue(consumer, dead_letter_queue))
+    return DispatchResult(outcome=outcome, message=built, calls=list(delivery.calls))
+
+
+async def dispatch_batch(
+    target: Consumer | Router,
+    messages: Sequence[Message[Any] | object],
+    *,
+    client: Client | None = None,
+    dead_letter_queue: bool | None = None,
+    **options: Unpack[ConsumerOptions],
+) -> list[DispatchResult]:
+    """Runs a consumer's processing for several messages at once, like :func:`dispatch` for each.
+
+    The messages are processed concurrently, and a batch route (``route(..., batch=Batch(...))``)
+    hands those it matches to its handler together, once all of them joined their batch (in
+    batches of at most ``max_size``, without waiting ``max_wait``). Its handler's result decides
+    each message's outcome.
+
+    Example::
+
+        results = await dispatch_batch(consumer, [build_message(Order(id=1)), build_message(Order(id=2))])
+        assert [result.outcome for result in results] == ["acked", "retried"]
+
+    Args:
+        target: A :class:`~fanferro.Consumer` or a :class:`~fanferro.Router` (see :func:`dispatch`).
+        messages: Messages from :func:`build_message`, or bodies to build them from.
+        client: The client of a consumer created for a router (see :func:`dispatch`).
+        dead_letter_queue: Whether the queue has a dead-letter queue (see :func:`dispatch`).
+        **options: :class:`~fanferro.Consumer` options of a consumer created for a router.
+
+    Returns:
+        The outcome, the message and the delivery calls of each message, in order.
+
+    Raises:
+        TypeError: If a message is a received message or given twice, or ``options`` are given
+            with a consumer.
+    """
+    if not messages:
+        return []
+    consumer = _consumer_for(target, messages[0], client, options)
+    built = [_built(consumer, message) for message in messages]
+    if len({id(message) for message in built}) != len(built):
+        raise TypeError("dispatch_batch() takes each message once")
+    known = _dead_letter_queue(consumer, dead_letter_queue)
+    # Counted as waiting until each one is processed: their batches wait until all joined.
+    pending = len(built)
+    consumer._waiting += pending
+
+    async def run(message: Message[Any]) -> Outcome | None:
+        nonlocal pending
+        pending -= 1
+        consumer._waiting -= 1
+        return await consumer._dispatch(message, dead_letter_queue=known)
+
+    try:
+        outcomes = await asyncio.gather(*(run(message) for message in built))
+    finally:
+        consumer._waiting -= pending  # those that never started (cancelled)
+    return [
+        DispatchResult(outcome=outcome, message=message, calls=list(cast("FakeDelivery", message.delivery).calls))
+        for outcome, message in zip(outcomes, built, strict=True)
+    ]
+
+
+def _consumer_for(
+    target: Consumer | Router | Handler, message: object, client: Client | None, options: ConsumerOptions
+) -> Consumer:
+    """The consumer that :func:`dispatch` runs: ``target`` or one created for a router or handler."""
     if isinstance(target, Consumer):
         if options:
             raise TypeError("consumer options apply to a router or handler, not to a consumer")
-        consumer = target
-    else:
-        client = client if client is not None else memory_client()
-        router = target if isinstance(target, Router) else Router()
-        if not isinstance(target, Router):
-            router.add(target, fallback=True)
-        queue = message.queue if isinstance(message, Message) and message.queue else "test-queue"
-        consumer = Consumer(client, client.queue(queue), router, **options)
+        return target
+    client = client if client is not None else memory_client()
+    router = target if isinstance(target, Router) else Router()
+    if not isinstance(target, Router):
+        router.add(target, fallback=True)
+    queue = message.queue if isinstance(message, Message) and message.queue else "test-queue"
+    return Consumer(client, client.queue(queue), router, **options)
+
+
+def _built(consumer: Consumer, message: Message[Any] | object) -> Message[Any]:
+    """A message from :func:`build_message` with a :class:`FakeDelivery`, or one built from a body."""
     if isinstance(message, Message):
         built = cast("Message[Any]", message)
         if built.delivery is None:
@@ -411,17 +493,15 @@ async def dispatch(
             raise TypeError("dispatch() takes a message from build_message(), not a received message")
         if built.settled:
             raise LeaseError(f"message {built.id} was already settled ({built.outcome})")
-    else:
-        codecs = consumer._client.codecs
-        built = build_message(message, codecs=codecs, queue=consumer.queue.name)
-    delivery = cast("FakeDelivery", built.delivery)
-    if dead_letter_queue is None and consumer.state == "created":
-        policy_queue = consumer.dead_letter_policy.queue
-        dead_letter_queue = policy_queue is not None or consumer.queue.dead_letter_queue is not None
-    # The message gets a settler of its own that knows about the dead-letter queue: the consumer
-    # is left as it is, also when dispatches on it overlap.
-    outcome = await consumer._dispatch(built, dead_letter_queue=dead_letter_queue)
-    return DispatchResult(outcome=outcome, message=built, calls=list(delivery.calls))
+        return built
+    return build_message(message, codecs=consumer._client.codecs, queue=consumer.queue.name)
+
+
+def _dead_letter_queue(consumer: Consumer, known: bool | None) -> bool | None:
+    """Whether the consumer has a dead-letter queue: as given, or as the queue or its policy declare."""
+    if known is None and consumer.state == "created":
+        return consumer.dead_letter_policy.queue is not None or consumer.queue.dead_letter_queue is not None
+    return known
 
 
 async def receive_sqs_event(

@@ -32,6 +32,7 @@ Read ``fanferro guide`` (or ``python -m fanferro guide``) for the full usage gui
 from fanferro import actions as actions
 from fanferro import aws as aws
 from fanferro import aws_lambda as aws_lambda
+from fanferro import batching as batching
 from fanferro import client as client
 from fanferro import codecs, envelopes, idempotency, matchers, outbox, testing
 from fanferro import config as config
@@ -59,6 +60,7 @@ from fanferro._core import (
 )
 from fanferro._core import __version__ as __version__
 from fanferro.actions import Discard, HandlerAction, Reject, Requeue, Retry
+from fanferro.batching import Batch, BatchResult
 from fanferro.client import Client
 from fanferro.codecs import Codec, CodecRegistry
 from fanferro.config import AwsRetry, Credentials, Timeouts
@@ -67,6 +69,7 @@ from fanferro.envelopes import Envelope
 from fanferro.errors import (
     AccessDeniedError,
     AwsError,
+    BatchItemFailedError,
     BatchItemFailuresError,
     BatchPublishError,
     CodecError,
@@ -151,10 +154,13 @@ __all__ = [
     "AwsError",
     "AwsRetry",
     "Backoff",
+    "Batch",
     "BatchFailure",
+    "BatchItemFailedError",
     "BatchItemFailuresError",
     "BatchPublishError",
     "BatchPublishResult",
+    "BatchResult",
     "Carrier",
     "Client",
     "ClientCounters",

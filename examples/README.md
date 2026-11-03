@@ -20,6 +20,7 @@ FANFERRO_USE_AWS=1 AWS_REGION=eu-west-1 uv run python -m examples.quickstart   #
 | [`protobuf_binary.py`](protobuf_binary.py) | Protobuf payloads in the binary CloudEvents envelope |
 | [`large_payloads.py`](large_payloads.py) | Claim checks: large bodies stored in S3 with bucket/key and presigned URL pointers |
 | [`transactional_outbox.py`](transactional_outbox.py) | Transactional outbox on SQLite with `topic.prepare()` and `OutboxRelay` |
+| [`batch_handler.py`](batch_handler.py) | A batch route: one database transaction per batch of messages, failing single messages with `BatchResult` |
 | [`idempotent_consumer.py`](idempotent_consumer.py) | Inbox pattern: deduplication record and side effects in one transaction |
 | [`custom_envelope_and_codec.py`](custom_envelope_and_codec.py) | A custom envelope for a legacy format and a custom (CSV) codec |
 | [`observability.py`](observability.py) | Log configuration, async event hooks, OpenTelemetry spans and on-demand metrics |
