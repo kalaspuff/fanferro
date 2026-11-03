@@ -8,6 +8,17 @@ Entries are generated from conventional commits with [git-cliff](https://git-cli
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-03
+
+### Features
+
+- **consumer:** Batch routes that hand several messages to one handler call (#288)
+- **testing:** Ship drain, consume_until, wait_for, record_published and peek (#287)
+
+### Bug fixes
+
+- **consumer:** Keep heartbeats on leases while their delete is in flight (#286)
+
 ## [0.10.0] - 2026-11-01
 
 ### Features
