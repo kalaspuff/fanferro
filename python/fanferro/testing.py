@@ -678,7 +678,7 @@ async def drain(
 
         dead = await drain(orders.dead_letter_queue)
         assert [m.json() for m in dead] == [{"id": 1}]
-        assert dead[0].dead_letter_info.reason == "handler_error"
+        assert dead[0].dead_letter_info.reason == "retries exhausted"
 
     Args:
         queue: The queue (it is resolved if needed).
