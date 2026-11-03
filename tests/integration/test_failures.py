@@ -9,8 +9,9 @@ import pytest
 
 import fanferro
 from fanferro.idempotency import Claim, InMemoryIdempotencyStore, idempotent
+from fanferro.testing import consume_until, drain, wait_for
 from tests.conftest import ClientFactory
-from tests.helpers import OrderCreated, consume_until, drain_queue, wait_for
+from tests.helpers import OrderCreated
 
 FAST_RETRY = fanferro.Backoff.constant(0)
 
@@ -36,6 +37,25 @@ async def test_retry_then_succeed(client_factory: ClientFactory, name: Any) -> N
         await consume_until(consumer, lambda: consumer.stats().processed == 1)
     assert attempts == [1, 2, 3]
     assert consumer.stats().failed == 2
+
+
+async def test_run_until_idle_with_pending_waits_for_the_retry(client_factory: ClientFactory, name: Any) -> None:
+    client = client_factory()
+    queue = queue_with_dlq(client, name("pending"))
+    attempts: list[int] = []
+
+    async def handle(message: fanferro.Message[OrderCreated]) -> None:
+        attempts.append(message.attempt)
+        if message.attempt == 1:
+            raise ConnectionError("downstream unavailable")
+
+    retry = fanferro.RetryPolicy(backoff=fanferro.Backoff.constant(1))
+    consumer = client.consumer(queue, handle, wait_time=1, retry=retry)
+    async with client:
+        await queue.send(OrderCreated(order_id=1))
+        await consumer.run_until_idle(pending=True, timeout=30)
+        assert (await queue.approximate_count()).total == 0
+    assert attempts == [1, 2]
 
 
 async def test_on_exhausted_retry_runs_the_handler_again(client_factory: ClientFactory, name: Any) -> None:
@@ -80,7 +100,7 @@ async def test_exhausted_retries_dead_letter_with_metadata(client_factory: Clien
         await queue.send(OrderCreated(order_id=9))
         await consume_until(consumer, lambda: len(dead) == 1)
         assert queue.dead_letter_queue is not None
-        dead_messages = await drain_queue(client, queue.dead_letter_queue)
+        dead_messages = await drain(queue.dead_letter_queue)
     assert len(dead_messages) == 1
     message = dead_messages[0]
     assert message.json() == {"order_id": 9, "total": 0.0}
@@ -116,7 +136,7 @@ async def test_dead_letter_queues_of_the_other_type(
         await dlq.resolve()
         await queue.send(OrderCreated(order_id=7), group_id="g" if source else None)
         await consume_until(consumer, lambda: len(dead) == 1)
-        dead_messages = await drain_queue(client, dlq)
+        dead_messages = await drain(dlq)
     assert [message.json() for message in dead_messages] == [{"order_id": 7, "total": 0.0}]
 
 
@@ -148,7 +168,7 @@ async def test_handler_actions(client_factory: ClientFactory, name: Any) -> None
             await queue.send(OrderCreated(order_id=order_id))
         await consume_until(consumer, lambda: len(outcomes.get(3, [])) == 2 and len(outcomes.get(4, [])) == 2)
         assert queue.dead_letter_queue is not None
-        dead = await drain_queue(client, queue.dead_letter_queue)
+        dead = await drain(queue.dead_letter_queue)
     assert outcomes[1] == [1]
     assert outcomes[2] == [1]
     assert outcomes[3] == [1, 2], "requeue increments the attempt counter"
@@ -299,7 +319,7 @@ async def test_unroutable_and_undecodable(client_factory: ClientFactory, name: A
         await queue.send(b"\x00\x01", type="test.order_created.v1", content_type="application/json")
         await consume_until(consumer, lambda: len(events) == 3)
         assert queue.dead_letter_queue is not None
-        dead = await drain_queue(client, queue.dead_letter_queue)
+        dead = await drain(queue.dead_letter_queue)
     kinds = sorted(event.kind.value for event in events)
     assert kinds == ["message.decode_failed", "message.decode_failed", "message.unroutable"]
     reasons = sorted(message.dead_letter_info.reason for message in dead)  # type: ignore[union-attr]
@@ -625,7 +645,7 @@ async def test_attempts_beyond_limit_skip_the_handler(client_factory: ClientFact
         assert queue.dead_letter_queue is not None
         dlq = queue.dead_letter_queue
         await consume_until(strict, lambda: strict.stats().engine.messages_dead_lettered == 1)
-        dead_messages = await drain_queue(client, dlq)
+        dead_messages = await drain(dlq)
     assert dead_messages[0].dead_letter_info.reason == "maximum attempts exceeded"  # type: ignore[union-attr]
 
 
@@ -777,7 +797,7 @@ async def test_settlements_that_are_not_awaited_still_happen(
     async with client:
         await queue.send(OrderCreated(order_id=1))
         await consume_until(consumer, lambda: consumer.stats().processed == (2 if comes_back else 1))
-        dead = await drain_queue(client, queue.dead_letter_queue)
+        dead = await drain(queue.dead_letter_queue)
         assert await queue.approximate_count() == fanferro.QueueCounts(visible=0, in_flight=0, delayed=0)
     assert len(attempts) == (2 if comes_back else 1)
     if operation == "requeue":

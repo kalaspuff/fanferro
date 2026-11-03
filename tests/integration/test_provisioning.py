@@ -7,8 +7,9 @@ from typing import Any
 import pytest
 
 import fanferro
+from fanferro.testing import drain, wait_for
 from tests.conftest import ClientFactory
-from tests.helpers import OrderCreated, drain_queue, wait_for
+from tests.helpers import OrderCreated
 
 EXISTING = fanferro.Provisioning.existing()
 
@@ -59,7 +60,7 @@ async def test_fallback(client_factory: ClientFactory, name: Any) -> None:
     )
     async with client:
         await primary.send(OrderCreated(order_id=1))
-        messages = await drain_queue(client, fallback_queue)
+        messages = await drain(fallback_queue)
     assert failures[0].reason == "missing"
     assert [m.json()["order_id"] for m in messages] == [1]
 
@@ -115,7 +116,7 @@ async def test_fifo_resources(client_factory: ClientFactory, name: Any) -> None:
         assert topic_info.fifo
         assert topic_info.content_based_deduplication
         await topic.publish(OrderCreated(order_id=1), group_id="g")
-        messages = await drain_queue(client, queue)
+        messages = await drain(queue)
     assert messages[0].group_id == "g"
     with pytest.raises(fanferro.ConfigurationError):
         client.queue(name("mixed"), dead_letter=fanferro.DeadLetterQueue("dlq.fifo"))
@@ -154,7 +155,7 @@ async def test_assume_mode(client_factory: ClientFactory, name: Any, backend: st
     assert queue.last_report.status == "assumed"
     assert info.name == queue_name
     await queue.send({"x": 1})
-    assert len(await drain_queue(client, queue)) == 1
+    assert len(await drain(queue)) == 1
 
 
 async def test_assumed_subscriptions_are_not_looked_up(client_factory: ClientFactory, name: Any) -> None:
@@ -214,7 +215,7 @@ async def test_kms_attributes(client_factory: ClientFactory, name: Any) -> None:
         attributes = await queue.get_attributes()
         topic_attributes = await topic.get_attributes()
         await queue.send({"secret": True})
-        messages = await drain_queue(client, queue)
+        messages = await drain(queue)
     assert attributes["KmsMasterKeyId"] == "alias/aws/sqs"
     assert attributes["KmsDataKeyReusePeriodSeconds"] == "300"
     assert topic_attributes["KmsMasterKeyId"] == "alias/aws/sns"
@@ -271,7 +272,7 @@ async def test_queues_share_a_dead_letter_queue(client_factory: ClientFactory, n
             await wait_for(lambda: len(dead) == 2)
         finally:
             await asyncio.gather(*(consumer.stop() for consumer in consumers))
-        messages = await drain_queue(client, first.dead_letter_queue)
+        messages = await drain(first.dead_letter_queue)
     assert sorted(message.json()["order_id"] for message in messages) == [1, 2]
 
 
@@ -290,7 +291,7 @@ async def test_resources_create_their_own_payload_buckets(client_factory: Client
         assert sent.offloaded.bucket == shared.bucket
         assert (await other.send({"n": 2})).offloaded is not None
         assert (await topic.publish({"blob": "x" * 300_000})).offloaded is not None
-        bodies = [message.json() for message in await drain_queue(client, queue)]
+        bodies = [message.json() for message in await drain(queue)]
     assert sorted(bodies, key=lambda body: "blob" in body) == [{"n": 1}, {"blob": "x" * 300_000}]
 
 
@@ -302,7 +303,7 @@ async def test_provisioning_a_queue_creates_its_payload_bucket(client_factory: C
     async with client:
         await client.provision(queue)
         assert (await queue.send({"n": 1})).offloaded is not None
-        assert [message.json() for message in await drain_queue(client, queue)] == [{"n": 1}]
+        assert [message.json() for message in await drain(queue)] == [{"n": 1}]
 
 
 async def test_queues_are_created_again_and_purged_again_only_after_a_minute(
@@ -487,9 +488,9 @@ async def test_subscriptions_declared_after_entering_resolve_before_publishing(
         client.subscription(topic, prepared)
         await client.publish_prepared(await topic.prepare({"id": 4}))
         assert topic._pending_subscriptions == []
-        assert [json.loads(m.body)["id"] for m in await drain_queue(client, single)] == [1, 2, 3, 4]
-        assert sorted(json.loads(m.body)["id"] for m in await drain_queue(client, batch)) == [2, 3, 4]
-        assert [json.loads(m.body)["id"] for m in await drain_queue(client, prepared)] == [4]
+        assert [json.loads(m.body)["id"] for m in await drain(single)] == [1, 2, 3, 4]
+        assert sorted(json.loads(m.body)["id"] for m in await drain(batch)) == [2, 3, 4]
+        assert [json.loads(m.body)["id"] for m in await drain(prepared)] == [4]
 
 
 async def test_an_unavailable_late_subscription_stays_pending(client_factory: ClientFactory, name: Any) -> None:
@@ -507,7 +508,7 @@ async def test_an_unavailable_late_subscription_stays_pending(client_factory: Cl
         await subscription.resolve(force=True)
         await topic.publish({"id": 2})
         assert topic._pending_subscriptions == []
-        assert [json.loads(m.body)["id"] for m in await drain_queue(client, queue)] == [2]
+        assert [json.loads(m.body)["id"] for m in await drain(queue)] == [2]
 
 
 async def test_subscriptions_declared_without_provisioning_are_not_resolved_by_publishing(

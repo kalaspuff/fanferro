@@ -15,8 +15,7 @@ import pytest
 import fanferro
 from fanferro import OutgoingMessage
 from fanferro.idempotency import InMemoryIdempotencyStore, idempotent
-from fanferro.testing import memory_client
-from tests.helpers import drain_queue
+from fanferro.testing import drain, memory_client
 
 # Each line ending in `# error: <name>` must get that pyrefly error, and no other line any.
 _PROBE = """
@@ -118,7 +117,7 @@ async def test_batch_defaults_apply_to_plain_bodies_only() -> None:
             [{"n": 1}, OutgoingMessage({"n": 2}, attributes={"tenant": "globex"})], attributes={"tenant": "acme"}
         )
         assert len(result.successful) == 2
-        messages = await drain_queue(client, queue)
+        messages = await drain(queue)
     assert {m.json()["n"]: m.attribute("tenant") for m in messages} == {1: "acme", 2: "globex"}
 
 

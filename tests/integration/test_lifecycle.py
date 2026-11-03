@@ -11,8 +11,9 @@ import pytest
 import fanferro
 import fanferro.client as client_module
 import fanferro.consumer as consumer_module
+from fanferro.testing import consume_until, wait_for
 from tests.conftest import ClientFactory
-from tests.helpers import OrderCreated, consume_until, wait_for
+from tests.helpers import OrderCreated
 
 
 async def test_heartbeats_protect_slow_handlers(client_factory: ClientFactory, name: Any) -> None:

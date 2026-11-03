@@ -9,8 +9,9 @@ from typing import Any
 import pytest
 
 import fanferro
+from fanferro.testing import consume_until, drain, wait_for
 from tests.conftest import ClientFactory
-from tests.helpers import OrderCreated, consume_until, drain_queue, wait_for
+from tests.helpers import OrderCreated
 
 FAST_RETRY = fanferro.RetryPolicy(max_attempts=5, backoff=fanferro.Backoff.constant(0))
 
@@ -96,7 +97,7 @@ async def test_partial_failures_settle_each_message(client_factory: ClientFactor
             lambda: consumer.stats().processed == 3 and consumer.stats().engine.messages_dead_lettered == 1,
         )
         assert queue.dead_letter_queue is not None
-        dead = await drain_queue(client, queue.dead_letter_queue)
+        dead = await drain(queue.dead_letter_queue)
     handled = sorted(item for batch in calls for item in batch)
     assert handled == [(1, 1), (2, 1), (2, 2), (3, 1), (4, 1)]
     assert [message.json()["order_id"] for message in dead] == [3]
@@ -140,7 +141,7 @@ async def test_messages_settled_by_the_handler_are_left_alone(client_factory: Cl
         await queue.send_batch(orders(1, 2, 3))
         await consume_until(consumer, lambda: consumer.stats().processed == 3)
         assert queue.dead_letter_queue is not None
-        dead = await drain_queue(client, queue.dead_letter_queue)
+        dead = await drain(queue.dead_letter_queue)
     assert [message.json()["order_id"] for message in dead] == [2]
     assert consumer.stats().engine.messages_acked == 2
 

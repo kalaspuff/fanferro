@@ -12,8 +12,9 @@ import boto3
 import pytest
 
 import fanferro
+from fanferro.testing import drain
 from tests.conftest import emulator_client
-from tests.helpers import OrderCreated, drain_queue
+from tests.helpers import OrderCreated
 
 pytestmark = pytest.mark.e2e
 
@@ -117,7 +118,7 @@ async def test_aws_extended_client_pointers(ministack_endpoint: str, aws: dict[s
             ),
             MessageAttributes={"ExtendedPayloadSize": {"DataType": "Number", "StringValue": str(len(json.dumps(big)))}},
         )
-        received = await drain_queue(client, queue)
+        received = await drain(queue)
         assert [message.json() for message in received] == [big]
         # fanferro writes pointers in the same format.
         result = await queue.send(big)
@@ -148,7 +149,7 @@ async def test_legacy_aws_extended_client_pointers(ministack_endpoint: str, aws:
             ),
             MessageAttributes={"SQSLargePayloadSize": {"DataType": "Number", "StringValue": str(len(json.dumps(big)))}},
         )
-        received = await drain_queue(client, queue)
+        received = await drain(queue)
         assert [(message.json(), message.attributes) for message in received] == [(big, {})]
         with pytest.raises(fanferro.ValidationError, match="reserved for the transport layer"):
             await queue.send({"n": 1}, attributes={"SQSLargePayloadSize": 5})

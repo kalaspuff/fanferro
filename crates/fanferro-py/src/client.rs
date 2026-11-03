@@ -296,6 +296,7 @@ impl PyMemoryBroker {
             dict.set_item("attributes", attributes_to_py(py, &message.attributes)?)?;
             dict.set_item("receive_count", message.receive_count)?;
             dict.set_item("in_flight", message.in_flight)?;
+            dict.set_item("delayed", message.delayed)?;
             dict.set_item("group_id", message.group_id)?;
             list.append(dict)?;
         }

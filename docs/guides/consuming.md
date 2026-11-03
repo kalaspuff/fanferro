@@ -261,6 +261,7 @@ await consumer.run()                  # start, wait for a stop request or signal
 async with consumer: ...              # start on enter, stop on exit
 await consumer.start(); ...; await consumer.stop(drain_timeout=10)
 await consumer.run_until_idle()       # tests and batch jobs: stop once the queue is empty
+await consumer.run_until_idle(pending=True)  # ...and nothing waits for a retry or a delay either
 await client.run()                    # all consumers of the client, with signal handling
 ```
 

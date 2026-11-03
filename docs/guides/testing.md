@@ -114,8 +114,7 @@ SNS fan-out with filter policies (none to queues encrypted with `alias/aws/sqs`,
 use), raw and wrapped delivery, X-Ray headers of active topics, presigned URLs. Filter policies support what SNS supports (exact values,
 `prefix`, `suffix`, `equals-ignore-case`, `wildcard`, `cidr`, `anything-but`, `numeric`, `exists`,
 `$or`, nested keys of `MessageBody` policies), with its limits, and a policy SNS would refuse fails
-when it is set. Share one `MemoryBroker` between clients with `memory_client(broker=broker)`;
-inspect queues with `broker.queue_messages(url)`.
+when it is set. Share one `MemoryBroker` between clients with `memory_client(broker=broker)`.
 
 A long poll that a stopping consumer aborts ends with the connection on the broker. SQS goes on
 serving it until its wait time ends, and a message sent meanwhile goes to it and stays invisible for
@@ -123,6 +122,75 @@ its visibility timeout. `MemoryBroker(orphaned_polls=True)` models that, to test
 deployments as they behave on SQS; it is off by default, so that a test that stops a consumer and
 goes on at once does not wait for visibility timeouts. fanferro's consumers keep the messages they
 release while stopping out of such polls, on SQS and on such a broker.
+
+### Waiting for retries and delays
+
+`run_until_idle()` stops once the queue has no visible messages. A message that failed and waits
+for its retry is in flight, not visible, so a handler that fails once returns from it with the
+message still waiting. `run_until_idle(pending=True)` waits until nothing is in flight or delayed
+either (bounded by `timeout`), so that retry and dead-letter flows run to their end without a
+`Backoff.immediate()` in the test:
+
+```python
+async def test_retries_until_the_service_is_back() -> None:
+    ...
+    async with client:
+        await orders.publish(OrderPlaced(order_id=1))
+        await consumer.run_until_idle(pending=True, timeout=30)
+    assert attempts == [1, 2, 3]
+```
+
+It reads the queue's approximate counts: exact on the in-memory broker, delayed by up to a minute on
+SQS. Messages another consumer holds count as in flight too.
+
+### Helpers
+
+`fanferro.testing` has the helpers fanferro's own test suite uses. They work on any backend unless
+noted.
+
+* `await wait_for(condition, timeout=15)` waits until `condition()` is true (a function, or an
+  `async def`), checking every 50 ms; `TimeoutError` after `timeout`.
+* `await consume_until(consumer, condition, timeout=20)` starts the consumer, waits for the
+  condition and stops it, also when the wait times out: for flows that end with something
+  happening rather than with an empty queue.
+* `await drain(queue)` receives everything a queue holds, acks it and returns the messages, with
+  their bodies encoded (`message.json()`, `message.data`), `message.type`, `message.attributes` and
+  `message.dead_letter_info`. `pending=True` waits for in-flight and delayed messages too.
+* `record_published(client)` records every message the client publishes, as a publish middleware
+  (the innermost: it sees what other middleware changed). Each `PublishedMessage` has the
+  `destination`, `kind`, `body` (not encoded), `type`, `id`, `attributes`, `headers`, `group_id`,
+  `deduplication_id`, `delay` and the encoded `prepared` message. Messages are recorded when they
+  are encoded for sending, by `publish`, `send`, `publish_batch`, `send_batch` and `prepare` (a
+  prepared message when it is prepared); one whose send then fails stays recorded.
+* `await peek(queue)` lists what a queue of the in-memory broker holds, in send order, without
+  receiving anything: in-flight and delayed messages too, as `QueuedMessage`s with the SQS `body`,
+  `attributes`, `type`, `receive_count`, `in_flight`, `delayed`, `group_id` and
+  `dead_letter_info`. `Queue.peek()`, which works on SQS, receives the messages it shows.
+
+```python
+from fanferro.testing import drain, memory_client, peek, record_published
+
+async def test_invalid_payment_is_reported_and_dead_lettered() -> None:
+    client = memory_client()
+    payments = client.queue("payments", dead_letter=fanferro.DeadLetterQueue("payments-dlq"))
+    alerts = client.topic("alerts")
+
+    async def capture(payment: PaymentCaptured) -> None:
+        if payment.amount < 0:
+            await alerts.publish(PaymentFailed(payment.payment_id))
+            raise ValueError("negative amount")
+
+    consumer = client.consumer(payments, capture, retry=fanferro.RetryPolicy(max_attempts=2))
+    async with client:
+        with record_published(client) as published:
+            await payments.send(PaymentCaptured("p-1", amount=-1))
+            await consumer.run_until_idle(pending=True)
+        assert published.bodies(alerts) == [PaymentFailed("p-1")] * 2   # once per attempt
+        assert await peek(payments) == []
+        [dead] = await drain(payments.dead_letter_queue)
+    assert dead.json() == {"payment_id": "p-1", "amount": -1}
+    assert dead.dead_letter_info.reason == "retries exhausted"
+```
 
 ## Lambda functions
 

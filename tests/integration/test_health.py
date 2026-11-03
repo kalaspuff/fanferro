@@ -11,8 +11,8 @@ import pytest
 
 import fanferro
 from fanferro import testing
+from fanferro.testing import wait_for
 from tests.conftest import ClientFactory
-from tests.helpers import wait_for
 
 
 async def test_a_running_consumer_is_healthy_and_ready(client_factory: ClientFactory, name: Any) -> None:

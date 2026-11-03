@@ -19,8 +19,8 @@ from pydantic import BaseModel
 import fanferro
 from fanferro.envelopes import Raw, default_envelopes
 from fanferro.envelopes.compat import MetadataProtobuf
+from fanferro.testing import consume_until, drain
 from tests.conftest import ClientFactory
-from tests.helpers import consume_until, drain_queue
 
 if TYPE_CHECKING:
     from fanferro.middleware import HandlerNext
@@ -256,7 +256,7 @@ async def test_correlation_ids_follow_handlers(client_factory: ClientFactory, na
     async with client:
         sent = await orders.send(OrderCreated(order_id=4, total=1.0), headers={"correlationid": "c-chain"})
         await consume_until(consumer, lambda: consumer.stats().processed == 1)
-        [invoice] = await drain_queue(client, invoices)
+        [invoice] = await drain(invoices)
 
     assert invoice.type == "invoice-created"
     assert invoice.json() == {"invoice_id": 4}

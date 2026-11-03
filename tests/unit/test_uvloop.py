@@ -19,7 +19,7 @@ import pytest
 
 import fanferro
 from fanferro import testing
-from tests.helpers import wait_for
+from fanferro.testing import wait_for
 from tests.unit.test_awaitables import roundtrip
 
 uvloop = pytest.importorskip("uvloop", reason="uvloop is not installed (it does not support Windows)")

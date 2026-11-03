@@ -17,8 +17,7 @@ from fanferro.__main__ import main
 from fanferro.consumer import Duplicate, _Postpone
 from fanferro.idempotency import Claim, InMemoryIdempotencyStore, idempotent
 from fanferro.outbox import InMemoryOutbox, OutboxRecord, OutboxRelay
-from fanferro.testing import build_message
-from tests.helpers import drain_queue, wait_for
+from fanferro.testing import build_message, drain, wait_for
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -346,7 +345,7 @@ async def test_an_outbox_store_error_on_a_failed_record_does_not_end_the_round(m
         assert [(r.id, r.attempts) for r in outbox.pending] == [(lost, 0)]
         assert await relay.run_once() == 0
         assert [(r.id, r.attempts) for r in outbox.pending] == [(lost, 1)]
-        assert len(await drain_queue(memory_client, worker)) == 2
+        assert len(await drain(worker)) == 2
 
 
 async def test_an_outbox_store_error_marking_published_records_releases_them(memory_client: fanferro.Client) -> None:
@@ -423,7 +422,7 @@ async def test_a_cancelled_outbox_round_marks_what_it_published(
         assert [(r.id, r.attempts) for r in outbox.pending] == [(i, 0) for i in held]
         assert await relay.run_once() == 2
         assert outbox.published == [*sent, *held]
-        assert len(await drain_queue(memory_client, worker)) == 2
+        assert len(await drain(worker)) == 2
 
 
 async def test_an_outbox_round_falls_back_to_mark_failed_without_release(
@@ -500,7 +499,7 @@ async def test_several_outbox_relays_keep_each_fifo_group_in_order(memory_client
 
         await asyncio.gather(*(drive(relay) for relay in relays))
         assert outbox.pending == []
-        received = [message.json() for message in await drain_queue(memory_client, fifo)]
+        received = [message.json() for message in await drain(fifo)]
     for group in ("a", "b", "c"):
         assert [body["n"] for body in received if body["group"] == group] == list(range(6))
 
@@ -550,7 +549,7 @@ async def test_an_outbox_round_publishes_fifo_groups_at_once(
         assert overlap.peak == 4, "the groups were not published at once"
         assert [r.id for r in outbox.pending] == records["c"][1:], "the failure held back only its own group"
         assert [r.attempts for r in outbox.pending] == [1, 1]
-        received = [message.json() for message in await drain_queue(memory_client, fifo)]
+        received = [message.json() for message in await drain(fifo)]
     for group in ("a", "b", "d"):
         assert [body["n"] for body in received if body["group"] == group] == [0, 1, 2]
     assert [body["n"] for body in received if body["group"] == "c"] == [0]
@@ -573,7 +572,7 @@ async def test_prepared_batches_send_their_destinations_at_once(
         assert overlap.peak == 3
         assert [result.message_id for result in batch.successful] == [m.message_id for m in messages]
         for queue in queues:
-            assert len(await drain_queue(memory_client, queue)) == 3
+            assert len(await drain(queue)) == 3
 
 
 async def test_prepared_batches_report_events(memory_client: fanferro.Client) -> None:
