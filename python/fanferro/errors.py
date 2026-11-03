@@ -32,6 +32,7 @@ Hierarchy::
     ├── BatchPublishError
     ├── HandlerTimeoutError
     ├── ConsumerStateError
+    ├── BatchItemFailedError
     └── BatchItemFailuresError
 """
 
@@ -67,6 +68,7 @@ if TYPE_CHECKING:
 __all__ = [
     "AccessDeniedError",
     "AwsError",
+    "BatchItemFailedError",
     "BatchItemFailuresError",
     "BatchPublishError",
     "CodecError",
@@ -159,6 +161,16 @@ class ConsumerStateError(FanferroError):
     """An operation is not valid in the consumer's current state (e.g. starting it twice)."""
 
     retryable = False
+
+
+class BatchItemFailedError(FanferroError):
+    """A batch handler reported the message as failed without an error of its own.
+
+    The error of the messages a :class:`~fanferro.BatchResult` lists without one: the retry policy
+    applies to it like to any handler error (it is retried by default).
+    """
+
+    retryable = True
 
 
 class BatchItemFailuresError(FanferroError):

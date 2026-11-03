@@ -111,6 +111,54 @@ FIFO group's next message waits for it as usual), reports a failure as `message.
 emits a `config.warning` naming the call. Await it anyway, to keep the handler's slot until the
 settlement is confirmed and to see its errors.
 
+## Batch handlers
+
+Work that is cheaper in bulk (inserting rows, indexing documents, calling an API that takes
+batches) can get several messages per handler call. A route with `batch=fanferro.Batch(...)`
+collects the messages it matches and calls its handler with a list of them (added after fanferro
+0.10.0):
+
+```python
+@consumer.route(OrderPlaced, batch=fanferro.Batch(max_size=100, max_wait=0.5))
+async def store(messages: list[fanferro.Message[OrderPlaced]]) -> fanferro.BatchResult | None:
+    rejected = await db.insert_orders([message.body for message in messages])
+    return fanferro.BatchResult({messages[i]: fanferro.Reject(reason) for i, reason in rejected})
+```
+
+- A batch is handed to the handler once it holds `max_size` messages (1-10,000; default 10), or
+  `max_wait` seconds (0-900; default 1) after its first message joined it. The handler's first
+  parameter is `list[Message[T]]` (or `Sequence[...]`) for messages, or `list[T]` for bodies.
+- Returning `None` acks every message of the batch. Raising applies the retry policy to each
+  message, as if each one's handler had raised (a `fanferro.Reject` dead-letters them all).
+- A `fanferro.BatchResult` fails only the messages it lists, each with its own error (the retry
+  and dead-letter policies, and handler actions such as `Reject` or `Retry(delay=...)`, apply),
+  and acks the others; a message listed without an error fails with `BatchItemFailedError`, which
+  is retried. It names messages by themselves or by their position in the batch (`result.fail(3)`),
+  the only way for a handler that receives bodies. Messages the handler settled itself
+  (`await message.dead_letter(...)`) are left as they are.
+- Each message goes through routing, decoding and consume middleware on its own and joins its
+  batch at the end of its middleware chain: idempotency middleware skips duplicates before they
+  join, and records each message once its batch succeeded. Messages of other routes are not
+  batched.
+- Collected messages keep their in-flight permits and heartbeats until they are settled.
+  `concurrency` counts handler calls: a batch call takes one slot, and messages waiting in a
+  batch take none. Without an explicit `prefetch`, a consumer prefetches at least the largest
+  `max_size` of its batch routes, so that a full batch fits in flight; an explicit `prefetch` must
+  leave room for it (`concurrency + prefetch >= max_size`), or `start()` raises
+  `ConfigurationError`.
+- `handler_timeout` applies to the batch call (each message then fails with
+  `HandlerTimeoutError`).
+- FIFO queues: a group's next message starts once the previous one is settled, so a batch holds at
+  most one message of each group, the next one of every group that has one ready. A queue with
+  few groups gets small batches, each after `max_wait`; keep `max_wait` short there.
+- Stopping hands the batch being collected back to the queue unprocessed, like prefetched
+  messages (`ShutdownPolicy(release_prefetched=False)` hands it to the handler at once instead).
+  Messages handed over by AWS Lambda (`fanferro.aws_lambda`) and `fanferro.testing.dispatch_batch`
+  form their batches as soon as all of them joined, without waiting for `max_wait`.
+- The handler runs in the context the consumer started in, not in a message's: its
+  OpenTelemetry spans have no message's `process` span as parent. Each message's `process` span
+  covers its wait in the batch, and so does the `duration` of its `message.processed` event.
+
 ## Throughput and flow control
 
 | Option | Default | Meaning |
@@ -227,7 +275,7 @@ Shutdown follows `ShutdownPolicy`:
    aborts receiving and releases them, so that a large payload cannot outlast a container's grace
    period;
 2. prefetched messages are released at once (`release_prefetched`), also those that wait for a
-   handler slot (with `release_prefetched=False` they are processed during the drain, and those
+   handler slot and those collected in a batch that was not handed to its handler yet (with `release_prefetched=False` they are processed during the drain, and those
    not dispatched yet when `drain_timeout` has passed count as unfinished); in-flight handlers get `drain_timeout` seconds (`None` = forever) with
    `consumer.draining` progress events every `progress_interval`;
 3. remaining handlers are cancelled and get `cancel_timeout` seconds to unwind;

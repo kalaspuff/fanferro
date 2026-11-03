@@ -24,6 +24,9 @@ in code: `await dlq.peek()`, `await dlq.redrive()`).
 4. Every queue gets `dead_letter=fanferro.DeadLetterQueue(...)`; `max_receive_count` > `RetryPolicy.max_attempts`.
 5. Handlers are `async def`, idempotent (at-least-once delivery; key on `message.id`), and non-blocking.
 6. Return to ack; raise to retry; `fanferro.Reject` = dead-letter now; `fanferro.Discard` = drop.
+   Bulk work (inserts, indexing, batch APIs): a batch route, `@consumer.route(T, batch=fanferro.Batch(max_size=100, max_wait=0.5))`
+   on `async def h(messages: list[fanferro.Message[T]])`; return `fanferro.BatchResult(failed=...)` to fail
+   only some messages, never buffer messages yourself with `auto_ack=False`.
 7. Business events from DB writes go through the transactional outbox (`topic.prepare()` + `fanferro.outbox.OutboxRelay`).
 8. ≤ 10 message attributes (fanferro uses 1-2, +1-2 for tracing); `fanferro.*` names are reserved.
    Messages are raw JSON bodies by default; opt into CloudEvents with
@@ -43,7 +46,7 @@ in code: `await dlq.peek()`, `await dlq.redrive()`).
    `testing.wait_for(condition)`, `testing.record_published(client)` (what was published) and
    `testing.peek(queue)` (in-memory queue contents, nothing received); handler unit tests with
    `fanferro.testing.build_message(obj, attempt=..., topic=...)`, routers and outcomes with
-   `await fanferro.testing.dispatch(router, obj)`; end-to-end against MiniStack (`endpoint_url=http://localhost:4566`).
+   `await fanferro.testing.dispatch(router, obj)` (`dispatch_batch(router, [...])` for batch routes); end-to-end against MiniStack (`endpoint_url=http://localhost:4566`).
    Lambda functions: `fanferro.testing.invoke_sqs_handler(handler, queue)`.
 10. Environments sharing an AWS account: `fanferro.Client(queue_prefix=f"{env}-", topic_prefix=f"{env}-")`,
     never hand-built `f"{env}-..."` names. Write names without the prefix everywhere (strings passed to

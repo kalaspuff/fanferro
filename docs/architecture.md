@@ -65,6 +65,8 @@ Rust    pollers: acquire in-flight permits (+ rate limiter) ─▶ ReceiveMessag
 Python  dispatcher: next_batch() ─▶ per-message task (FIFO: sequenced per group)
         envelope unwrap (custom envelopes, in the configured order) ─▶ Message ─▶ attempts check
         router.resolve ─▶ codec decode into the route's type ─▶ middleware ─▶ handler
+          (batch route: ─▶ middleware ─▶ join the route's batch ─▶ one handler call per batch,
+           in a task of its own; each message's task waits for its outcome)
         success → ack (batched delete)   failure → RetryPolicy/DeadLetterPolicy
 Rust    settle loop batches DeleteMessage / ChangeMessageVisibility (ten at once, also while
         earlier calls are in flight; fewer after the linger, or at once when every handler awaits a
@@ -162,6 +164,11 @@ These are relied upon across layers; tests cover each of them.
   engine deletes the message in the background (`message.ack_failed` events report failures).
   A FIFO group's task awaits them (`strict_ordering`): its next message starts once the delete
   is confirmed, and a settlement that failed hands the group's later messages back.
+  A message of a batch route gives its permit back when it joins its route's batch
+  (`consumer._Batcher`); the batch's task takes one permit for the handler call and hands each
+  message's task its outcome, which settles the message as above. Its lease (in-flight permit,
+  heartbeats) is held until then, so `concurrency + prefetch` bounds the messages being
+  collected too.
 * Events flow Rust → Python through a bounded channel drained by an event pump task (started
   while a consumer runs or the client is entered) or synchronously after operations. The pump
   is stopped by waking its pending wait, not by cancelling it, so events that wait already took
