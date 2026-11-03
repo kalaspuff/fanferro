@@ -760,3 +760,194 @@ impl SnsApi for ThrottledSubscriptionLookups {
         self.inner.confirm_subscription(topic_arn, token).await
     }
 }
+
+/// SQS whose `DeleteMessageBatch` and `SendMessage` calls take `delay` each (a slow link, or the
+/// SDK retrying), and that counts them. By default a call reaches `inner` after the delay; with
+/// [`SlowSettlements::answering_late`] it applies at once and only its answer is late.
+#[derive(Debug)]
+pub(crate) struct SlowSettlements {
+    inner: Arc<dyn SqsApi>,
+    delay: Duration,
+    answer_late: bool,
+    /// `DeleteMessageBatch` calls.
+    pub(crate) deletes: AtomicUsize,
+    /// `SendMessage` calls.
+    pub(crate) sends: AtomicUsize,
+}
+
+impl SlowSettlements {
+    pub(crate) fn new(inner: Arc<dyn SqsApi>, delay: Duration) -> Self {
+        Self { inner, delay, answer_late: false, deletes: AtomicUsize::new(0), sends: AtomicUsize::new(0) }
+    }
+
+    /// Applies the calls at once and answers them after the delay.
+    pub(crate) fn answering_late(mut self) -> Self {
+        self.answer_late = true;
+        self
+    }
+
+    async fn slow<T>(&self, call: impl Future<Output = T>) -> T {
+        if self.answer_late {
+            let result = call.await;
+            tokio::time::sleep(self.delay).await;
+            result
+        } else {
+            tokio::time::sleep(self.delay).await;
+            call.await
+        }
+    }
+}
+
+#[async_trait]
+impl SqsApi for SlowSettlements {
+    async fn send_message(&self, queue_url: &str, request: SendRequest) -> Result<SendOutput> {
+        self.sends.fetch_add(1, Ordering::SeqCst);
+        self.slow(self.inner.send_message(queue_url, request)).await
+    }
+    async fn send_message_batch(&self, queue_url: &str, entries: Vec<SendRequest>) -> Result<BatchResult<SendOutput>> {
+        self.inner.send_message_batch(queue_url, entries).await
+    }
+    async fn receive_messages(&self, request: ReceiveRequest) -> Result<Vec<ReceivedMessage>> {
+        self.inner.receive_messages(request).await
+    }
+    async fn delete_message_batch(&self, queue_url: &str, receipt_handles: Vec<String>) -> Result<BatchResult<()>> {
+        self.deletes.fetch_add(1, Ordering::SeqCst);
+        self.slow(self.inner.delete_message_batch(queue_url, receipt_handles)).await
+    }
+    async fn change_visibility_batch(
+        &self,
+        queue_url: &str,
+        entries: Vec<VisibilityChange>,
+    ) -> Result<BatchResult<()>> {
+        self.inner.change_visibility_batch(queue_url, entries).await
+    }
+    async fn get_queue_url(&self, name: &str, owner_account_id: Option<&str>) -> Result<String> {
+        self.inner.get_queue_url(name, owner_account_id).await
+    }
+    async fn get_queue_attributes(&self, queue_url: &str) -> Result<StringMap> {
+        self.inner.get_queue_attributes(queue_url).await
+    }
+    async fn create_queue(&self, name: &str, attributes: &StringMap, tags: &StringMap) -> Result<String> {
+        self.inner.create_queue(name, attributes, tags).await
+    }
+    async fn set_queue_attributes(&self, queue_url: &str, attributes: &StringMap) -> Result<()> {
+        self.inner.set_queue_attributes(queue_url, attributes).await
+    }
+    async fn list_queue_tags(&self, queue_url: &str) -> Result<StringMap> {
+        self.inner.list_queue_tags(queue_url).await
+    }
+    async fn tag_queue(&self, queue_url: &str, tags: &StringMap) -> Result<()> {
+        self.inner.tag_queue(queue_url, tags).await
+    }
+    async fn delete_queue(&self, queue_url: &str) -> Result<()> {
+        self.inner.delete_queue(queue_url).await
+    }
+    async fn purge_queue(&self, queue_url: &str) -> Result<()> {
+        self.inner.purge_queue(queue_url).await
+    }
+}
+
+/// How a [`FailingDeletes`] call fails.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeleteFailure {
+    /// The whole call is throttled (retryable).
+    Throttled,
+    /// The whole call is refused (access denied: not retryable).
+    Denied,
+    /// Every entry fails with a retryable `InternalError`.
+    Internal,
+    /// Every entry fails with `ReceiptHandleIsInvalid` (not retryable).
+    InvalidReceipt,
+}
+
+/// SQS whose `DeleteMessageBatch` calls fail as listed, one failure per call in order (the calls
+/// after them reach `inner`), and that counts the calls and the entries they carried.
+#[derive(Debug)]
+pub(crate) struct FailingDeletes {
+    inner: Arc<dyn SqsApi>,
+    failures: parking_lot::Mutex<std::collections::VecDeque<DeleteFailure>>,
+    /// The number of entries of each `DeleteMessageBatch` call, in order.
+    pub(crate) calls: parking_lot::Mutex<Vec<usize>>,
+}
+
+impl FailingDeletes {
+    pub(crate) fn new(inner: Arc<dyn SqsApi>, failures: impl IntoIterator<Item = DeleteFailure>) -> Self {
+        Self {
+            inner,
+            failures: parking_lot::Mutex::new(failures.into_iter().collect()),
+            calls: parking_lot::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl SqsApi for FailingDeletes {
+    async fn send_message(&self, queue_url: &str, request: SendRequest) -> Result<SendOutput> {
+        self.inner.send_message(queue_url, request).await
+    }
+    async fn send_message_batch(&self, queue_url: &str, entries: Vec<SendRequest>) -> Result<BatchResult<SendOutput>> {
+        self.inner.send_message_batch(queue_url, entries).await
+    }
+    async fn receive_messages(&self, request: ReceiveRequest) -> Result<Vec<ReceivedMessage>> {
+        self.inner.receive_messages(request).await
+    }
+    async fn delete_message_batch(&self, queue_url: &str, receipt_handles: Vec<String>) -> Result<BatchResult<()>> {
+        self.calls.lock().push(receipt_handles.len());
+        let failure = self.failures.lock().pop_front();
+        let entries = |code: &str, message: &str, sender_fault: bool| -> BatchResult<()> {
+            receipt_handles
+                .iter()
+                .map(|_| Err(BatchEntryError { code: code.into(), message: Some(message.into()), sender_fault }))
+                .collect()
+        };
+        match failure {
+            None => self.inner.delete_message_batch(queue_url, receipt_handles).await,
+            Some(DeleteFailure::Throttled) => {
+                Err(AwsError::new("sqs", "DeleteMessageBatch", AwsErrorKind::Throttling, "Rate exceeded").into())
+            }
+            Some(DeleteFailure::Denied) => Err(AwsError::new(
+                "sqs",
+                "DeleteMessageBatch",
+                AwsErrorKind::AccessDenied,
+                "User is not authorized to perform: sqs:deletemessage",
+            )
+            .with_code("AccessDenied")
+            .into()),
+            Some(DeleteFailure::Internal) => Ok(entries("InternalError", "internal error", false)),
+            Some(DeleteFailure::InvalidReceipt) => {
+                Ok(entries("ReceiptHandleIsInvalid", "The receipt handle has expired", true))
+            }
+        }
+    }
+    async fn change_visibility_batch(
+        &self,
+        queue_url: &str,
+        entries: Vec<VisibilityChange>,
+    ) -> Result<BatchResult<()>> {
+        self.inner.change_visibility_batch(queue_url, entries).await
+    }
+    async fn get_queue_url(&self, name: &str, owner_account_id: Option<&str>) -> Result<String> {
+        self.inner.get_queue_url(name, owner_account_id).await
+    }
+    async fn get_queue_attributes(&self, queue_url: &str) -> Result<StringMap> {
+        self.inner.get_queue_attributes(queue_url).await
+    }
+    async fn create_queue(&self, name: &str, attributes: &StringMap, tags: &StringMap) -> Result<String> {
+        self.inner.create_queue(name, attributes, tags).await
+    }
+    async fn set_queue_attributes(&self, queue_url: &str, attributes: &StringMap) -> Result<()> {
+        self.inner.set_queue_attributes(queue_url, attributes).await
+    }
+    async fn list_queue_tags(&self, queue_url: &str) -> Result<StringMap> {
+        self.inner.list_queue_tags(queue_url).await
+    }
+    async fn tag_queue(&self, queue_url: &str, tags: &StringMap) -> Result<()> {
+        self.inner.tag_queue(queue_url, tags).await
+    }
+    async fn delete_queue(&self, queue_url: &str) -> Result<()> {
+        self.inner.delete_queue(queue_url).await
+    }
+    async fn purge_queue(&self, queue_url: &str) -> Result<()> {
+        self.inner.purge_queue(queue_url).await
+    }
+}

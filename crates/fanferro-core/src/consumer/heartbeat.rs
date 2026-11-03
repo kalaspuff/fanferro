@@ -6,6 +6,10 @@
 //! whose extension failed is retried after a delay that grows with its consecutive failures when
 //! retrying soon cannot help (throttling, access denied, a deleted queue), and each round reports
 //! its failures in one `lease.extension_failed` event.
+//!
+//! Leases are extended while they are buffered or processed, and while their settlement deletes
+//! the message (an ack, a dead-letter forward or a requeue: see `LeaseEntry::deleting`), not
+//! while a retry or a release changes the visibility itself.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::EngineInner;
 use super::config::MAX_VISIBILITY;
-use super::lease::{LeaseStatus, is_lost};
+use super::lease::{LeaseEntry, LeaseStatus, is_lost};
 use crate::backend::{ReceivedMessage, VisibilityChange};
 use crate::error::{AwsErrorKind, Error};
 use crate::events::{Event, EventKind};
@@ -60,6 +64,16 @@ pub(super) fn retry_delay(error: &Error, failures: u32, heartbeat_interval: Dura
     }
     let doublings = failures.saturating_sub(1).min(MAX_BACKOFF_DOUBLINGS);
     (RETRY_SOON * 2u32.pow(doublings)).min(heartbeat_interval.max(RETRY_SOON))
+}
+
+/// Whether heartbeats extend a lease: until its settlement starts, or until it completed when it
+/// deletes the message.
+fn is_protected(lease: &LeaseEntry) -> bool {
+    match lease.status {
+        LeaseStatus::Buffered | LeaseStatus::Active => true,
+        LeaseStatus::Settling => lease.deleting,
+        LeaseStatus::Lost | LeaseStatus::Expired | LeaseStatus::Settled => false,
+    }
 }
 
 /// What a round of extension calls (one tick) reports when its calls ended.
@@ -135,15 +149,17 @@ fn start_round(inner: &Arc<EngineInner>) -> Option<impl Future<Output = RoundRep
     {
         let mut leases = inner.leases.lock();
         for (id, lease) in leases.iter_mut() {
-            if !matches!(lease.status, LeaseStatus::Buffered | LeaseStatus::Active)
-                || lease.extending.is_some()
-                || lease.next_heartbeat > now
-            {
+            if !is_protected(lease) || lease.extending.is_some() || lease.next_heartbeat > now {
                 continue;
             }
             let hard_cap =
                 (lease.received_at + MAX_VISIBILITY).saturating_duration_since(now).saturating_sub(SAFETY_MARGIN);
             let remaining = lease.max_until.saturating_duration_since(now).min(hard_cap);
+            if remaining.is_zero() && lease.status == LeaseStatus::Settling {
+                // Its settlement started before: the settlement reports what became of it.
+                lease.deleting = false;
+                continue;
+            }
             if remaining.is_zero() {
                 lease.status = LeaseStatus::Expired;
                 expired.push(lease.message.clone());
@@ -266,7 +282,12 @@ async fn extend_chunk(inner: &Arc<EngineInner>, call: CancellationToken, chunk: 
                             )
                             .with_code(entry.code.clone()),
                         );
-                        if is_lost(&error) && matches!(lease.status, LeaseStatus::Buffered | LeaseStatus::Active) {
+                        if is_lost(&error) && lease.status == LeaseStatus::Settling {
+                            // Most likely the delete reached SQS before the extension (an
+                            // extension of a deleted message fails so); otherwise the delete
+                            // fails too and reports it.
+                            lease.deleting = false;
+                        } else if is_lost(&error) && is_protected(lease) {
                             lease.status = LeaseStatus::Lost;
                             inner.metrics.leases_lost.inc();
                             inner.client.events().emit(EventKind::LeaseLost, || {
